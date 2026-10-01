@@ -5,7 +5,7 @@ import { CheckCircle2, ChevronLeft, ChevronRight, History, MessageSquareReply, S
 import { api, qs } from '../lib/api';
 import { STATUS_LABEL, addDays, fmtDate, fmtDateTime, fmtTime, hm } from '../lib/format';
 import { useMe } from '../lib/session';
-import { AssessmentBadge, Badge, Button, Callout, Card, ErrorState, Field, IconButton, Input, PageHeader, Segmented, Skeleton, StatusDot, Textarea, useToast } from '../components/ui';
+import { AssessmentBadge, Badge, Button, Callout, Card, Field, IconButton, Input, PageError, PageHeader, Segmented, Skeleton, StatusDot, Textarea, useToast } from '../components/ui';
 import { AllocationBar, EntryModal, EntryRow } from '../components/time';
 import { localDayBoundsIso } from './util';
 
@@ -48,7 +48,7 @@ export default function Recap() {
   const respond = useMutation({ mutationFn: (b: any) => api.post('/api/manager-reviews', b), onSuccess: () => { qc.invalidateQueries(); toast({ tone: 'good', text: 'Response sent' }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   const nav = (n: number) => { const d = addDays(date, n); if (d <= me.today) setSp({ date: d }); };
   if (q.isLoading) return <Skeleton className="h-96" />;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return <PageError title="Daily recap" error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data; const day = d.report.days[0]; const t = day.time; const review = d.review;
   const submitted = review && review.status !== 'draft';
   return (

@@ -185,7 +185,8 @@ test('list shows an error with a working retry', async ({ page }) => {
 test('clients never see objectives', async ({ page }) => {
   await signIn(page, 'lena', 'globex.example');
   await page.goto('/objectives');
-  await expect(page.getByText('Objectives are for staff')).toBeVisible();
+  await expect(page).toHaveURL(/\/portal$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Your projects' })).toBeVisible();
   expect((await api(page, 'GET', '/api/objectives/overview')).status).toBe(403);
   await axeClean(page);
 });

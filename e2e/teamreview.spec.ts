@@ -192,11 +192,12 @@ test('phone and dark mode: manager, employee and client views pass axe without h
     await noHScroll(page);
     await noSeriousAxe(page);
 
-    // Client accounts get a plain explanation instead of a failing request with a useless Retry.
+    // Client accounts are sent to their portal instead of a failing request with a useless Retry.
     await page.context().clearCookies();
     await signIn(page, 'lena', 'globex.example');
     await page.goto('/team-review');
-    await expect(page.getByText('Weekly reviews are for staff accounts')).toBeVisible();
+    await expect(page).toHaveURL(/\/portal$/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Your projects' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
     await noHScroll(page);
     await noSeriousAxe(page);

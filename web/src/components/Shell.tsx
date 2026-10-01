@@ -11,13 +11,16 @@ import { useMe, useRoles } from '../lib/session';
 import { QuickCapture } from './QuickCapture';
 import { PwaStatus } from './ext/PwaStatus';
 import { clearOfflineData, confirmSignOut, usePwa } from '../pwa';
-import { Avatar, IconButton, Kbd, StatusDot, cx } from './ui';
+import { Avatar, IconButton, Kbd, StatusDot, cx, useEscape } from './ui';
 
 type NavItem = { to: string; label: string; icon: ReactNode; show: boolean };
+/** One name for the routine view everywhere (nav and command palette): company-wide for the main admin, team-scoped for managers. */
+const routineLabel = (r: { routineAdmin: boolean }) => (r.routineAdmin ? 'Daily routine' : 'Team routine');
 
 export function Shell() {
   const me = useMe(); const r = useRoles(); const nav = useNavigate(); const loc = useLocation(); const qc = useQueryClient();
   const [capture, setCapture] = useState(false); const [palette, setPalette] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [bell, setBell] = useState(false);
+  const bellRef = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useState<string>(() => { try { return localStorage.getItem('theme') ?? ''; } catch { return ''; } });
   useEffect(() => {
     if (theme) document.documentElement.setAttribute('data-theme', theme); else document.documentElement.removeAttribute('data-theme');
@@ -44,15 +47,15 @@ export function Shell() {
       { to: '/templates', label: 'Templates', icon: <LayoutTemplate className="size-4" />, show: true },
     ] },
     { group: 'Oversight', items: [
-      { to: '/admin/routine', label: r.routineAdmin ? 'Daily Routine' : 'Team routine', icon: <LayoutDashboard className="size-4" />, show: r.canReview },
+      { to: '/admin/routine', label: routineLabel(r), icon: <LayoutDashboard className="size-4" />, show: r.canReview },
       { to: '/capacity', label: 'Team capacity', icon: <Users className="size-4" />, show: r.canReview || r.leadership },
       { to: '/team-review', label: r.canReview ? 'Weekly team review' : 'My weekly reviews', icon: <CalendarRange className="size-4" />, show: true },
       { to: '/blockers', label: 'Blocker escalation', icon: <ShieldCheck className="size-4" />, show: r.canReview || r.sysAdmin },
       { to: '/insights', label: 'Insights', icon: <LineChart className="size-4" />, show: r.canReview || r.leadership },
       { to: '/leadership', label: 'Leadership', icon: <Gauge className="size-4" />, show: r.leadership || r.routineAdmin },
       { to: '/objectives', label: 'Objectives', icon: <Target className="size-4" />, show: true },
-      { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer || r.leadership },
-      { to: '/client-updates', label: 'Client updates', icon: <Send className="size-4" />, show: r.leadership || r.sysAdmin || r.manager },
+      { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer || r.leadership || me.user.ownsProjects },
+      { to: '/client-updates', label: 'Client updates', icon: <Send className="size-4" />, show: r.leadership || r.sysAdmin || me.user.ownsClientProjects },
     ] },
     { group: 'Setup', items: [
       { to: '/calendar', label: 'Calendar & leave', icon: <CalendarDays className="size-4" />, show: true },
@@ -107,9 +110,9 @@ export function Shell() {
             <IconButton label={`Theme: ${theme || 'system'}`} onClick={() => setTheme(theme === '' ? 'dark' : theme === 'dark' ? 'light' : '')}>
               {theme === 'dark' ? <Moon className="size-4" /> : theme === 'light' ? <Sun className="size-4" /> : <span className="text-[11px] font-semibold">A</span>}</IconButton>
             <div className="relative">
-              <IconButton label={`Notifications${me.unreadNotifications ? ` (${me.unreadNotifications} unread)` : ''}`} onClick={() => setBell((v) => !v)}>
+              <IconButton ref={bellRef} label={`Notifications${me.unreadNotifications ? ` (${me.unreadNotifications} unread)` : ''}`} aria-haspopup="dialog" aria-expanded={bell} onClick={() => setBell((v) => !v)}>
                 <Bell className="size-4" />{me.unreadNotifications > 0 && <span className="absolute right-1 top-1 size-2 rounded-full bg-critical" />}</IconButton>
-              {bell && <Notifications onClose={() => setBell(false)} />}
+              {bell && <Notifications anchor={bellRef} onClose={(refocus) => { setBell(false); if (refocus) bellRef.current?.focus(); }} />}
             </div>
           </div>
         </header>
@@ -172,19 +175,28 @@ function MobileDrawer({ onClose, children }: { onClose: () => void; children: Re
   );
 }
 
-function Notifications({ onClose }: { onClose: () => void }) {
+/** Notifications popover: a non-modal dialog. Focus moves to its heading on open; Escape closes it and returns focus to the bell.
+ *  A press anywhere outside also closes it without swallowing that press (no invisible backdrop over the page). */
+function Notifications({ onClose, anchor }: { onClose: (refocus: boolean) => void; anchor: React.RefObject<HTMLElement | null> }) {
   const qc = useQueryClient(); const nav = useNavigate();
   const q = useQuery({ queryKey: ['notifications'], queryFn: () => api.get('/api/notifications') });
+  const heading = useRef<HTMLHeadingElement>(null); const panel = useRef<HTMLDivElement>(null);
   useEffect(() => { api.post('/api/notifications/read', {}).then(() => qc.invalidateQueries({ queryKey: ['me'] })); }, []);
+  useEffect(() => {
+    heading.current?.focus();
+    const outside = (e: PointerEvent) => { const t = e.target as Node; if (!panel.current?.contains(t) && !anchor.current?.contains(t)) onClose(false); };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, []);
+  useEscape(() => onClose(true), true);
   return (
     <>
-      <div className="fixed inset-0 z-30" onClick={onClose} />
-      <div className="absolute right-0 z-40 mt-2 w-[min(92vw,380px)] rounded-xl bg-surface shadow-2xl ring-1 ring-line">
-        <div className="border-b border-line px-4 py-2.5 text-sm font-semibold">Notifications</div>
+      <div ref={panel} role="dialog" aria-labelledby="notifications-title" className="absolute right-0 z-40 mt-2 w-[min(92vw,380px)] rounded-xl bg-surface shadow-2xl ring-1 ring-line">
+        <h2 id="notifications-title" ref={heading} tabIndex={-1} className="border-b border-line px-4 py-2.5 text-sm font-semibold outline-none">Notifications</h2>
         <ul className="max-h-[60vh] overflow-y-auto">
           {(q.data ?? []).length === 0 && <li className="px-4 py-6 text-center text-[13px] text-ink-3">You're all caught up.</li>}
           {(q.data ?? []).map((n: any) => (
-            <li key={n.id}><button onClick={() => { onClose(); if (n.link) nav(n.link); }} className="w-full px-4 py-2.5 text-left hover:bg-surface-2">
+            <li key={n.id}><button onClick={() => { onClose(false); if (n.link) nav(n.link); }} className="w-full px-4 py-2.5 text-left hover:bg-surface-2">
               <div className="flex items-center gap-2 text-[13px] font-medium">{!n.read_at && <span className="size-1.5 rounded-full bg-accent" />}{n.title}</div>
               {n.body && <div className="mt-0.5 line-clamp-2 text-[12px] text-ink-3">{n.body}</div>}
               <div className="mt-0.5 text-[11px] text-ink-3">{fmtDateTime(n.created_at)}</div>
@@ -211,7 +223,7 @@ function CommandPalette({ open, onClose, onCapture }: { open: boolean; onClose: 
     { label: 'Open task board', run: () => go('/tasks?view=board'), show: !r.customer },
     { label: 'Write today\'s recap', run: () => go('/recap'), show: !r.customer },
     { label: 'My weekly report', run: () => go('/analytics?kind=week'), show: !r.customer },
-    { label: 'Admin daily routine', run: () => go('/admin/routine'), show: r.canReview },
+    { label: routineLabel(r), run: () => go('/admin/routine'), show: r.canReview },
     { label: 'Team capacity', run: () => go('/capacity'), show: r.canReview || r.leadership },
     { label: 'What-if planner', run: () => go('/capacity/what-if'), show: !r.customer },
     { label: 'Leadership delivery', run: () => go('/leadership'), show: r.leadership || r.routineAdmin },

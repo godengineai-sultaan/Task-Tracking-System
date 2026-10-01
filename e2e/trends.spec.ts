@@ -133,7 +133,8 @@ test('manager opens Trends for a team member; employees cannot open someone else
   const status = await p2.evaluate(async (id) => (await fetch(`/api/trends/personal?userId=${id}`, { headers: { 'x-requested-with': 'fetch' } })).status, rahulId);
   expect(status).toBe(403);
   await p2.goto(`/analytics/${rahulId}?view=trends`);
-  await expect(p2.getByRole('alert')).toContainText(/not authorized|do not have access/i);
-  await expect(p2.getByRole('alert').getByRole('button', { name: 'Retry' })).toHaveCount(0);
+  await expect(p2.getByText('Not available for your account')).toBeVisible();
+  await expect(p2.getByText(/not authorized|do not have access/i)).toBeVisible();
+  await expect(p2.getByRole('button', { name: 'Retry' })).toHaveCount(0);
   await ctx.close();
 });

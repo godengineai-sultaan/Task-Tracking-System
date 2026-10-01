@@ -5,7 +5,7 @@ import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { readStored, storeFile } from '../lib/storage.js';
-import { assertContribute, canSeeRestrictedEvidence, canViewPersonRecords, has, isStaff, loadVisibleTask, requireStaff, taskVisibility } from '../services/access.js';
+import { assertContribute, canReassign, canSeeRestrictedEvidence, canViewPersonRecords, has, isStaff, loadVisibleTask, requireStaff, taskVisibility } from '../services/access.js';
 import { CATEGORIES, PRIORITIES, STATUSES, assertProjectUsable, createTask, projectVisibleSql, parseQuickCapture, reassignTask, reopenTask, reviewTask, transition, updateTask } from '../services/tasks.js';
 import { setPlan } from '../services/myday.js';
 import { localToday } from '../services/calendar.js';
@@ -72,6 +72,11 @@ export async function taskRoutes(app: FastifyInstance) {
     if (q.due === 'today') add(`t.due_date = $?`, today);
     if (q.due === 'week') add(`t.due_date between $? and ($?::date + 7)`.replace(/\$\?/g, `$${vals.length + 1}`), today);
     if (q.due === 'none') where.push('t.due_date is null');
+    // can_edit mirrors canContribute (services/access.ts) so the list only offers status changes the server accepts.
+    vals.push(a.id, a.managedUserIds, isStaff(a), has(a, 'routine_admin'));
+    const [me, managed, staff, routineAdmin] = [3, 2, 1, 0].map((k) => `$${vals.length - k}`);
+    const canEdit = `(${staff}::boolean and (${routineAdmin}::boolean or ${me}::uuid in (t.owner_id, t.created_by, t.reviewer_id) or p.owner_id = ${me}::uuid
+      or t.owner_id = any(${managed}::uuid[]) or exists (select 1 from task_collaborators c where c.task_id = t.id and c.user_id = ${me}::uuid)) is true)`;
     vals.push(q.limit);
     // Client accounts get the same customer-safe projection as the task detail and portal (no owners, estimates, tags or internal blocker text).
     if (has(a, 'customer')) return many(db, `select t.id, t.number, t.title, t.status, t.due_date, t.accepted_at, t.project_id, p.name project_name, p.key project_key, t.milestone_id
@@ -84,7 +89,8 @@ export async function taskRoutes(app: FastifyInstance) {
         (select count(*) from checklist_items c where c.task_id = t.id)::int checklist_total,
         (select count(*) from checklist_items c where c.task_id = t.id and c.done)::int checklist_done,
         (select count(*) from task_dependencies d join tasks dt on dt.id = d.depends_on_task_id where d.task_id = t.id and dt.status not in ('done','cancelled'))::int open_dependencies,
-        (select b.reason from blockers b where b.task_id = t.id and b.resolved_at is null order by b.raised_at desc limit 1) blocker_reason
+        (select b.reason from blockers b where b.task_id = t.id and b.resolved_at is null order by b.raised_at desc limit 1) blocker_reason,
+        ${canEdit} can_edit
       from tasks t left join projects p on p.id = t.project_id left join users u on u.id = t.owner_id
       where ${where.join(' and ')}
       order by t.sort_order desc, t.created_at desc limit $${vals.length}`, vals);
@@ -142,7 +148,8 @@ export async function taskRoutes(app: FastifyInstance) {
       : { id: e.id, kind: e.kind, label: 'Confidential reference', restricted: true, created_at: e.created_at, hidden: true });
     const { project_owner_id, project_customer_id, ...task } = t;
     return { task, owner, reviewer, project, milestone, checklist, dependencies: deps, dependents, collaborators, evidence: visibleEvidence, blockers, comments,
-      history, reviews, time: visibleTime, timeTotalMinutes: totals.minutes, timeHiddenEntries: time.length - visibleTime.length, canEdit: await canEditCheck(db, a, t) };
+      history, reviews, time: visibleTime, timeTotalMinutes: totals.minutes, timeHiddenEntries: time.length - visibleTime.length, canEdit: await canEditCheck(db, a, t),
+      canReassign: isStaff(a) && canReassign(a, t) };
   }));
   async function canEditCheck(db: any, a: any, t: any) { try { await assertContribute(db, a, t); return true; } catch { return false; } }
 

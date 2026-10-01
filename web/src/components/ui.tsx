@@ -1,7 +1,7 @@
 import { createContext, forwardRef, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes,
   type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, CheckCircle2, CircleHelp, Info, Loader2, X, XCircle, MinusCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleHelp, Info, Loader2, Lock, X, XCircle, MinusCircle } from 'lucide-react';
 import { ASSESSMENT, STATUS_LABEL, initials } from '../lib/format';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -133,14 +133,34 @@ export function Empty({ icon, title, children, action }: { icon?: ReactNode; tit
     </div>
   );
 }
+/** The signed-in account may not see this. Not an error: there is nothing to retry. */
+export function NoAccess({ title = 'Not available for your account', children }: { title?: string; children?: ReactNode }) {
+  return <div className="rounded-xl bg-surface ring-1 ring-line"><Empty icon={<Lock className="size-6" aria-hidden />} title={title}>{children}</Empty></div>;
+}
+/** Retry can only help when the server or the connection failed (status 0 or 5xx), never for a refusal or a bad link. */
+const retryable = (error: any) => !error?.status || error.status >= 500;
 export function ErrorState({ error, onRetry }: { error: any; onRetry?: () => void }) {
+  if (error?.status === 403) return <NoAccess>{error.message}</NoAccess>;
   return (
     <div role="alert" className="flex items-start gap-3 rounded-xl bg-critical-soft p-4 text-sm text-critical-ink">
       <XCircle className="mt-0.5 size-4 shrink-0" aria-hidden />
       <div className="flex-1"><p className="font-medium">Couldn't load this</p><p className="mt-0.5 opacity-90">{error?.message ?? String(error)}</p></div>
-      {onRetry && <Button size="sm" onClick={onRetry}>Retry</Button>}
+      {onRetry && retryable(error) && <Button size="sm" onClick={onRetry}>Retry</Button>}
     </div>
   );
+}
+/** A page whose main data failed to load keeps its title (one h1 per page), then shows no-access or the error. */
+export function PageError({ title, error, onRetry }: { title: ReactNode; error: any; onRetry?: () => void }) {
+  return <div><PageHeader title={title} /><ErrorState error={error} onRetry={onRetry} /></div>;
+}
+/** Move focus to the page's h1 when an in-page view opens (e.g. ?t=… or ?update=…), as drawers and dialogs already do. */
+export function useFocusHeading(key: unknown, ready: boolean) {
+  useEffect(() => {
+    if (!ready) return;
+    const h = document.querySelector<HTMLElement>('main h1');
+    if (!h) return;
+    h.tabIndex = -1; h.classList.add('outline-none'); h.focus();
+  }, [key, ready]);
 }
 export function Callout({ tone = 'info', children, icon }: { tone?: 'info' | 'warning' | 'good' | 'critical' | 'neutral'; children: ReactNode; icon?: ReactNode }) {
   const I = tone === 'warning' ? AlertTriangle : tone === 'good' ? CheckCircle2 : tone === 'critical' ? XCircle : Info;
@@ -148,7 +168,7 @@ export function Callout({ tone = 'info', children, icon }: { tone?: 'info' | 'wa
 }
 
 // ---------- Overlays ----------
-function useEscape(onClose: () => void, active: boolean) {
+export function useEscape(onClose: () => void, active: boolean) {
   useEffect(() => {
     if (!active) return;
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
@@ -191,15 +211,16 @@ export function Modal({ open, onClose, title, children, footer, width = 'max-w-l
       </div>
     </div>, document.body);
 }
-export function Drawer({ open, onClose, title, children, width = 'max-w-2xl' }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; width?: string }) {
-  const ref = useRef<HTMLDivElement>(null);
+/** `label` names the dialog for assistive tech when `title` is not a plain name (e.g. a link); otherwise the title names it. */
+export function Drawer({ open, onClose, title, label, children, width = 'max-w-2xl' }: { open: boolean; onClose: () => void; title: ReactNode; label?: string; children: ReactNode; width?: string }) {
+  const ref = useRef<HTMLDivElement>(null); const titleId = useId();
   useEscape(onClose, open); useFocusTrap(ref, open);
   if (!open) return null;
   return createPortal(
     <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={ref} role="dialog" aria-modal="true" className={cx('flex h-full w-full flex-col bg-surface shadow-2xl ring-1 ring-line', width)}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-label={label} aria-labelledby={label ? undefined : titleId} className={cx('flex h-full w-full flex-col bg-surface shadow-2xl ring-1 ring-line', width)}>
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <div className="min-w-0 text-[13px] text-ink-3">{title}</div>
+          <div id={titleId} className="min-w-0 text-[13px] text-ink-3">{title}</div>
           <IconButton label="Close" onClick={onClose}><X className="size-4" /></IconButton>
         </div>
         <div className="flex-1 overflow-y-auto">{children}</div>

@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { Briefcase, ChevronLeft, ChevronRight, Download, FileSpreadsheet, LayoutGrid, ShieldCheck, Table2, Users } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, LayoutGrid, ShieldCheck, Table2, Users } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { addDays, hm, pct } from '../../lib/format';
 import { useMe, useRoles } from '../../lib/session';
@@ -32,15 +32,6 @@ export default function TeamReview() {
   const [exporting, setExporting] = useState<'pdf' | 'csv' | null>(null);
   const exp = (format: 'pdf' | 'csv') => { setExporting(format); downloadExport(api, { format, report: 'team_weekly', params: { date: week, includeMe: includeMe || undefined } }, toast)
     .catch((e) => toast({ tone: 'critical', text: e.message })).finally(() => setExporting(null)); };
-
-  if (r.customer) return (
-    <div>
-      <PageHeader title="Weekly reviews" />
-      <Card><Empty icon={<Briefcase className="size-6" />} title="Weekly reviews are for staff accounts"
-        action={<Link to="/portal" className="inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-on-accent">Go to your projects</Link>}>
-        Client accounts see shared project progress in the client portal instead.</Empty></Card>
-    </div>
-  );
 
   return (
     <div>

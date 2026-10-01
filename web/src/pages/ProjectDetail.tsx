@@ -5,7 +5,7 @@ import { Columns3, Lock, Plus } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useMe, useRoles } from '../lib/session';
-import { Avatar, Badge, Button, Card, ErrorState, Input, PageHeader, Select, Skeleton, useToast } from '../components/ui';
+import { Avatar, Badge, Button, Card, Input, PageError, PageHeader, Select, Skeleton, useToast } from '../components/ui';
 import { useUsers } from '../components/TaskStatus';
 import { TaskTable } from './Tasks';
 import { TaskDrawer } from './TaskDetail';
@@ -24,7 +24,7 @@ export default function ProjectDetail() {
     onSuccess: (r: any) => { setAl({ ...al, userId: '', assumption: '' }); qc.invalidateQueries({ queryKey: ['project', id] }); if (r.warning) toast({ tone: 'info', text: r.warning }); }, onError: err });
   const addMember = useMutation({ mutationFn: () => api.post(`/api/projects/${id}/members`, { userId: member }), onSuccess: () => { setMember(''); qc.invalidateQueries({ queryKey: ['project', id] }); }, onError: err });
   if (q.isLoading) return <Skeleton className="h-96" />;
-  if (q.error) return <ErrorState error={q.error} />;
+  if (q.error) return <PageError title="Project" error={q.error} onRetry={() => q.refetch()} />;
   const { project: p, members, milestones, allocations } = q.data;
   return (
     <div>

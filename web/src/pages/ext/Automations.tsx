@@ -1,10 +1,8 @@
 import { useId, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router';
 import { AlarmClock, Archive, BellRing, CheckCircle2, CircleDashed, FlaskConical, ListChecks, Pencil, Plus, ShieldCheck, Sparkles, UserCheck, Workflow, XCircle } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { fmtDateTime } from '../../lib/format';
-import { useRoles } from '../../lib/session';
 import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, Modal, PageHeader, Segmented, Select, Skeleton, cx, useToast } from '../../components/ui';
 import { type Draft, RuleBuilder, TRIGGER_SHORT, TestPanel, describeRule, draftFrom, emptyDraft, useLookups } from '../../components/ext/AutomationBuilder';
 import { TaskDrawer } from '../TaskDetail';
@@ -31,15 +29,6 @@ function Switch({ checked, onChange, label, disabled }: { checked: boolean; onCh
 }
 
 export default function Automations() {
-  // Client accounts only have the project portal; say so instead of showing a "couldn't load" error with a Retry that cannot help.
-  if (useRoles().customer) return (
-    <div>
-      <PageHeader title="Automations" />
-      <Card><Empty icon={<Workflow className="size-6" />} title="Automations are for staff accounts">
-        Your client account shows project progress in <Link to="/portal" className="font-medium text-accent-ink underline underline-offset-2">Projects</Link>.
-      </Empty></Card>
-    </div>
-  );
   return <AutomationsPage />;
 }
 

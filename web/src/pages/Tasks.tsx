@@ -6,7 +6,7 @@ import { Bookmark, Columns3, List, Plus, Trash2 } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { CATEGORY_LABEL, PRIORITY_LABEL, STATUS_LABEL, fmtDate, hm, relDue } from '../lib/format';
 import { useMe } from '../lib/session';
-import { Avatar, Badge, Button, Card, Empty, ErrorState, Input, PageHeader, Segmented, Select, Skeleton, StatusDot, cx, useToast } from '../components/ui';
+import { Avatar, Badge, Button, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, StatusDot, cx, useToast } from '../components/ui';
 import { BlockDialog, ReasonDialog, StatusControl, useProjects, useUsers } from '../components/TaskStatus';
 import { TaskDrawer } from './TaskDetail';
 import { QuickCapture } from '../components/QuickCapture';
@@ -38,9 +38,14 @@ export default function Tasks() {
   const saved = useQuery({ queryKey: ['saved-filters'], queryFn: () => api.get('/api/saved-filters') });
   const [drawer, setDrawer] = useState<string | null>(null);
   const [capture, setCapture] = useState(false);
+  const [naming, setNaming] = useState<string | null>(null); const [deleting, setDeleting] = useState<any>(null);
+  const err = (e: any) => toast({ tone: 'critical', text: e.message });
   const saveFilter = useMutation({ mutationFn: (name: string) => api.post('/api/saved-filters', { name, view, query: Object.fromEntries([...sp.entries()]) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['saved-filters'] }); toast({ tone: 'good', text: 'View saved' }); } });
-  const delFilter = useMutation({ mutationFn: (id: string) => api.del(`/api/saved-filters/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: ['saved-filters'] }) });
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['saved-filters'] }); setNaming(null); toast({ tone: 'good', text: 'View saved' }); }, onError: err });
+  const delFilter = useMutation({ mutationFn: (id: string) => api.del(`/api/saved-filters/${id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['saved-filters'] }); setDeleting(null); toast({ tone: 'good', text: 'View deleted' }); }, onError: err });
+  // Filter selects size to their labels on wider screens; on phones they form a two-column grid of full-width controls.
+  const sel = 'h-8 w-full sm:w-auto sm:max-w-60';
   const active = Object.values(filters).some(Boolean);
   return (
     <div>
@@ -49,32 +54,41 @@ export default function Tasks() {
           <Segmented label="View" value={view} onChange={(v) => set('view', v)} options={[{ value: 'list', label: <span className="flex items-center gap-1"><List className="size-3.5" />List</span> }, { value: 'board', label: <span className="flex items-center gap-1"><Columns3 className="size-3.5" />Board</span> }]} />
           <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setCapture(true)}>New task</Button>
         </>} />
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Input aria-label="Search tasks" className="h-8 w-56" placeholder="Search…" value={filters.q} onChange={(e) => set('q', e.target.value)} />
-        <Select aria-label="Owner" className="h-8 w-52" value={filters.mine ? 'me' : filters.ownerId} onChange={(e) => { const v = e.target.value; const n = new URLSearchParams(sp); n.delete('mine'); n.delete('ownerId'); if (v === 'me') n.set('mine', '1'); else if (v) n.set('ownerId', v); setSp(n, { replace: true }); }}>
+      <div className="mb-3 grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap">
+        <Input aria-label="Search tasks" className="col-span-2 h-8 w-full sm:w-56" placeholder="Search…" value={filters.q} onChange={(e) => set('q', e.target.value)} />
+        <Select aria-label="Owner" className={sel} value={filters.mine ? 'me' : filters.ownerId} onChange={(e) => { const v = e.target.value; const n = new URLSearchParams(sp); n.delete('mine'); n.delete('ownerId'); if (v === 'me') n.set('mine', '1'); else if (v) n.set('ownerId', v); setSp(n, { replace: true }); }}>
           <option value="">Anyone</option><option value="me">Me (owner or collaborator)</option>{(users.data ?? []).map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}</Select>
-        <Select aria-label="Project" className="h-8 w-44" value={filters.projectId} onChange={(e) => set('projectId', e.target.value)}>
+        <Select aria-label="Project" className={sel} value={filters.projectId} onChange={(e) => set('projectId', e.target.value)}>
           <option value="">All projects</option>{(projects.data ?? []).map((p: any) => <option key={p.id} value={p.id}>{p.key} · {p.name}</option>)}</Select>
-        <Select aria-label="Due" className="h-8 w-36" value={filters.due} onChange={(e) => set('due', e.target.value)}>
+        <Select aria-label="Due" className={sel} value={filters.due} onChange={(e) => set('due', e.target.value)}>
           <option value="">Any due date</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="week">Next 7 days</option><option value="none">No due date</option></Select>
-        <Select aria-label="Priority" className="h-8 w-36" value={filters.priority} onChange={(e) => set('priority', e.target.value)}>
+        <Select aria-label="Priority" className={sel} value={filters.priority} onChange={(e) => set('priority', e.target.value)}>
           <option value="">Any priority</option>{Object.entries(PRIORITY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
-        {view === 'list' && <Select aria-label="Status" className="h-8 w-36" value={filters.status} onChange={(e) => set('status', e.target.value)}>
+        {view === 'list' && <Select aria-label="Status" className={sel} value={filters.status} onChange={(e) => set('status', e.target.value)}>
           <option value="">Open + recent</option>{Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>}
-        <Select aria-label="Category" className="h-8 w-36" value={filters.category} onChange={(e) => set('category', e.target.value)}>
+        <Select aria-label="Category" className={sel} value={filters.category} onChange={(e) => set('category', e.target.value)}>
           <option value="">Any category</option>{Object.entries(CATEGORY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
         {active && <Button size="sm" variant="ghost" onClick={() => setSp(new URLSearchParams(view === 'board' ? { view } : {}), { replace: true })}>Clear</Button>}
-        {active && <Button size="sm" variant="ghost" icon={<Bookmark className="size-3.5" />} onClick={() => { const n = prompt('Name this view'); if (n) saveFilter.mutate(n); }}>Save view</Button>}
+        {active && <Button size="sm" variant="ghost" icon={<Bookmark className="size-3.5" />} onClick={() => setNaming('')}>Save view</Button>}
       </div>
       {(saved.data ?? []).length > 0 && <div className="mb-3 flex flex-wrap gap-1.5">{saved.data.map((f: any) => (
         <span key={f.id} className="inline-flex items-center rounded-lg bg-surface ring-1 ring-line">
           <button className="px-2.5 py-1 text-[12px] font-medium hover:text-accent-ink" onClick={() => setSp(new URLSearchParams({ ...f.query, view: f.view }), { replace: true })}><Bookmark className="mr-1 inline size-3" />{f.name}</button>
-          <button aria-label={`Delete view ${f.name}`} className="px-1.5 text-ink-3 hover:text-critical-ink" onClick={() => delFilter.mutate(f.id)}><Trash2 className="size-3" /></button></span>))}</div>}
+          <button aria-label={`Delete view ${f.name}`} className="px-1.5 text-ink-3 hover:text-critical-ink" onClick={() => setDeleting(f)}><Trash2 className="size-3" /></button></span>))}</div>}
       {q.isLoading ? <Skeleton className="h-96" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
         : view === 'board' ? <Board tasks={q.data} onOpen={setDrawer} today={me.today} />
         : <TaskTable tasks={q.data} onOpen={setDrawer} today={me.today} />}
       <TaskDrawer id={drawer} onClose={() => setDrawer(null)} />
       <QuickCapture open={capture} onClose={() => setCapture(false)} defaults={{ projectId: filters.projectId || undefined }} />
+      <Modal open={naming !== null} onClose={() => setNaming(null)} title="Save view" footer={<><Button variant="ghost" onClick={() => setNaming(null)}>Cancel</Button>
+        <Button variant="primary" loading={saveFilter.isPending} disabled={!naming?.trim()} onClick={() => saveFilter.mutate(naming!.trim())}>Save</Button></>}>
+        <Field label="View name" hint="Saves the current filters and view so you can reapply them in one click.">{(id) => <Input id={id} value={naming ?? ''} maxLength={80} placeholder="e.g. My urgent work"
+          onChange={(e) => setNaming(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && naming?.trim()) saveFilter.mutate(naming.trim()); }} />}</Field>
+      </Modal>
+      <Modal open={!!deleting} onClose={() => setDeleting(null)} title="Delete saved view?" footer={<><Button variant="ghost" onClick={() => setDeleting(null)}>Cancel</Button>
+        <Button variant="danger" loading={delFilter.isPending} onClick={() => delFilter.mutate(deleting.id)}>Delete</Button></>}>
+        <p className="text-sm text-ink-2">“{deleting?.name}” will be removed from your saved views. Tasks are not affected.</p>
+      </Modal>
     </div>
   );
 }
@@ -91,7 +105,7 @@ export function TaskTable({ tasks, onOpen, today }: { tasks: any[]; onOpen: (id:
           const due = relDue(t.due_date, today);
           return (
             <tr key={t.id} className="hover:bg-surface-2/60">
-              <td className="px-3 py-1.5"><StatusControl task={t} /></td>
+              <td className="px-3 py-1.5"><StatusControl task={t} readOnly={t.can_edit === false} /></td>
               <td className="max-w-[420px] px-3 py-1.5"><button className="block w-full text-left" onClick={() => onOpen(t.id)}>
                 <span className={cx('block truncate font-medium', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</span>
                 <span className="block truncate text-[12px] text-ink-3">{[t.project_key, t.checklist_total ? `☑ ${t.checklist_done}/${t.checklist_total}` : null, t.open_dependencies ? `waits on ${t.open_dependencies}` : null,
@@ -158,11 +172,12 @@ function Column({ status, tasks, onOpen, today }: { status: string; tasks: any[]
   );
 }
 function Cardlet({ t, onOpen, today }: { t: any; onOpen: (id: string) => void; today: string }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: t.id });
+  const locked = t.can_edit === false; // the server would refuse a move by this viewer
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: t.id, disabled: locked });
   const due = relDue(t.due_date, today);
   return (
     <li ref={setNodeRef} style={transform ? { transform: `translate(${transform.x}px, ${transform.y}px)` } : undefined} {...attributes} {...listeners}
-      className={cx('cursor-grab rounded-lg bg-surface p-2.5 shadow-sm ring-1 ring-line active:cursor-grabbing', isDragging && 'z-10 opacity-80 shadow-xl')}>
+      className={cx('rounded-lg bg-surface p-2.5 shadow-sm ring-1 ring-line', !locked && 'cursor-grab active:cursor-grabbing', isDragging && 'z-10 opacity-80 shadow-xl')}>
       <button className="block w-full text-left text-[13px] font-medium leading-snug hover:underline" onClick={() => onOpen(t.id)} onPointerDown={(e) => e.stopPropagation()}>{t.title}</button>
       {t.status === 'blocked' && t.blocker_reason && <p className="mt-1 line-clamp-2 text-[12px] text-critical-ink">{t.blocker_reason}</p>}
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-3">

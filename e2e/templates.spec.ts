@@ -229,11 +229,11 @@ test('template editor at phone width in dark mode: focus, validation, unsaved ch
   await ctx.close();
 });
 
-test('clients are told templates are for staff, without staff actions', async ({ page }) => {
+test('clients are sent to their portal, without staff actions', async ({ page }) => {
   await signIn(page, 'lena', 'globex.example');
   await page.goto('/templates');
-  await expect(page.getByText('Templates are for staff only')).toBeVisible();
+  await expect(page).toHaveURL(/\/portal$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Your projects' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'New template' })).toHaveCount(0);
-  await expect(page.getByRole('link', { name: 'Go to your projects' })).toBeVisible();
   await noSeriousAxe(page);
 });

@@ -95,7 +95,7 @@ export function BlockerEscalation({ blockerId }: { blockerId: string }) {
                 </li>); })}
             </ol>}
           {(r.manager || r.routineAdmin || r.sysAdmin) && (
-            <Link to="/admin?tab=escalation" className="mt-2.5 inline-block text-[12px] font-medium text-accent-ink hover:underline">See every open blocker in your scope</Link>)}
+            <Link to="/blockers" className="mt-2.5 inline-block text-[12px] font-medium text-accent-ink hover:underline">See every open blocker in your scope</Link>)}
         </div>
       )}
       <Modal open={nudging} onClose={() => setNudging(false)} title={`Nudge ${d.waitingOn}`}

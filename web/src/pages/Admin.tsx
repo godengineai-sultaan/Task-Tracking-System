@@ -1,19 +1,27 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { Navigate, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, Copy, RotateCcw, ShieldAlert, UserPlus } from 'lucide-react';
 import { api } from '../lib/api';
 import AdminEscalation from '../components/ext/AdminEscalation';
 import AdminBranding from '../components/ext/AdminBranding';
 import { CATEGORY_LABEL, fmtDateTime, hm, pct } from '../lib/format';
-import { Badge, Button, Callout, Card, Checkbox, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Stat, Textarea, useToast } from '../components/ui';
+import { Badge, Button, Callout, Card, Checkbox, ErrorState, Field, Input, Modal, NoAccess, PageHeader, Segmented, Select, Skeleton, Stat, Textarea, useToast } from '../components/ui';
+import { useRoles } from '../lib/session';
 
 const ROLES = [['member', 'Member'], ['manager', 'Manager'], ['leadership', 'Leadership'], ['routine_admin', 'Main admin (all staff records)'], ['system_admin', 'System admin'], ['cost_viewer', 'Cost viewer'], ['customer', 'Client (portal only)']];
 type Tab = 'org' | 'people' | 'teams' | 'profiles' | 'escalation' | 'branding' | 'audit' | 'jobs' | 'ops';
+const MODULES: [string, string][] = [['tasks', 'Tasks'], ['analytics', 'Analytics'], ['admin_routine', 'Admin routine'], ['integrations', 'Integrations'], ['customer_portal', 'Client portal'], ['ai_drafting', 'AI drafting']];
 
 export default function Admin() {
   const [sp, setSp] = useSearchParams();
   const tab = (sp.get('tab') as Tab) || (sp.get('onboarding') ? 'org' : 'org');
+  const r = useRoles();
+  if (!r.sysAdmin) {
+    // Managers reach blocker aging on its own page; older links to the escalation tab still land there.
+    if (tab === 'escalation' && r.canReview) return <Navigate to="/blockers" replace />;
+    return <div><PageHeader title="Administration" /><NoAccess>Administration is for system admins.</NoAccess></div>;
+  }
   return (
     <div>
       <PageHeader title="Administration" subtitle="Organization policy, people and access, and operational health." />
@@ -37,8 +45,8 @@ function Org() {
   const save = useMutation({ mutationFn: () => api.patch('/api/admin/tenant', { ...f, legalName: f.legalName || null, contactEmail: f.contactEmail || null, address: f.address || null, logoUrl: f.logoUrl || null, onboarded: true }),
     onSuccess: () => { qc.invalidateQueries(); toast({ tone: 'good', text: 'Organization settings saved' }); }, onError: err });
   const retention = useMutation({ mutationFn: () => api.post('/api/admin/retention/run'), onSuccess: (r: any) => toast({ tone: 'good', text: r.note }), onError: err });
+  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   if (q.isLoading || !f) return <Skeleton className="h-96" />;
-  if (q.error) return <ErrorState error={q.error} />;
   const s = f.settings; const setS = (k: string, v: any) => setF({ ...f, settings: { ...s, [k]: v } });
   const toggleList = (k: string, cat: string) => setS(k, (s[k] ?? []).includes(cat) ? s[k].filter((x: string) => x !== cat) : [...(s[k] ?? []), cat]);
   return (
@@ -58,8 +66,8 @@ function Org() {
           <Field label="Plan">{(id) => <Select id={id} value={f.plan} onChange={(e) => setF({ ...f, plan: e.target.value })}><option value="team">Team</option><option value="organization">Organization</option><option value="enterprise">Enterprise</option></Select>}</Field>
           <Field label="Seat limit">{(id) => <Input id={id} type="number" min={1} value={f.seatLimit} onChange={(e) => setF({ ...f, seatLimit: Number(e.target.value) })} />}</Field>
         </div>
-        <div className="mt-3 grid gap-1.5">{['tasks', 'analytics', 'admin_routine', 'integrations', 'customer_portal', 'ai_drafting'].map((m) =>
-          <Checkbox key={m} checked={f.modules.includes(m)} onChange={(v) => setF({ ...f, modules: v ? [...f.modules, m] : f.modules.filter((x: string) => x !== m) })} label={m.replace('_', ' ')} />)}</div>
+        <div className="mt-3 grid gap-1.5">{MODULES.map(([m, label]) =>
+          <Checkbox key={m} checked={f.modules.includes(m)} onChange={(v) => setF({ ...f, modules: v ? [...f.modules, m] : f.modules.filter((x: string) => x !== m) })} label={label} />)}</div>
         <p className="mt-3 text-[12px] text-ink-3">Entitlements are configuration only in this build — billing/payments are an external dependency and nothing is charged.</p>
       </Card>
       <Card title="Visibility & work policy">
@@ -75,7 +83,7 @@ function Org() {
       <Card title="Data, AI & retention">
         <div className="space-y-2.5">
           <Checkbox checked={!!s.ai_enabled} onChange={(v) => setS('ai_enabled', v)} label="Allow optional AI drafting (task drafts, recap drafts — always reviewed by the person)" />
-          <p className="text-[12px] text-ink-3">Requires an ANTHROPIC_API_KEY on the server. Drafts send only the person's own task titles/notes; prompts are versioned and every run is logged.</p>
+          <p className="text-[12px] text-ink-3">Requires AI to be configured by your server operator. Drafts send only the person's own task titles/notes; prompts are versioned and every run is logged.</p>
           <Checkbox checked={!!s.voice_capture_enabled} onChange={(v) => setS('voice_capture_enabled', v)} label="Allow voice capture in quick capture (off by default; people choose whether to use the microphone)" />
           <p className="text-[12px] text-ink-3">Shows a microphone button in quick capture on browsers with built-in speech recognition. The browser's speech service turns speech into text; only the transcript is used and confirmed by the person. No audio reaches or is stored by this app.</p>
           <Field label="Retention for telemetry, notifications and ignored integration events (days)">{(id) => <Input id={id} type="number" min={30} max={3650} className="w-28" value={s.retention_days ?? 730} onChange={(e) => setS('retention_days', Number(e.target.value))} />}</Field>
@@ -98,6 +106,7 @@ function People() {
   const [edit, setEdit] = useState<any>(null); const [invite, setInvite] = useState(false); const [link, setLink] = useState<string | null>(null);
   const save = useMutation({ mutationFn: (b: any) => api.patch(`/api/admin/users/${b.id}`, b.patch), onSuccess: () => { qc.invalidateQueries(); setEdit(null); toast({ tone: 'good', text: 'Access updated — recorded in the audit log' }); }, onError: err });
   const revoke = useMutation({ mutationFn: (id: string) => api.post(`/api/admin/invitations/${id}/revoke`), onSuccess: () => qc.invalidateQueries({ queryKey: ['invitations'] }) });
+  if (users.error) return <ErrorState error={users.error} onRetry={() => users.refetch()} />;
   if (users.isLoading) return <Skeleton className="h-96" />;
   return (
     <div className="space-y-4">
@@ -232,7 +241,7 @@ function Audit() {
     <Card title="Audit log" subtitle="Append-only, hash-chained per organization. Edits and deletes are blocked at the database." actions={<>
       <Input aria-label="Filter by action" className="h-8 w-48" placeholder="Action prefix, e.g. task." value={action} onChange={(e) => setAction(e.target.value)} />
       <Button size="sm" loading={verify.isPending} onClick={() => verify.mutate()} icon={<ShieldAlert className="size-3.5" />}>Verify chain</Button></>} padded={false}>
-      {q.isLoading ? <Skeleton className="h-64" /> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-[12.5px]">
+      {q.isLoading ? <Skeleton className="h-64" /> : q.error ? <div className="p-4"><ErrorState error={q.error} onRetry={() => q.refetch()} /></div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-[12.5px]">
         <thead className="border-b border-line text-left text-ink-3"><tr><th className="px-4 py-2 font-medium">When</th><th className="px-3 py-2 font-medium">Actor</th><th className="px-3 py-2 font-medium">Action</th><th className="px-3 py-2 font-medium">Resource</th><th className="px-3 py-2 font-medium">Authority · reason</th><th className="px-3 py-2 font-medium">Outcome</th></tr></thead>
         <tbody className="divide-y divide-line">{(q.data ?? []).map((e: any) => (
           <tr key={e.id}><td className="whitespace-nowrap px-4 py-1.5 tabular">{fmtDateTime(e.at)}</td><td className="px-3 py-1.5">{e.actor_name ?? 'System'}</td><td className="px-3 py-1.5 font-medium">{e.action}</td>
@@ -248,7 +257,7 @@ function Jobs() {
   const retry = useMutation({ mutationFn: (id: string) => api.post(`/api/admin/jobs/${id}/retry`), onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }), onError: err });
   return (
     <Card title="Background jobs" subtitle="Durable queue with retries and exponential backoff. Dead-lettered jobs can be retried after fixing the cause." padded={false}>
-      {q.isLoading ? <Skeleton className="h-64" /> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-[12.5px]">
+      {q.isLoading ? <Skeleton className="h-64" /> : q.error ? <div className="p-4"><ErrorState error={q.error} onRetry={() => q.refetch()} /></div> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-[12.5px]">
         <thead className="border-b border-line text-left text-ink-3"><tr><th className="px-4 py-2 font-medium">Created</th><th className="px-3 py-2 font-medium">Kind</th><th className="px-3 py-2 font-medium">Status</th><th className="px-3 py-2 font-medium">Attempts</th><th className="px-3 py-2 font-medium">Last error</th><th /></tr></thead>
         <tbody className="divide-y divide-line">{q.data.map((j: any) => (
           <tr key={j.id}><td className="whitespace-nowrap px-4 py-1.5 tabular">{fmtDateTime(j.created_at)}</td><td className="px-3 py-1.5 font-medium">{j.kind}</td>
@@ -262,7 +271,7 @@ function Jobs() {
 function Ops() {
   const q = useQuery({ queryKey: ['ops'], queryFn: () => api.get('/api/admin/operations') });
   if (q.isLoading) return <Skeleton className="h-64" />;
-  if (q.error) return <ErrorState error={q.error} />;
+  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data; const lo = d.loggingOverhead;
   return (
     <div className="space-y-4">

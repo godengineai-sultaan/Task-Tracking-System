@@ -1,26 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, Navigate } from 'react-router';
+import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarDays, CalendarRange, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate, fmtTime, hm, minutesSince, relDue } from '../lib/format';
-import { useMe, useRoles } from '../lib/session';
-import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, PageHeader, Select, Skeleton, cx, useToast } from '../components/ui';
+import { useMe } from '../lib/session';
+import { Badge, Button, Callout, Card, Empty, IconButton, PageError, PageHeader, Select, Skeleton, cx, useToast } from '../components/ui';
 import { StatusControl, ReasonDialog } from '../components/TaskStatus';
 import { AllocationBar, EntryModal, EntryRow, useTicker } from '../components/time';
 import { TaskDrawer } from './TaskDetail';
+import { QuickCapture } from '../components/QuickCapture';
 import { NudgeSettings, SuggestDayDialog, WeeklySummaryDrawer } from '../components/ext/PlanningAssistant';
 
 export default function MyDay() {
   const me = useMe(); const qc = useQueryClient(); const toast = useToast();
-  const customer = useRoles().customer; // client stakeholders have no My Day; they land on the portal instead of an access error
-  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`), enabled: !customer });
+  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`) });
   const openedAt = useRef(Date.now());
   const [drawer, setDrawer] = useState<string | null>(null);
   const [removing, setRemoving] = useState<any>(null);
   const [entryModal, setEntryModal] = useState<{ entry?: any } | null>(null);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [weeklyOpen, setWeeklyOpen] = useState(false);
+  const [capture, setCapture] = useState(false);
   useTicker(30000);
   const plan = useMutation({
     // Planning time is only recorded up to an hour (the API limit); a page left open longer is not a planning-time measurement.
@@ -40,9 +41,8 @@ export default function MyDay() {
     onSuccess: (_r, v: any) => { qc.invalidateQueries(); toast({ tone: 'good', text: v.decision === 'accept' ? 'Confirmed' : 'Dismissed' }); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
-  if (customer) return <Navigate to="/portal" replace />;
   if (q.isLoading) return <div className="space-y-4"><Skeleton className="h-10 w-72" /><div className="grid gap-4 lg:grid-cols-3"><Skeleton className="h-72 lg:col-span-2" /><Skeleton className="h-72" /></div></div>;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return <PageError title="My Day" error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data;
   const tz = me.user.effectiveTimezone;
   const ids: string[] = d.intendedOutcomes.map((t: any) => t.id);
@@ -117,7 +117,9 @@ export default function MyDay() {
           </Card>
 
           <Card title="Open work" subtitle="One click to change status. Blocked asks who you're waiting on." padded={false}>
-            {groups.length === 0 ? <Empty icon={<CheckCircle2 className="size-6" />} title="Nothing else open">Capture new work with <b>Q</b>.</Empty> : groups.map((g) => (
+            {groups.length === 0 ? <Empty icon={<CheckCircle2 className="size-6" />} title="Nothing else open"
+              action={<Button size="sm" icon={<Plus className="size-4" />} onClick={() => setCapture(true)}>Capture work</Button>}>
+              Capture new work as it comes in<span className="hidden sm:inline"> (shortcut <b>Q</b>)</span>.</Empty> : groups.map((g) => (
               <div key={g.key}>
                 <div className="bg-surface-2/60 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{g.label} · {g.items.length}</div>
                 <ul className="divide-y divide-line">
@@ -192,6 +194,7 @@ export default function MyDay() {
       <ReasonDialog open={!!removing} title={`Remove "${removing?.title ?? ''}" from today`} label="Why are you replanning? (visible as a scope change)" loading={plan.isPending}
         onClose={() => setRemoving(null)} onSubmit={(reason) => plan.mutate({ taskIds: ids.filter((x) => x !== removing.id), reason })} />
       <EntryModal open={!!entryModal} onClose={() => setEntryModal(null)} entry={entryModal?.entry} tasks={d.openTasks} date={d.date} tz={tz} />
+      <QuickCapture open={capture} onClose={() => setCapture(false)} defaults={{ addToMyDay: true }} />
     </div>
   );
 }

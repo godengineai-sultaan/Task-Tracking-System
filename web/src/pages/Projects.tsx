@@ -16,7 +16,7 @@ export default function Projects() {
   return (
     <div>
       <PageHeader title="Projects" subtitle="Company projects plus private projects you belong to." actions={(r.sysAdmin || r.leadership || r.manager) && <Button variant="primary" icon={<FolderPlus className="size-4" />} onClick={() => setOpen(true)}>New project</Button>} />
-      {q.isLoading ? <Skeleton className="h-64" /> : q.error ? <ErrorState error={q.error} /> : q.data.length === 0 ? <Card><Empty title="No projects yet" /></Card> : (
+      {q.isLoading ? <Skeleton className="h-64" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : q.data.length === 0 ? <Card><Empty title="No projects yet" /></Card> : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{q.data.map((p: any) => (
           <Link key={p.id} to={`/projects/${p.id}`} className="rounded-xl bg-surface p-4 ring-1 ring-line transition hover:ring-accent">
             <div className="flex flex-wrap items-center gap-2"><Badge tone="info">{p.key}</Badge>{p.visibility === 'private' && <Badge icon={<Lock className="size-3" />}>Private</Badge>}{p.customer_name && <Badge>{p.customer_name}</Badge>}

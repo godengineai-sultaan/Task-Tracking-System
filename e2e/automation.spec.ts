@@ -174,10 +174,11 @@ test('the rule builder works by keyboard and never drops a draft by accident', a
   await expect(page.getByRole('button', { name: 'New rule' })).toBeFocused();
 });
 
-test('client accounts are told automations are staff-only', async ({ page }) => {
+test('client accounts are sent to their portal instead of automations', async ({ page }) => {
   await signIn(page, 'lena', 'globex.example');
   await page.goto('/automations');
-  await expect(page.getByText('Automations are for staff accounts')).toBeVisible();
+  await expect(page).toHaveURL(/\/portal$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Your projects' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
   expect(await scan(page)).toEqual([]);
 });

@@ -220,7 +220,7 @@ test('states: results error offers retry, capacity explains a failed projection,
   await page.context().clearCookies();
   await signIn(page, 'lena', 'globex.example');
   await page.goto('/capacity/what-if');
-  await expect(page.getByRole('alert')).toContainText('for staff');
+  await expect(page).toHaveURL(/\/portal$/);
   await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
 });
 

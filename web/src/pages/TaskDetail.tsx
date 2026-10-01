@@ -14,7 +14,9 @@ export default function TaskPage() {
   return <div className="mx-auto max-w-4xl rounded-xl bg-surface ring-1 ring-line"><TaskDetailView id={id!} onClose={() => nav(-1)} /></div>;
 }
 export function TaskDrawer({ id, onClose }: { id: string | null; onClose: () => void }) {
-  return <Drawer open={!!id} onClose={onClose} title={id ? <Link to={`/tasks/${id}`} className="inline-flex items-center gap-1 hover:text-ink">Open full page <ArrowUpRight className="size-3.5" /></Link> : ''}>
+  // Same query as the detail view (shared cache), only to give the dialog its name: "#1303 Order laptop and accessories".
+  const t = useQuery({ queryKey: ['task', id], queryFn: () => api.get(`/api/tasks/${id}`), enabled: !!id }).data?.task;
+  return <Drawer open={!!id} onClose={onClose} label={t ? `#${t.number} ${t.title}` : 'Task'} title={id ? <Link to={`/tasks/${id}`} className="inline-flex items-center gap-1 hover:text-ink">Open full page <ArrowUpRight className="size-3.5" /></Link> : ''}>
     {id && <TaskDetailView id={id} onClose={onClose} />}</Drawer>;
 }
 
@@ -47,7 +49,7 @@ export function TaskDetailView({ id, onClose }: { id: string; onClose: () => voi
       </div>
       <EditableTitle value={t.title} disabled={!can} onSave={(title) => patch.mutate({ title })} />
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <StatusControl task={t} />
+        <StatusControl task={t} readOnly={!can} />
         {t.requires_review && <Badge tone="neutral">Review required{d.reviewer ? ` · ${d.reviewer.name}` : ''}</Badge>}
         {t.requires_evidence && <Badge tone={d.evidence.length ? 'good' : 'warning'}>Evidence {d.evidence.length ? 'attached' : 'required'}</Badge>}
         {t.customer_visible && <Badge tone="info">Visible to client</Badge>}
@@ -58,7 +60,7 @@ export function TaskDetailView({ id, onClose }: { id: string; onClose: () => voi
 
       <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 text-[13px] sm:grid-cols-3">
         <Prop label="Owner"><div className="flex items-center gap-1.5"><Avatar name={d.owner.name} size={20} />{d.owner.name}
-          <button className="ml-1 text-[12px] text-accent-ink underline" onClick={() => setReassign(true)}>Reassign</button></div></Prop>
+          {d.canReassign && <button className="ml-1 text-[12px] text-accent-ink underline" onClick={() => setReassign(true)}>Reassign</button>}</div></Prop>
         <Prop label="Priority"><Select aria-label="Priority" disabled={!can} className="h-8" value={t.priority} onChange={(e) => patch.mutate({ priority: e.target.value })}>
           {Object.entries(PRIORITY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></Prop>
         <Prop label="Due date"><Input aria-label="Due date" type="date" disabled={!can} className="h-8" value={t.due_date ?? ''} onChange={(e) => patch.mutate({ dueDate: e.target.value || null })} /></Prop>

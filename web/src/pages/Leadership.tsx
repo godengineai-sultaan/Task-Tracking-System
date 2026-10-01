@@ -5,7 +5,7 @@ import { Download, FileSpreadsheet, Plus } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDate, hm } from '../lib/format';
 import { useRoles } from '../lib/session';
-import { Badge, Button, Callout, Card, ErrorState, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
+import { Badge, Button, Callout, Card, ErrorState, PageError, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
 import { downloadExport } from './util';
 import { ForecastBadge, MeterKey, ProgressMeter, useObjectivesOverview } from '../components/ext/ObjectivesUI';
 import { NewObjectiveModal } from '../components/ext/ObjectivesNewModal';
@@ -15,7 +15,7 @@ export default function Leadership() {
   const toast = useToast(); const r = useRoles();
   const exp = (format: 'pdf' | 'csv') => downloadExport(api, { format, report: 'delivery', params: {} }, toast).catch((e) => toast({ tone: 'critical', text: e.message }));
   if (q.isLoading) return <Skeleton className="h-96" />;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return <PageError title="Leadership delivery" error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data;
   const tot = d.projects.reduce((a: any, p: any) => ({ open: a.open + p.open, overdue: a.overdue + p.overdue, blocked: a.blocked + p.blocked, review: a.review + p.in_review }), { open: 0, overdue: 0, blocked: 0, review: 0 });
   const byProject = Object.values(d.allocation.reduce((m: any, x: any) => { m[x.project] ??= { project: x.project, minutes: 0, meeting: 0 }; m[x.project].minutes += x.minutes; if (x.category === 'meeting') m[x.project].meeting += x.minutes; return m; }, {})) as any[];

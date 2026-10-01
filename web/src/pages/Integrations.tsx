@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { Navigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarDays, Copy, KeyRound, Plug, RefreshCw, Upload } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
 import { useRoles } from '../lib/session';
-import { Badge, Button, Callout, Card, ErrorState, Field, Input, Modal, PageHeader, Select, Skeleton, useToast } from '../components/ui';
+import { Badge, Button, Callout, Card, Field, Input, Modal, PageError, PageHeader, Select, Skeleton, useToast } from '../components/ui';
 import { CalendarSubscription } from '../components/ext/CalendarSubscription';
 import { CalendarFeedCard } from '../components/ext/CalendarFeed';
 
@@ -19,9 +18,8 @@ export default function Integrations() {
   const status = useMutation({ mutationFn: ({ id, status }: any) => api.patch(`/api/integrations/${id}`, { status }), onSuccess: () => { qc.invalidateQueries({ queryKey: ['integrations'] }); qc.invalidateQueries({ queryKey: ['calendar-subscription'] }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   const upload = useMutation({ mutationFn: ({ id, ics }: any) => api.post(`/api/integrations/${id}/ics`, { ics }),
     onSuccess: (r: any) => { qc.invalidateQueries(); toast({ tone: 'good', text: `${r.received} events read (${r.duplicates} already imported). Past meetings appear as suggestions in My Day.` }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
-  if (r.customer) return <Navigate to="/portal" replace />;
   if (q.isLoading) return <Skeleton className="h-64" />;
-  if (q.error) return <ErrorState error={q.error} />;
+  if (q.error) return <PageError title="Integrations" error={q.error} onRetry={() => q.refetch()} />;
   const mine = q.data.connections.filter((c: any) => c.user_id); const org = q.data.connections.filter((c: any) => !c.user_id);
   const cal = mine.find((c: any) => c.kind === 'ics_calendar');
   // One step: the first upload also creates the personal calendar connection.
@@ -38,9 +36,9 @@ export default function Integrations() {
             <Upload className="size-4" aria-hidden />{upload.isPending || create.isPending ? 'Reading file…' : 'Upload .ics file'}<input type="file" accept=".ics,text/calendar" className="sr-only" disabled={upload.isPending || create.isPending} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadFile(f); }} /></label>
           {cal && <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => setEvents(cal)}>View sync log</Button>
             <Button size="sm" variant="ghost" loading={status.isPending} onClick={() => status.mutate({ id: cal.id, status: cal.status === 'active' ? 'paused' : 'active' })}>{cal.status === 'active' ? 'Pause calendar' : 'Resume calendar'}</Button></div>}
-          {!r.customer && <CalendarSubscription />}
+          <CalendarSubscription />
         </Card>
-        {!r.customer && <CalendarFeedCard />}
+        <CalendarFeedCard />
         {r.sysAdmin && <Card title="Shared contract" subtitle={`Schema ${q.data.schemaVersion}. Machine-to-machine deliveries are signed per connection.`}>
           <pre tabIndex={0} role="region" aria-label="Example signed delivery" className="overflow-x-auto rounded-lg bg-surface-2 p-3 text-[11.5px] leading-relaxed">{`POST {inboundUrl}
 X-Timestamp: <unix seconds>

@@ -3,9 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Archive, ArchiveRestore, ChevronLeft, ClipboardCheck, Copy, FolderInput, GitBranch, LayoutTemplate, ListChecks, Lock, Paperclip, Pencil, Play, Plus, Search } from 'lucide-react';
 import { api, qs } from '../../lib/api';
-import { useRoles } from '../../lib/session';
 import { CATEGORY_LABEL, PRIORITY_LABEL, fmtDate, fmtDateTime, hm } from '../../lib/format';
-import { Badge, Button, Callout, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Spinner, cx, useToast } from '../../components/ui';
+import { Badge, Button, Callout, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Spinner, cx, useFocusHeading, useToast } from '../../components/ui';
 import { useProjects } from '../../components/TaskStatus';
 import { CategoryIcon, TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABEL, offsetLabel, plural, spanLabel } from '../../components/ext/TemplatesShared';
 import { TemplateEditor } from '../../components/ext/TemplatesEditor';
@@ -16,15 +15,6 @@ export default function Templates() {
   const [sp, setSp] = useSearchParams();
   const id = sp.get('t'); const mode = sp.get('mode');
   const go = (next: Record<string, string>) => setSp(next);
-  const { customer } = useRoles();
-  if (customer) return (
-    <div>
-      <PageHeader title="Templates" />
-      <Card><Empty icon={<LayoutTemplate className="size-6" />} title="Templates are for staff only"
-        action={<Link to="/portal" className="font-medium text-accent-ink underline">Go to your projects</Link>}>
-        The team uses templates to plan its own work. Your shared projects and their progress are in the client portal.
-      </Empty></Card>
-    </div>);
   if (mode === 'new') return <NewTemplate onDone={(tid) => go(tid ? { t: tid } : {})} />;
   if (id) return <TemplateDetail key={id} id={id} editing={mode === 'edit'} go={go} />;
   return <Gallery go={go} />;
@@ -125,6 +115,7 @@ function TemplateDetail({ id, editing, go }: { id: string; editing: boolean; go:
   const [applying, setApplying] = useState(false);
   const [versionView, setVersionView] = useState<number | null>(null);
   const [appView, setAppView] = useState<string | null>(null);
+  useFocusHeading(editing, !!q.data); // opening the template (or its editor) moves focus to its title
   const err = (e: any) => toast({ tone: 'critical', text: e.message });
   const refresh = () => { qc.invalidateQueries({ queryKey: ['templates'] }); qc.invalidateQueries({ queryKey: ['template', id] }); };
   const duplicate = useMutation({ mutationFn: () => api.post(`/api/templates/${id}/duplicate`, {}),

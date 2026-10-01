@@ -2,14 +2,14 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { Plus, Search, Target } from 'lucide-react';
 import { pct } from '../../lib/format';
-import { useMe, useRoles } from '../../lib/session';
+import { useMe } from '../../lib/session';
 import { Avatar, Button, Card, Empty, ErrorState, Input, PageHeader, Segmented, Select, Skeleton, Stat, cx } from '../../components/ui';
 import { BASIS, FORECAST, ForecastBadge, MeterKey, ProgressMeter, periodText, useObjectivesOverview, type ForecastStatus } from '../../components/ext/ObjectivesUI';
 import { NewObjectiveModal } from '../../components/ext/ObjectivesNewModal';
 
 export default function Objectives() {
-  const r = useRoles(); const me = useMe();
-  const q = useObjectivesOverview(!r.customer);
+  const me = useMe();
+  const q = useObjectivesOverview();
   const [scope, setScope] = useState<'active' | 'closed' | 'all'>('active');
   const [health, setHealth] = useState(''); const [owner, setOwner] = useState(''); const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
@@ -20,7 +20,6 @@ export default function Objectives() {
     && (!text || `${o.title} ${o.description}`.toLowerCase().includes(text.toLowerCase())));
   const counts = items.filter((o) => o.status === 'active').reduce((m: Record<string, number>, o) => { m[o.forecast?.status] = (m[o.forecast?.status] ?? 0) + 1; return m; }, {});
 
-  if (r.customer) return <div><PageHeader title="Objectives" /><Card><Empty icon={<Target className="size-6" />} title="Objectives are for staff">Your project updates are in the client portal.</Empty></Card></div>;
   return (
     <div>
       <PageHeader title="Objectives" subtitle="Company goals, the work linked to them, and an explained early warning. Status comes from recorded work and reported key results, never from monitoring people."

@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, ShieldCheck } fro
 import { api, qs } from '../lib/api';
 import { STATUS_LABEL, addDays, fmtDate, hm, pct } from '../lib/format';
 import { useMe, useRoles } from '../lib/session';
-import { AssessmentBadge, Avatar, Badge, Button, Callout, Card, Empty, ErrorState, IconButton, Input, PageHeader, Select, Skeleton, Stat, StatusDot, useToast } from '../components/ui';
+import { AssessmentBadge, Avatar, Badge, Button, Callout, Card, Empty, ErrorState, IconButton, Input, NoAccess, PageHeader, Select, Skeleton, Stat, StatusDot, useToast } from '../components/ui';
 import { useProjects } from '../components/TaskStatus';
 import { downloadExport } from './util';
 
@@ -18,30 +18,33 @@ export default function Routine() {
   const [sp, setSp] = useSearchParams();
   const f = { date: sp.get('date') ?? me.today, departmentId: sp.get('departmentId') ?? '', projectId: sp.get('projectId') ?? '', userId: sp.get('userId') ?? '', status: sp.get('status') ?? '' };
   const set = (k: string, v: string) => { const n = new URLSearchParams(sp); v ? n.set(k, v) : n.delete(k); setSp(n, { replace: true }); };
-  const q = useQuery({ queryKey: ['routine', f], queryFn: () => api.get(`/api/admin/routine${qs(f)}`) });
-  const depts = useQuery({ queryKey: ['departments'], queryFn: () => api.get('/api/admin/departments') });
-  const people = useQuery({ queryKey: ['people'], queryFn: () => api.get('/api/people') });
+  const q = useQuery({ queryKey: ['routine', f], queryFn: () => api.get(`/api/admin/routine${qs(f)}`), enabled: r.canReview });
+  const depts = useQuery({ queryKey: ['departments'], queryFn: () => api.get('/api/admin/departments'), enabled: r.canReview });
+  const people = useQuery({ queryKey: ['people'], queryFn: () => api.get('/api/people'), enabled: r.canReview });
   const projects = useProjects();
   const exp = (format: 'pdf' | 'csv') => downloadExport(api, { format, report: 'team_daily', params: { date: f.date, departmentId: f.departmentId || undefined, projectId: f.projectId || undefined } }, toast).catch((e) => toast({ tone: 'critical', text: e.message }));
   const d = q.data;
+  // Reachable by URL and from links: people outside the routine view get a plain explanation, not a manager's toolbar and a failing request.
+  if (!r.canReview) return <div><PageHeader title="Daily routine" /><NoAccess>Only the main administrator and team managers can open the daily routine view. Your own day is in My Day and My Analytics.</NoAccess></div>;
+  const sel = 'h-8 w-full sm:w-auto sm:max-w-60'; // sized to the labels; a two-column grid on phones
   return (
     <div>
       <PageHeader eyebrow={r.routineAdmin ? 'Main administrator · company-wide' : 'Team manager · your teams'} title="Daily routine"
         subtitle="Each person's recorded day: plan, work-state changes, confirmed time, recap and review status."
-        actions={<><Button icon={<Download className="size-4" />} onClick={() => exp('pdf')}>PDF</Button><Button icon={<FileSpreadsheet className="size-4" />} onClick={() => exp('csv')}>CSV</Button></>} />
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-1">
+        actions={d && <><Button icon={<Download className="size-4" />} onClick={() => exp('pdf')}>PDF</Button><Button icon={<FileSpreadsheet className="size-4" />} onClick={() => exp('csv')}>CSV</Button></>} />
+      {!(q.error && !d) && <div className="mb-4 grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap">
+        <div className="col-span-2 flex items-center gap-1">
           <IconButton label="Previous day" onClick={() => set('date', addDays(f.date, -1))}><ChevronLeft className="size-4" /></IconButton>
           <Input aria-label="Date" type="date" className="h-8 w-40" max={me.today} value={f.date} onChange={(e) => set('date', e.target.value)} />
           <IconButton label="Next day" disabled={f.date >= me.today} onClick={() => set('date', addDays(f.date, 1))}><ChevronRight className="size-4" /></IconButton>
         </div>
-        <Select aria-label="Department" className="h-8 w-40" value={f.departmentId} onChange={(e) => set('departmentId', e.target.value)}><option value="">All departments</option>{(depts.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
-        <Select aria-label="Project" className="h-8 w-44" value={f.projectId} onChange={(e) => set('projectId', e.target.value)}><option value="">All projects</option>{(projects.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.key} · {x.name}</option>)}</Select>
-        <Select aria-label="Employee" className="h-8 w-44" value={f.userId} onChange={(e) => set('userId', e.target.value)}><option value="">Everyone in scope</option>{(people.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
-        <Select aria-label="Status" className="h-8 w-44" value={f.status} onChange={(e) => set('status', e.target.value)}>
+        <Select aria-label="Department" className={sel} value={f.departmentId} onChange={(e) => set('departmentId', e.target.value)}><option value="">All departments</option>{(depts.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
+        <Select aria-label="Project" className={sel} value={f.projectId} onChange={(e) => set('projectId', e.target.value)}><option value="">All projects</option>{(projects.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.key} · {x.name}</option>)}</Select>
+        <Select aria-label="Employee" className={sel} value={f.userId} onChange={(e) => set('userId', e.target.value)}><option value="">All employees</option>{(people.data ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
+        <Select aria-label="Status" className={sel} value={f.status} onChange={(e) => set('status', e.target.value)}>
           <option value="">Any status</option><optgroup label="Recap"><option value="missing">Recap missing</option><option value="pending">Pending today</option><option value="confirmed">Confirmed (not reviewed)</option><option value="manager_reviewed">Reviewed</option></optgroup>
           <optgroup label="Assessment"><option value="needs_attention">Needs attention</option><option value="insufficient_data">Insufficient data</option><option value="on_track">On track</option></optgroup></Select>
-      </div>
+      </div>}
       {q.isLoading ? <Skeleton className="h-96" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <>
         <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
           <Stat label="People in scope" value={d.rollup.people} sub={d.scope === 'company' ? 'company-wide' : 'your teams'} />
