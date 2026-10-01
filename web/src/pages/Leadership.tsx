@@ -1,13 +1,14 @@
 import { Link } from 'react-router';
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, FileSpreadsheet } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Download, FileSpreadsheet, Plus } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDate, hm } from '../lib/format';
 import { useRoles } from '../lib/session';
-import { Badge, Button, Callout, Card, ErrorState, Input, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
+import { Badge, Button, Callout, Card, ErrorState, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
 import { downloadExport } from './util';
-import { ForecastBadge, ProgressMeter, useObjectivesOverview } from '../components/ext/ObjectivesUI';
+import { ForecastBadge, MeterKey, ProgressMeter, useObjectivesOverview } from '../components/ext/ObjectivesUI';
+import { NewObjectiveModal } from '../components/ext/ObjectivesNewModal';
 
 export default function Leadership() {
   const q = useQuery({ queryKey: ['leadership'], queryFn: () => api.get('/api/leadership/delivery') });
@@ -73,30 +74,21 @@ export default function Leadership() {
 function ObjectivesCard() {
   const q = useObjectivesOverview();
   const active = (q.data?.items ?? []).filter((o: any) => o.status === 'active');
+  const [open, setOpen] = useState(false);
   return (
     <Card title="Objectives" actions={<Link to="/objectives" className="rounded text-[13px] font-medium text-accent-ink hover:underline">All objectives</Link>}>
       {q.isLoading ? <div className="space-y-3"><Skeleton className="h-10" /><Skeleton className="h-10" /></div> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : (
         <ul className="space-y-3">{active.map((o: any) => (
           <li key={o.id}>
             <div className="flex items-start justify-between gap-2"><Link to={`/objectives/${o.id}`} className="min-w-0 text-[13px] font-medium hover:underline">{o.title}</Link><ForecastBadge status={o.forecast?.status} /></div>
-            <div className="text-[12px] text-ink-3">{o.owner_name ?? 'No owner'} · {o.period_end ? `ends ${fmtDate(o.period_end)}` : 'no end date'} · {o.milestonesDone}/{o.milestones} milestones · {o.progress === null ? 'progress N/A' : `${Math.round(o.progress * 100)}%`}</div>
+            <div className="text-[12px] text-ink-3">{o.owner_name ?? 'No owner'} · {o.period_end ? `ends ${fmtDate(o.period_end)}` : 'no end date'} · {o.milestones ? `${o.milestonesDone}/${o.milestones} milestones` : 'no milestones'} · {o.progress === null ? 'progress N/A' : `${Math.round(o.progress * 100)}%`}</div>
             <div className="mt-1"><ProgressMeter value={o.progress} expected={o.forecast?.expected} status={o.forecast?.status} label={`Progress of ${o.title}`} /></div></li>))}
           {active.length === 0 && <li className="text-[13px] text-ink-3">No active objectives.</li>}</ul>)}
-      {q.data?.permissions.canCreate && <NewObjective />}
+      {active.length > 0 && <MeterKey className="mt-3" />}
+      {q.data?.permissions.canCreate && <>
+        <div className="mt-4 border-t border-line pt-3"><Button size="sm" icon={<Plus className="size-4" />} onClick={() => setOpen(true)}>New objective</Button></div>
+        <NewObjectiveModal open={open} onClose={() => setOpen(false)} />
+      </>}
     </Card>
-  );
-}
-
-function NewObjective() {
-  const qc = useQueryClient(); const toast = useToast(); const [f, setF] = useState({ title: '', periodEnd: '' });
-  const m = useMutation({ mutationFn: () => api.post('/api/objectives/create', { title: f.title, periodEnd: f.periodEnd || null }),
-    onSuccess: () => { setF({ title: '', periodEnd: '' }); qc.invalidateQueries({ queryKey: ['leadership'] }); qc.invalidateQueries({ queryKey: ['objectives-overview'] }); },
-    onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
-  return (
-    <form className="mt-4 flex flex-wrap gap-2 border-t border-line pt-3" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
-      <Input aria-label="Objective" className="h-8 min-w-0 flex-1" placeholder="New objective" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
-      <Input aria-label="Objective end date" type="date" className="h-8 w-36" value={f.periodEnd} onChange={(e) => setF({ ...f, periodEnd: e.target.value })} />
-      <Button size="sm" type="submit" disabled={!f.title} loading={m.isPending}>Add</Button>
-    </form>
   );
 }

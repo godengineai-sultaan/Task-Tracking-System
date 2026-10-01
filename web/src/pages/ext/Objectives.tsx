@@ -1,13 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router';
 import { Plus, Search, Target } from 'lucide-react';
-import { api } from '../../lib/api';
 import { pct } from '../../lib/format';
 import { useMe, useRoles } from '../../lib/session';
-import { Avatar, Button, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Stat, Textarea, useToast } from '../../components/ui';
-import { useUsers } from '../../components/TaskStatus';
-import { BASIS, FORECAST, ForecastBadge, ProgressMeter, periodText, useObjectivesOverview, type ForecastStatus } from '../../components/ext/ObjectivesUI';
+import { Avatar, Button, Card, Empty, ErrorState, Input, PageHeader, Segmented, Select, Skeleton, Stat, cx } from '../../components/ui';
+import { BASIS, FORECAST, ForecastBadge, MeterKey, ProgressMeter, periodText, useObjectivesOverview, type ForecastStatus } from '../../components/ext/ObjectivesUI';
+import { NewObjectiveModal } from '../../components/ext/ObjectivesNewModal';
 
 export default function Objectives() {
   const r = useRoles(); const me = useMe();
@@ -30,9 +28,12 @@ export default function Objectives() {
       {q.isLoading ? <div className="space-y-3"><Skeleton className="h-20" /><Skeleton className="h-28" /><Skeleton className="h-28" /></div>
         : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4" role="group" aria-label="Active objectives by status (select to filter)">
             {(['on_track', 'at_risk', 'off_track', 'insufficient_data'] as ForecastStatus[]).map((s) => (
-              <Stat key={s} label={FORECAST[s].label} value={counts[s] ?? 0} sub="active objectives" tone={s === 'off_track' && counts[s] ? 'critical' : s === 'at_risk' && counts[s] ? 'warning' : undefined} />))}
+              <button key={s} type="button" aria-pressed={health === s} onClick={() => { setHealth(health === s ? '' : s); setScope('active'); }}
+                className={cx('cursor-pointer rounded-xl text-left hover:*:ring-line-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent', health === s && 'ring-2 ring-accent')}>
+                <Stat label={FORECAST[s].label} value={counts[s] ?? 0} sub={health === s ? 'Showing these · select to clear' : 'active objectives'} tone={s === 'off_track' && counts[s] ? 'critical' : s === 'at_risk' && counts[s] ? 'warning' : undefined} />
+              </button>))}
           </div>
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <Segmented label="Objective lifecycle" value={scope} onChange={setScope} options={[{ value: 'active', label: 'Active' }, { value: 'closed', label: 'Closed' }, { value: 'all', label: 'All' }]} />
@@ -51,7 +52,7 @@ export default function Objectives() {
                 : q.data.permissions.canCreate ? <Button variant="primary" size="sm" onClick={() => setOpen(true)}>Create the first objective</Button> : undefined}>
               {items.length ? 'Try another status, owner or search.' : 'Leadership sets objectives; milestones and key results show how work moves them.'}</Empty></Card>
           ) : (
-            <ul className="space-y-3" aria-label="Objectives">{shown.map((o) => <ObjectiveRow key={o.id} o={o} />)}</ul>
+            <><MeterKey className="mb-2" /><ul className="space-y-3" aria-label="Objectives">{shown.map((o) => <ObjectiveRow key={o.id} o={o} />)}</ul></>
           )}
         </>)}
       <NewObjectiveModal open={open} onClose={() => setOpen(false)} />
@@ -86,32 +87,5 @@ function ObjectiveRow({ o }: { o: any }) {
       </div>
       {f && f.status !== 'on_track' && f.reasons[0] && <p className="mt-2 text-[13px] text-ink-2">{f.reasons[0]}</p>}
     </li>
-  );
-}
-
-export function NewObjectiveModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const qc = useQueryClient(); const toast = useToast(); const users = useUsers(); const nav = useNavigate();
-  const blank = { title: '', description: '', ownerId: '', periodStart: '', periodEnd: '' };
-  const [f, setF] = useState(blank);
-  const bad = f.periodStart && f.periodEnd && f.periodEnd < f.periodStart;
-  const m = useMutation({
-    mutationFn: () => api.post('/api/objectives/create', { title: f.title, description: f.description, ownerId: f.ownerId || null, periodStart: f.periodStart || null, periodEnd: f.periodEnd || null }),
-    onSuccess: (o: any) => { qc.invalidateQueries({ queryKey: ['objectives-overview'] }); qc.invalidateQueries({ queryKey: ['leadership'] }); toast({ tone: 'good', text: 'Objective created' }); setF(blank); onClose(); nav(`/objectives/${o.id}`); },
-    onError: (e: any) => toast({ tone: 'critical', text: e.message }),
-  });
-  return (
-    <Modal open={open} onClose={onClose} title="New objective"
-      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={m.isPending} disabled={!f.title.trim() || !!bad} onClick={() => m.mutate()}>Create objective</Button></>}>
-      <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); if (f.title.trim() && !bad) m.mutate(); }}>
-        <Field label="Objective">{(id) => <Input id={id} value={f.title} maxLength={300} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="What outcome should be true by the end of the period?" />}</Field>
-        <Field label="Description (optional)">{(id) => <Textarea id={id} rows={2} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} />}</Field>
-        <Field label="Owner">{(id) => <Select id={id} value={f.ownerId} onChange={(e) => setF({ ...f, ownerId: e.target.value })}><option value="">Me</option>{(users.data ?? []).map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}</Select>}</Field>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Period start">{(id) => <Input id={id} type="date" value={f.periodStart} onChange={(e) => setF({ ...f, periodStart: e.target.value })} />}</Field>
-          <Field label="Period end" error={bad ? 'End must be on or after the start' : null} hint="Needed for the early warning">{(id) => <Input id={id} type="date" value={f.periodEnd} onChange={(e) => setF({ ...f, periodEnd: e.target.value })} />}</Field>
-        </div>
-        <button type="submit" hidden />
-      </form>
-    </Modal>
   );
 }

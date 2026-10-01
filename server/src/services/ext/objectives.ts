@@ -93,7 +93,7 @@ export function keyResultProgress(kr: any, milestones: Map<string, MilestoneRow>
     }
     const p = Math.min(1, Math.max(0, kr.current_value / kr.target_value));
     return { ...base, current: kr.current_value, target: kr.target_value, measure: kr.unit, progress: p, basis: 'manual',
-      explanation: `Reported ${kr.current_value}${kr.unit ? ` ${kr.unit}` : ''} of ${kr.target_value}${kr.unit ? ` ${kr.unit}` : ''}.` };
+      explanation: `Reported ${kr.current_value} of ${kr.target_value}${kr.unit ? ` ${kr.unit}` : ''}.` };
   }
   const ms = base.milestone_ids.map((id: string) => milestones.get(id)).filter((m: MilestoneRow | undefined): m is MilestoneRow => !!m && m.status !== 'cancelled');
   if (kr.kind === 'milestone_completion') {

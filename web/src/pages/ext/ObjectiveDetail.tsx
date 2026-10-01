@@ -8,7 +8,7 @@ import { useMe, useRoles } from '../../lib/session';
 import { Avatar, Badge, Button, Callout, Card, Checkbox, Empty, ErrorState, Field, IconButton, Input, Modal, PageHeader, Select, Skeleton, StatusBadge, Textarea, cx, useToast } from '../../components/ui';
 import { useProjects, useUsers } from '../../components/TaskStatus';
 import { TaskDrawer } from '../TaskDetail';
-import { BASIS, ConfidenceTrend, FORECAST, ForecastBadge, KR_KIND, LIFECYCLE, ProgressMeter, periodText } from '../../components/ext/ObjectivesUI';
+import { BASIS, ConfidenceTrend, FORECAST, ForecastBadge, KR_KIND, LIFECYCLE, ProgressMeter, periodText, weekLabel } from '../../components/ext/ObjectivesUI';
 
 const CONFIDENCE = ['Very low', 'Low', 'Medium', 'High', 'Very high'];
 const newKey = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -100,12 +100,12 @@ function KeyResultsCard({ d }: { d: any }) {
   const can = d.permissions.canMaintain;
   return (
     <Card title="Key results" subtitle="Measurable results. Linked kinds are computed from work; reported values come from the owner."
-      actions={can && <Button size="sm" icon={<Plus className="size-4" />} onClick={() => setModal({})}>Add key result</Button>}>
+      actions={can && <Button size="sm" aria-label="Add key result" icon={<Plus className="size-4" />} onClick={() => setModal({})}><span className="sm:hidden">Add</span><span className="hidden sm:inline">Add key result</span></Button>}>
       {d.keyResults.length === 0 ? <Empty title="No key results yet">{can ? 'Add one to say how success is measured.' : 'The owner has not added key results.'}</Empty> : (
         <ul className="divide-y divide-line">{d.keyResults.map((k: any) => (
           <li key={k.id} className="py-3 first:pt-0 last:pb-0">
             <div className="flex flex-wrap items-start gap-2">
-              <div className="min-w-0 flex-1 basis-56"><div className="text-[14px] font-medium">{k.title}</div>
+              <div className="min-w-0 flex-1 basis-40"><div className="text-[14px] font-medium">{k.title}</div>
                 <div className="mt-0.5 text-[12px] text-ink-3">{KR_KIND[k.kind]}{k.basis !== 'none' && k.kind === 'task_completion' ? ` · ${BASIS[k.basis]}` : ''}</div></div>
               <span className="text-[13px] font-medium tabular">{k.progress === null ? 'N/A' : pct(k.progress)}</span>
               {can && <div className="flex gap-0.5">
@@ -201,25 +201,25 @@ function KrModal({ d, kr, onClose }: { d: any; kr: any | null; onClose: () => vo
 function MilestonesCard({ d }: { d: any }) {
   const toast = useToast(); const refresh = useRefresh(d.objective.id); const can = d.permissions.canEdit;
   const opts = useQuery({ queryKey: ['objective-ms-options', d.objective.id], queryFn: () => api.get(`/api/objectives/${d.objective.id}/milestone-options`), enabled: can });
-  const [pick, setPick] = useState(''); const [move, setMove] = useState<{ id: string; message: string } | null>(null);
+  const [pick, setPick] = useState(''); const [move, setMove] = useState<{ id: string; message: string } | null>(null); const [drop, setDrop] = useState<any | null>(null);
   const qc = useQueryClient();
   const after = () => { refresh(); qc.invalidateQueries({ queryKey: ['objective-ms-options', d.objective.id] }); };
   const linkM = useMutation({ mutationFn: (b: { milestoneId: string; move?: boolean }) => api.post(`/api/objectives/${d.objective.id}/milestones`, b),
     onSuccess: () => { setPick(''); setMove(null); after(); toast({ tone: 'good', text: 'Milestone linked' }); },
     onError: (e: any, b) => { if (e instanceof ApiError && e.status === 409 && !b.move) setMove({ id: b.milestoneId, message: e.message }); else toast({ tone: 'critical', text: e.message }); } });
   const unlink = useMutation({ mutationFn: (mid: string) => api.del(`/api/objectives/${d.objective.id}/milestones/${mid}`),
-    onSuccess: () => { after(); toast({ tone: 'good', text: 'Milestone unlinked' }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
+    onSuccess: () => { setDrop(null); after(); toast({ tone: 'good', text: 'Milestone unlinked' }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   return (
-    <Card title="Linked milestones" subtitle={d.work.value === null ? d.work.explanation : `Linked work ${pct(d.work.value)}: ${d.work.explanation}`} padded={false}>
+    <Card title="Linked milestones" subtitle={d.milestones.length === 0 ? undefined : d.work.value === null ? d.work.explanation : `Linked work ${pct(d.work.value)}: ${d.work.explanation}`} padded={false}>
       {d.milestones.length === 0 ? <Empty title="No milestones linked">{can ? 'Link project milestones that move this objective.' : 'Leadership links milestones to objectives.'}</Empty> : (
         <ul className="divide-y divide-line">{d.milestones.map((m: any) => (
           <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
             <div className="min-w-0 flex-1 basis-48">
-              <div className="text-[13px] font-medium">{m.restricted ? <span className="text-ink-3">{m.name}</span> : <>{m.project_id ? <Link className="hover:underline" to={`/projects/${m.project_id}`}>{m.project_key}</Link> : null} · {m.name}</>}</div>
+              <div className="text-[13px] font-medium">{m.restricted ? <span className="text-ink-3">{m.name}</span> : <>{m.project_id ? <Link className="hover:underline" to={`/projects/${m.project_id}`} aria-label={`Project ${m.project_key}`}>{m.project_key}</Link> : null} · {m.name}</>}</div>
               <div className="text-[12px] text-ink-3">{m.due_date ? `Due ${fmtDate(m.due_date)}` : 'No due date'} · {m.stats.done}/{m.stats.tasks} tasks accepted{m.stats.tasks > 0 && m.stats.estimated < m.stats.tasks ? ` · ${m.stats.tasks - m.stats.estimated} unestimated` : ''}</div>
             </div>
             <Badge tone={m.status === 'done' ? 'good' : m.status === 'cancelled' ? 'neutral' : 'info'}>{m.status === 'done' ? 'Done' : m.status === 'cancelled' ? 'Cancelled' : 'Open'}</Badge>
-            {can && <IconButton label={`Unlink milestone ${m.name}`} onClick={() => unlink.mutate(m.id)} disabled={unlink.isPending}><Unlink className="size-4" /></IconButton>}
+            {can && <IconButton label={`Unlink milestone ${m.name}`} onClick={() => setDrop(m)}><Unlink className="size-4" /></IconButton>}
           </li>))}</ul>)}
       {can && (
         <form className="flex flex-wrap gap-2 border-t border-line px-4 py-3" onSubmit={(e) => { e.preventDefault(); if (pick) linkM.mutate({ milestoneId: pick }); }}>
@@ -233,6 +233,11 @@ function MilestonesCard({ d }: { d: any }) {
         footer={<><Button variant="ghost" onClick={() => setMove(null)}>Cancel</Button><Button variant="primary" loading={linkM.isPending} onClick={() => move && linkM.mutate({ milestoneId: move.id, move: true })}>Move here</Button></>}>
         <p className="text-sm">{move?.message}</p><p className="mt-2 text-[13px] text-ink-3">A milestone counts toward one objective at a time.</p>
       </Modal>
+      <Modal open={!!drop} onClose={() => setDrop(null)} title="Unlink milestone?"
+        footer={<><Button variant="ghost" onClick={() => setDrop(null)}>Cancel</Button><Button variant="danger" loading={unlink.isPending} onClick={() => drop && unlink.mutate(drop.id)}>Unlink</Button></>}>
+        <p className="text-sm">Unlink “{drop?.project_key ? `${drop.project_key} · ` : ''}{drop?.name}” from this objective?</p>
+        <p className="mt-2 text-[13px] text-ink-3">Its {drop?.stats.tasks ?? 0} task{drop?.stats.tasks === 1 ? '' : 's'} will stop counting toward progress and the forecast. The milestone and its tasks are not changed, and you can link it again later.</p>
+      </Modal>
     </Card>
   );
 }
@@ -241,25 +246,26 @@ function TasksCard({ d, onOpen }: { d: any; onOpen: (id: string) => void }) {
   const [all, setAll] = useState(false);
   const rows = all ? d.tasks : d.tasks.slice(0, 12);
   return (
-    <Card title="Linked tasks" subtitle={`Tasks in the linked milestones (cancelled tasks are left out). ${d.work.stats.estimated} of ${d.work.stats.tasks} have an estimate.`} padded={false}>
-      {d.tasks.length === 0 ? <Empty title={d.hiddenTasks ? 'No tasks you can see' : 'No linked tasks yet'}>{d.hiddenTasks ? `${d.hiddenTasks} task(s) are in projects you do not have access to. They still count toward progress.` : 'Tasks appear when milestones with tasks are linked.'}</Empty> : (
+    <Card title="Linked tasks" subtitle={`Tasks in the linked milestones (cancelled tasks are left out).${d.work.stats.tasks ? ` ${d.work.stats.estimated} of ${d.work.stats.tasks} have an estimate.` : ''}`} padded={false}>
+      {d.tasks.length === 0 ? <Empty title={d.hiddenTasks ? 'No tasks you can see' : 'No linked tasks yet'}>{d.hiddenTasks ? `${d.hiddenTasks} task${d.hiddenTasks === 1 ? ' is' : 's are'} in projects you do not have access to. They still count toward progress.` : 'Tasks appear when milestones with tasks are linked.'}</Empty> : (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-[13px]">
+            <table className="w-full text-[13px]">
               <caption className="sr-only">Tasks linked to this objective</caption>
-              <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr><th className="px-4 py-2 font-medium">Task</th><th className="px-3 py-2 font-medium">Status</th><th className="px-3 py-2 font-medium">Owner</th><th className="px-3 py-2 text-right font-medium">Estimate</th><th className="px-3 py-2 font-medium">Due / accepted</th></tr></thead>
+              <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr><th className="px-4 py-2 font-medium">Task</th><th className="px-3 py-2 font-medium">Status</th><th className="hidden px-3 py-2 font-medium sm:table-cell">Owner</th><th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Estimate</th><th className="hidden px-3 py-2 font-medium sm:table-cell">Due / accepted</th></tr></thead>
               <tbody className="divide-y divide-line">{rows.map((t: any) => (
-                <tr key={t.id}>
-                  <td className="max-w-[280px] px-4 py-2"><button type="button" className="truncate rounded text-left font-medium hover:underline" onClick={() => onOpen(t.id)}><span className="text-ink-3">#{t.number}</span> {t.title}</button></td>
+                <tr key={t.id} className="align-top">
+                  <td className="px-4 py-2"><button type="button" className="rounded text-left font-medium break-words hover:underline" onClick={() => onOpen(t.id)}><span className="text-ink-3">#{t.number}</span> {t.title}</button>
+                    <div className="mt-0.5 text-[12px] text-ink-3 sm:hidden">{[t.owner_name, t.estimate_minutes ? hm(t.estimate_minutes) : 'No estimate', dueText(t)].filter(Boolean).join(' · ')}</div></td>
                   <td className="px-3 py-2"><StatusBadge status={t.status} /></td>
-                  <td className="px-3 py-2 whitespace-nowrap">{t.owner_name}</td>
-                  <td className="px-3 py-2 text-right tabular">{t.estimate_minutes ? hm(t.estimate_minutes) : <span className="text-ink-3">None</span>}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{t.status === 'done' && t.accepted_at ? `Accepted ${fmtDate(t.accepted_at)}` : t.due_date ? fmtDate(t.due_date) : '—'}</td>
+                  <td className="hidden px-3 py-2 whitespace-nowrap sm:table-cell">{t.owner_name}</td>
+                  <td className="hidden px-3 py-2 text-right tabular sm:table-cell">{t.estimate_minutes ? hm(t.estimate_minutes) : <span className="text-ink-3">None</span>}</td>
+                  <td className="hidden px-3 py-2 whitespace-nowrap sm:table-cell">{dueText(t) || '—'}</td>
                 </tr>))}</tbody>
             </table>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-2 text-[12px] text-ink-3">
-            <span>{d.hiddenTasks ? `${d.hiddenTasks} more task(s) are in projects you cannot open; they still count toward progress.` : `${d.tasks.length} task(s)`}</span>
+            <span>{d.hiddenTasks ? `${d.hiddenTasks} more task${d.hiddenTasks === 1 ? ' is' : 's are'} in projects you cannot open; they still count toward progress.` : `${d.tasks.length} task${d.tasks.length === 1 ? '' : 's'}`}</span>
             {d.tasks.length > 12 && <Button size="sm" variant="ghost" onClick={() => setAll(!all)}>{all ? 'Show fewer' : `Show all ${d.tasks.length}`}</Button>}
           </div>
         </>)}
@@ -267,13 +273,15 @@ function TasksCard({ d, onOpen }: { d: any; onOpen: (id: string) => void }) {
   );
 }
 
+const dueText = (t: any) => (t.status === 'done' && t.accepted_at ? `Accepted ${fmtDate(t.accepted_at)}` : t.due_date ? `Due ${fmtDate(t.due_date)}` : '');
+
 function CheckinsCard({ d }: { d: any }) {
   const toast = useToast(); const refresh = useRefresh(d.objective.id);
   const [c, setC] = useState(0); const [note, setNote] = useState(''); const [key, setKey] = useState(newKey);
   const m = useMutation({ mutationFn: () => api.post(`/api/objectives/${d.objective.id}/checkins`, { confidence: c, note, idempotencyKey: key }),
     onSuccess: () => { setC(0); setNote(''); setKey(newKey()); refresh(); toast({ tone: 'good', text: 'Check-in posted' }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   return (
-    <Card title="Check-ins" subtitle="The owner's confidence and notes. Shown next to the computed status, never folded into it.">
+    <Card title="Check-ins" subtitle="Confidence and notes from the owner and leadership. Shown next to the computed status, never folded into it.">
       {d.permissions.canCheckIn && (
         <form className="mb-4 space-y-3 border-b border-line pb-4" onSubmit={(e) => { e.preventDefault(); if (c) m.mutate(); }}>
           <fieldset>
@@ -286,7 +294,10 @@ function CheckinsCard({ d }: { d: any }) {
               </label>))}</div>
           </fieldset>
           <Field label="Note (optional)">{(id) => <Textarea id={id} rows={2} maxLength={4000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed, what is blocking, what help is needed" />}</Field>
-          <Button type="submit" variant="primary" size="sm" disabled={!c} loading={m.isPending}>Post check-in</Button>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <Button type="submit" variant="primary" size="sm" disabled={!c} loading={m.isPending}>Post check-in</Button>
+            {!c && <span className="text-[12px] text-ink-3">Choose a confidence level first.</span>}
+          </div>
         </form>)}
       <ConfidenceTrend checkins={d.checkins} />
       {d.checkins.length > 0 && (
@@ -309,7 +320,7 @@ function HistoryCard({ d }: { d: any }) {
       {d.statusHistory.length === 0 ? <p className="text-[13px] text-ink-3">No weekly snapshot yet. The check runs once a week.</p> : (
         <ul className="space-y-2">{d.statusHistory.map((h: any) => (
           <li key={h.period_key} className="flex flex-wrap items-center gap-2 text-[13px]">
-            <span className="w-20 shrink-0 tabular text-ink-3">{h.period_key}</span><ForecastBadge status={h.status} />
+            <span className="shrink-0 tabular text-ink-3" title={h.period_key}>{weekLabel(h.period_key)}</span><ForecastBadge status={h.status} />
             <span className="tabular text-ink-2">{h.progress === null ? 'N/A' : pct(h.progress)}</span>
             {h.notified && <span className="text-[12px] text-ink-3">owner notified</span>}
           </li>))}</ul>)}
@@ -335,6 +346,7 @@ function EditObjectiveModal({ o, onClose }: { o: any; onClose: () => void }) {
         <Field label="Description">{(id) => <Textarea id={id} rows={3} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} />}</Field>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Owner">{(id) => <Select id={id} value={f.ownerId} onChange={(e) => setF({ ...f, ownerId: e.target.value })}><option value="">No owner</option>
+            {o.owner_id && !(users.data ?? []).some((u: any) => u.id === o.owner_id) && <option value={o.owner_id}>{o.owner_name ?? 'Current owner'}</option>}
             {(users.data ?? []).map((u: any) => <option key={u.id} value={u.id}>{u.name}{u.id === me.user.id ? ' (me)' : ''}</option>)}</Select>}</Field>
           <Field label="Lifecycle">{(id) => <Select id={id} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>{Object.entries(LIFECYCLE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</Select>}</Field>
           <Field label="Period start">{(id) => <Input id={id} type="date" value={f.periodStart} onChange={(e) => setF({ ...f, periodStart: e.target.value })} />}</Field>
