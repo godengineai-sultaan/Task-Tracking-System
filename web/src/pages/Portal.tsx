@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router';
 import { ArrowLeft, CheckCircle2, ChevronRight, Download, Newspaper } from 'lucide-react';
 import { api } from '../lib/api';
 import { STATUS_LABEL, fmtDate } from '../lib/format';
-import { Badge, Card, Empty, ErrorState, PageHeader, Skeleton } from '../components/ui';
+import { Badge, Card, Empty, ErrorState, PageError, PageHeader, Skeleton, useFocusHeading } from '../components/ui';
 import { CLIENT_STATUS, ClientUpdateView, periodText, type ClientUpdate } from '../components/ext/ClientbrandUpdateView';
 
 export default function Portal() {
@@ -18,7 +18,7 @@ function PortalHome() {
   // Published updates for the client's own projects (the API never returns drafts or other clients' updates).
   const updates = useQuery({ queryKey: ['portal', 'updates'], queryFn: () => api.get<ClientUpdate[]>('/api/client-updates') });
   if (q.isLoading) return <Skeleton className="h-64" />;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return <PageError title="Your projects" error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data;
   return (
     <div>
@@ -66,6 +66,7 @@ function ProjectUpdates({ q, projectId }: { q: UseQueryResult<ClientUpdate[]>; p
 
 function UpdateDetail({ id }: { id: string }) {
   const q = useQuery({ queryKey: ['portal', 'update', id], queryFn: () => api.get<ClientUpdate>(`/api/client-updates/${id}`) });
+  useFocusHeading(id, !!q.data);
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">

@@ -140,7 +140,7 @@ test('manager follows a blocker to the team aging view; the policy is read-only 
   const panel = page.getByTestId('blocker-escalation');
   await panel.getByRole('button', { name: /^History/ }).click();
   await panel.getByRole('link', { name: 'See every open blocker in your scope' }).click();
-  await expect(page).toHaveURL(/\/admin\?tab=escalation/);
+  await expect(page).toHaveURL(/\/blockers$/);
   await expect(page.getByText('Open blockers on your team.')).toBeVisible();
   const table = page.getByRole('table');
   await expect(table.getByRole('link', { name: /Verify courier webhook signatures/ })).toBeVisible();
@@ -176,7 +176,10 @@ test('blocker aging shows error-with-retry and empty states', async ({ page }) =
 test('client: escalation is not available and offers no pointless retry', async ({ page }) => {
   await signIn(page, 'lena', 'globex.example');
   await page.goto('/admin?tab=escalation');
-  await expect(page.getByText('Not available for your account')).toBeVisible();
+  await expect(page).toHaveURL(/\/portal$/); // client accounts only have the portal
+  await expect(page.getByRole('heading', { level: 1, name: 'Your projects' })).toBeVisible();
+  await page.goto('/blockers');
+  await expect(page).toHaveURL(/\/portal$/);
   await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
   await axeClean(page);
 });

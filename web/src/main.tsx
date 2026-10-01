@@ -1,9 +1,9 @@
 import { StrictMode, lazy, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createBrowserRouter, Navigate, RouterProvider, useLocation } from 'react-router';
+import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import './index.css';
-import { MeProvider, useMeQuery } from './lib/session';
+import { MeProvider, useMeQuery, useRoles } from './lib/session';
 import { Shell } from './components/Shell';
 import { ErrorState, Spinner, ToastProvider } from './components/ui';
 import { JoinPage, LoginPage, SignupPage } from './pages/Auth';
@@ -49,40 +49,44 @@ function Authed() {
   return <MeProvider me={me.data!}><Shell /></MeProvider>;
 }
 const page = (el: React.ReactNode) => <Suspense fallback={<Spinner />}>{el}</Suspense>;
+/** Client (customer) accounts only have the portal and their settings: every staff page sends them to the portal. */
+function StaffOnly() { return useRoles().customer ? <Navigate to="/portal" replace /> : <Outlet />; }
 
 const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
   { path: '/signup', element: <SignupPage /> },
   { path: '/join/:slug/:token', element: <JoinPage /> },
   { path: '/', element: <Authed />, children: [
-    { index: true, element: page(<MyDay />) },
-    { path: 'tasks', element: page(<Tasks />) },
-    { path: 'tasks/:id', element: page(<TaskPage />) },
-    { path: 'recap', element: page(<Recap />) },
-    { path: 'analytics', element: page(<Analytics />) },
-    { path: 'analytics/:userId', element: page(<Analytics />) },
-    { path: 'admin/routine', element: page(<Routine />) },
-    { path: 'admin/routine/:userId', element: page(<PersonDay />) },
-    { path: 'capacity', element: page(<Capacity />) },
-    { path: 'leadership', element: page(<Leadership />) },
-    { path: 'projects', element: page(<Projects />) },
-    { path: 'projects/:id', element: page(<ProjectDetail />) },
-    { path: 'calendar', element: page(<CalendarPage />) },
-    { path: 'recurring', element: page(<Recurring />) },
-    { path: 'integrations', element: page(<Integrations />) },
-    { path: 'admin', element: page(<Admin />) },
     { path: 'settings', element: page(<Settings />) },
     { path: 'portal', element: page(<Portal />) },
-    { path: 'templates', element: page(<Templates />) },
-    { path: 'automations', element: page(<Automations />) },
-    { path: 'team-review', element: page(<TeamReview />) },
-    { path: 'objectives', element: page(<Objectives />) },
-    { path: 'objectives/:id', element: page(<ObjectiveDetail />) },
-    { path: 'capacity/what-if', element: page(<WhatIf />) },
-    { path: 'profitability', element: page(<Profitability />) },
-    { path: 'client-updates', element: page(<ClientUpdates />) },
-    { path: 'insights', element: page(<Insights />) },
-    { path: 'blockers', element: page(<Blockers />) },
+    { element: <StaffOnly />, children: [
+      { index: true, element: page(<MyDay />) },
+      { path: 'tasks', element: page(<Tasks />) },
+      { path: 'tasks/:id', element: page(<TaskPage />) },
+      { path: 'recap', element: page(<Recap />) },
+      { path: 'analytics', element: page(<Analytics />) },
+      { path: 'analytics/:userId', element: page(<Analytics />) },
+      { path: 'admin/routine', element: page(<Routine />) },
+      { path: 'admin/routine/:userId', element: page(<PersonDay />) },
+      { path: 'capacity', element: page(<Capacity />) },
+      { path: 'leadership', element: page(<Leadership />) },
+      { path: 'projects', element: page(<Projects />) },
+      { path: 'projects/:id', element: page(<ProjectDetail />) },
+      { path: 'calendar', element: page(<CalendarPage />) },
+      { path: 'recurring', element: page(<Recurring />) },
+      { path: 'integrations', element: page(<Integrations />) },
+      { path: 'admin', element: page(<Admin />) },
+      { path: 'templates', element: page(<Templates />) },
+      { path: 'automations', element: page(<Automations />) },
+      { path: 'team-review', element: page(<TeamReview />) },
+      { path: 'objectives', element: page(<Objectives />) },
+      { path: 'objectives/:id', element: page(<ObjectiveDetail />) },
+      { path: 'capacity/what-if', element: page(<WhatIf />) },
+      { path: 'profitability', element: page(<Profitability />) },
+      { path: 'client-updates', element: page(<ClientUpdates />) },
+      { path: 'insights', element: page(<Insights />) },
+      { path: 'blockers', element: page(<Blockers />) },
+    ] },
     { path: '*', element: <div className="p-10 text-center text-ink-3">Page not found.</div> },
   ] },
 ]);

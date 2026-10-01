@@ -10,6 +10,8 @@ import { badRequest, forbidden, unauthorized } from '../lib/errors.js';
 import { randomBytes } from 'node:crypto';
 import { aiStatus } from '../services/ai.js';
 import { localToday } from '../services/calendar.js';
+import { isStaff } from '../services/access.js';
+import { loadBranding } from '../services/ext/clientbrand-brand.js';
 
 const password = z.string().min(10, 'Use at least 10 characters').max(200);
 
@@ -97,8 +99,14 @@ export async function authRoutes(app: FastifyInstance) {
     const t = await one(db, `select id, slug, name, legal_name, timezone, logo_url, plan, seat_limit, modules, settings, onboarded_at from tenants where id = $1`, [a.tenantId]);
     const u = await one(db, `select id, email, name, title, roles, is_founder, timezone, mfa_enabled, department_id, role_profile_id from users where id = $1`, [a.id]);
     const unread = await one(db, `select count(*)::int n from notifications where user_id = $1 and read_at is null`, [a.id]);
-    return { user: { ...u, managedUserIds: a.managedUserIds, effectiveTimezone: a.timezone }, tenant: t, unreadNotifications: unread.n,
-      today: localToday(a.timezone), ai: aiStatus(a) };
+    // Navigation flags: project owners can open Profitability (hours view) and, for client projects, Client updates.
+    const owns = await one(db, `select bool_or(true) any_project, coalesce(bool_or(customer_id is not null), false) client_project
+      from projects where owner_id = $1 and status <> 'archived' and $2::boolean`, [a.id, isStaff(a)]);
+    // Accent and logo come with the session so the brand applies on first paint (the full branding query follows).
+    const b = await loadBranding(db, a.tenantId);
+    return { user: { ...u, managedUserIds: a.managedUserIds, effectiveTimezone: a.timezone, ownsProjects: !!owns.any_project, ownsClientProjects: owns.client_project },
+      tenant: t, unreadNotifications: unread.n, today: localToday(a.timezone), ai: aiStatus(a),
+      branding: { accent: b.accent, logoUrl: b.logoFileId ? `/api/branding/logo?v=${b.logoFileId}` : null } };
   }));
 
   app.patch('/api/me', async (req) => tx(req, async (db, a) => {

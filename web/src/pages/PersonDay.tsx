@@ -4,20 +4,22 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, BarChart3, CheckCheck, ChevronLeft, ChevronRight, CircleDot, Clock, FileText, HelpCircle, ListPlus, MessageSquare, Pencil, Shuffle, Unlock, XCircle } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { STATUS_LABEL, addDays, fmtDate, fmtDateTime, fmtTime, hm } from '../lib/format';
-import { useMe } from '../lib/session';
-import { AssessmentBadge, Badge, Button, Callout, Card, ErrorState, Field, IconButton, Input, Modal, PageHeader, Select, Skeleton, StatusDot, Textarea, useToast } from '../components/ui';
+import { useMe, useRoles } from '../lib/session';
+import { AssessmentBadge, Badge, Button, Callout, Card, Field, IconButton, Input, Modal, NoAccess, PageError, PageHeader, Select, Skeleton, StatusDot, Textarea, useToast } from '../components/ui';
 import { AllocationBar } from '../components/time';
 import { useUsers } from '../components/TaskStatus';
 
 const ICON: Record<string, any> = { status: CircleDot, time: Clock, evidence: FileText, blocker: XCircle, comment: MessageSquare, correction: Pencil };
 
 export default function PersonDay() {
-  const { userId } = useParams(); const me = useMe(); const [sp, setSp] = useSearchParams();
+  const { userId } = useParams(); const me = useMe(); const roles = useRoles(); const [sp, setSp] = useSearchParams();
   const date = sp.get('date') ?? me.today;
-  const q = useQuery({ queryKey: ['timeline', userId, date], queryFn: () => api.get(`/api/admin/routine/${userId}${qs({ date })}`) });
+  const allowed = roles.canReview || userId === me.user.id; // anyone may open their own day
+  const q = useQuery({ queryKey: ['timeline', userId, date], queryFn: () => api.get(`/api/admin/routine/${userId}${qs({ date })}`), enabled: allowed });
   const [action, setAction] = useState<string | null>(null);
+  if (!allowed) return <div><PageHeader title="Daily routine" /><NoAccess>Only the main administrator and team managers can open the daily routine view.</NoAccess></div>;
   if (q.isLoading) return <Skeleton className="h-96" />;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return <PageError title="Daily routine" error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data; const r = d.report; const day = r.days[0]; const tz = d.timezone;
   const recap = day.recap;
   const self = userId === me.user.id;

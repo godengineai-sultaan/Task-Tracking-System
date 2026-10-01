@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Link2, Pencil, Plus, Target, Trash2, Unlink } from 'lucide-react';
+import { ArrowLeft, Link2, Pencil, Plus, Trash2, Unlink } from 'lucide-react';
 import { api, ApiError } from '../../lib/api';
 import { fmtDate, fmtDateTime, hm, pct } from '../../lib/format';
-import { useMe, useRoles } from '../../lib/session';
+import { useMe } from '../../lib/session';
 import { Avatar, Badge, Button, Callout, Card, Checkbox, Empty, ErrorState, Field, IconButton, Input, Modal, PageHeader, Select, Skeleton, StatusBadge, Textarea, cx, useToast } from '../../components/ui';
 import { useProjects, useUsers } from '../../components/TaskStatus';
 import { TaskDrawer } from '../TaskDetail';
@@ -19,11 +19,10 @@ function useRefresh(id: string) {
 }
 
 export default function ObjectiveDetail() {
-  const { id = '' } = useParams(); const r = useRoles();
-  const q = useQuery({ queryKey: ['objective', id], queryFn: () => api.get(`/api/objectives/${id}`), enabled: !r.customer && !!id });
+  const { id = '' } = useParams();
+  const q = useQuery({ queryKey: ['objective', id], queryFn: () => api.get(`/api/objectives/${id}`), enabled: !!id });
   const [drawer, setDrawer] = useState<string | null>(null); const [edit, setEdit] = useState(false);
   const back = <Link to="/objectives" className="mb-3 inline-flex items-center gap-1 rounded text-[13px] text-ink-3 hover:text-ink"><ArrowLeft className="size-4" aria-hidden />All objectives</Link>;
-  if (r.customer) return <Card><Empty icon={<Target className="size-6" />} title="Objectives are for staff" /></Card>;
   if (q.isLoading) return <div>{back}<Skeleton className="mb-4 h-12 w-2/3" /><div className="grid gap-4 lg:grid-cols-3"><Skeleton className="h-72 lg:col-span-2" /><Skeleton className="h-72" /></div></div>;
   if (q.error) return <div>{back}<ErrorState error={q.error} onRetry={(q.error as any)?.status === 404 ? undefined : () => q.refetch()} /></div>;
   const d = q.data; const o = d.objective;

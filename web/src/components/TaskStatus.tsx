@@ -4,15 +4,20 @@ import { ChevronDown } from 'lucide-react';
 import { api } from '../lib/api';
 import { STATUS_LABEL } from '../lib/format';
 import { useMe } from '../lib/session';
-import { Button, Field, Input, Modal, Select, StatusDot, Textarea, cx, useToast } from './ui';
+import { Button, Field, Input, Modal, Select, StatusBadge, StatusDot, Textarea, cx, useToast } from './ui';
 
 const NEXT: Record<string, string[]> = {
   backlog: ['planned', 'in_progress', 'cancelled'], planned: ['in_progress', 'blocked', 'done', 'in_review', 'backlog', 'cancelled'],
   in_progress: ['done', 'in_review', 'blocked', 'planned', 'cancelled'], blocked: ['in_progress', 'planned', 'cancelled'], in_review: [], done: [], cancelled: [],
 };
 
-/** Inline one-click status change. Opens a short dialog only when the transition needs a reason (blocked / cancel / reopen). */
-export function StatusControl({ task, compact, onChanged }: { task: any; compact?: boolean; onChanged?: () => void }) {
+/** Inline one-click status change. Opens a short dialog only when the transition needs a reason (blocked / cancel / reopen).
+ *  `readOnly` (the viewer cannot change this task) shows the status without offering changes the server would refuse. */
+export function StatusControl({ task, compact, onChanged, readOnly }: { task: any; compact?: boolean; onChanged?: () => void; readOnly?: boolean }) {
+  if (readOnly) return compact ? <span role="img" aria-label={`Status: ${STATUS_LABEL[task.status] ?? task.status}`} className="inline-flex px-1.5 py-1"><StatusDot status={task.status} /></span> : <StatusBadge status={task.status} />;
+  return <StatusMenu task={task} compact={compact} onChanged={onChanged} />;
+}
+function StatusMenu({ task, compact, onChanged }: { task: any; compact?: boolean; onChanged?: () => void }) {
   const qc = useQueryClient(); const toast = useToast(); const me = useMe();
   const [open, setOpen] = useState(false);
   const [dialog, setDialog] = useState<null | 'blocked' | 'cancelled' | 'reopen' | 'unblock'>(null);

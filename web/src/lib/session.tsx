@@ -3,10 +3,14 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from './api';
 
 export interface Me {
-  user: { id: string; name: string; email: string; title: string; roles: string[]; is_founder: boolean; mfa_enabled: boolean; managedUserIds: string[]; effectiveTimezone: string; timezone: string | null };
+  user: { id: string; name: string; email: string; title: string; roles: string[]; is_founder: boolean; mfa_enabled: boolean; managedUserIds: string[]; effectiveTimezone: string; timezone: string | null;
+    /** Owns an active project (opens Profitability) / an active client project (prepares client updates). */
+    ownsProjects: boolean; ownsClientProjects: boolean };
   tenant: { id: string; slug: string; name: string; timezone: string; plan: string; seat_limit: number; modules: string[]; settings: any; logo_url: string | null; onboarded_at: string | null };
   unreadNotifications: number; today: string;
   ai: { available: boolean; configured: boolean; enabledByTenant: boolean; note: string; model: string };
+  /** Applied on first paint; the full branding query (/api/branding) refreshes it. */
+  branding: { accent: string | null; logoUrl: string | null };
 }
 const Ctx = createContext<Me | null>(null);
 export function useMeQuery() { return useQuery({ queryKey: ['me'], queryFn: () => api.get<Me>('/api/me'), retry: false, staleTime: 60_000 }); }

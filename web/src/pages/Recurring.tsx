@@ -17,9 +17,9 @@ export default function Recurring() {
   const toggle = useMutation({ mutationFn: (t: any) => api.patch(`/api/recurring/${t.id}`, { active: !t.active }), onSuccess: () => qc.invalidateQueries({ queryKey: ['recurring'] }), onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   return (
     <div>
-      <PageHeader title="Recurring work" subtitle="Templates create one task per occurrence — never duplicates — so routine admin, finance and reviews don't need re-typing."
-        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setOpen(true)}>New template</Button>} />
-      {q.isLoading ? <Skeleton className="h-48" /> : q.error ? <ErrorState error={q.error} /> : q.data.length === 0 ? <Card><Empty icon={<Repeat className="size-6" />} title="No recurring work yet" /></Card> : (
+      <PageHeader title="Recurring work" subtitle="Each rule creates one task per occurrence — never duplicates — so routine admin, finance and reviews don't need re-typing."
+        actions={<Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setOpen(true)}>New recurring task</Button>} />
+      {q.isLoading ? <Skeleton className="h-48" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : q.data.length === 0 ? <Card><Empty icon={<Repeat className="size-6" />} title="No recurring work yet" /></Card> : (
         <Card padded={false}><ul className="divide-y divide-line">{q.data.map((t: any) => (
           <li key={t.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
             <div className="min-w-0 flex-1"><div className="font-medium">{t.title}</div>
@@ -27,22 +27,22 @@ export default function Recurring() {
             <Badge>{CATEGORY_LABEL[t.category]}</Badge>
             <Checkbox checked={t.active} onChange={() => toggle.mutate(t)} label={t.active ? 'Active' : 'Paused'} />
           </li>))}</ul></Card>)}
-      <NewTemplate open={open} onClose={() => setOpen(false)} />
+      <NewRecurring open={open} onClose={() => setOpen(false)} />
     </div>
   );
 }
 
-function NewTemplate({ open, onClose }: { open: boolean; onClose: () => void }) {
+function NewRecurring({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient(); const toast = useToast(); const me = useMe(); const users = useUsers(); const projects = useProjects();
   const [f, setF] = useState<any>({ title: '', description: '', rule: 'weekly', weekday: 5, monthDay: 1, category: 'admin', priority: 'medium', estimateMinutes: '', projectId: '', ownerId: '', checklist: '' });
   const m = useMutation({
     mutationFn: () => api.post('/api/recurring', { ...f, estimateMinutes: f.estimateMinutes ? Number(f.estimateMinutes) : null, projectId: f.projectId || null, ownerId: f.ownerId || undefined,
       weekday: f.rule === 'weekly' ? Number(f.weekday) : null, monthDay: f.rule === 'monthly' ? Number(f.monthDay) : null, checklist: f.checklist.split('\n').map((s: string) => s.trim()).filter(Boolean) }),
-    onSuccess: () => { qc.invalidateQueries(); toast({ tone: 'good', text: 'Template created — today\'s occurrence will appear shortly' }); onClose(); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }),
+    onSuccess: () => { qc.invalidateQueries(); toast({ tone: 'good', text: 'Recurring task created — today\'s occurrence will appear shortly' }); onClose(); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
   const team = (users.data ?? []).filter((u: any) => u.id === me.user.id || me.user.managedUserIds.includes(u.id) || me.user.roles.includes('routine_admin'));
   return (
-    <Modal open={open} onClose={onClose} title="New recurring template" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!f.title} loading={m.isPending} onClick={() => m.mutate()}>Create</Button></>}>
+    <Modal open={open} onClose={onClose} title="New recurring task" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!f.title} loading={m.isPending} onClick={() => m.mutate()}>Create</Button></>}>
       <div className="grid gap-3">
         <Field label="Title">{(id) => <Input id={id} value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="Weekly vendor payment run" />}</Field>
         <div className="grid grid-cols-2 gap-3">

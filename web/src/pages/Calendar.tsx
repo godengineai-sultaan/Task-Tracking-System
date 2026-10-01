@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Navigate } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate } from '../lib/format';
@@ -16,7 +15,6 @@ export default function CalendarPage() {
   const me = useMe(); const r = useRoles();
   const [target, setTarget] = useState<string>(me.user.id);
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.get('/api/people'), enabled: r.canReview || r.sysAdmin });
-  if (r.customer) return <Navigate to="/portal" replace />;
   return (
     <div>
       <PageHeader title="Calendar & leave" subtitle="Working schedules, holidays and leave define available capacity. Leave days show as Not Applicable in reports — never as zero productivity." />
@@ -46,7 +44,7 @@ function Schedule({ userId, header, canEditTenant }: { userId: string | null; he
   const editable = userId === null ? canEditTenant : userId === me.user.id || canEditTenant;
   return (
     <Card title="Working schedule" actions={header}>
-      {q.isLoading ? <Skeleton className="h-48" /> : q.error ? <ErrorState error={q.error} /> : <>
+      {q.isLoading ? <Skeleton className="h-48" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <>
         {userId && <div className="mb-3"><Checkbox checked={useDefault} onChange={setUseDefault} disabled={!editable} label="Use the organization default schedule" /></div>}
         <table className="w-full text-[13px]"><thead className="text-left text-[12px] text-ink-3"><tr><th className="pb-1 font-medium">Day</th><th className="font-medium">Start</th><th className="font-medium">End</th><th className="font-medium">Break (min)</th></tr></thead>
           <tbody>{rows.map((r, i) => (

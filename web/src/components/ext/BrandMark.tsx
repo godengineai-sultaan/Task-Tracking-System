@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../lib/api';
 import { initials } from '../../lib/format';
@@ -68,7 +68,7 @@ function useTenantAccent(accent: string | null | undefined) {
     mounted++;
     return () => { if (--mounted === 0) document.getElementById(STYLE_ID)?.remove(); };
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => { // before paint, so the default accent never shows first
     let el = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
     if (!accent || !HEX.test(accent) || contrastWithWhite(accent) < MIN_CONTRAST) { el?.remove(); return; }
     if (!el) { el = document.createElement('style'); el.id = STYLE_ID; document.head.appendChild(el); }
@@ -91,6 +91,7 @@ export function LogoTile({ name, logoUrl, size = 32, alt = '' }: { name: string;
 export function BrandMark() {
   const me = useMe();
   const b = useBranding();
-  useTenantAccent(b.data?.accent);
-  return <LogoTile name={b.data?.displayName ?? me.tenant.name} logoUrl={b.data?.logo?.url} />;
+  // Until (or if never) the branding query answers, use the accent and logo that came with the session, so nothing flashes the default.
+  useTenantAccent(b.data ? b.data.accent : me.branding?.accent);
+  return <LogoTile name={b.data?.displayName ?? me.tenant.name} logoUrl={b.data ? b.data.logo?.url : me.branding?.logoUrl} />;
 }
