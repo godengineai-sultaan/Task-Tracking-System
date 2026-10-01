@@ -7,6 +7,7 @@ import { CATEGORY_LABEL, PRIORITY_LABEL, STATUS_LABEL, fmtDate, fmtDateTime, hm 
 import { useMe } from '../lib/session';
 import { Avatar, Badge, Button, Callout, Card, Checkbox, Drawer, ErrorState, Field, IconButton, Input, Modal, Select, Spinner, StatusBadge, StatusDot, Textarea, cx, useToast } from '../components/ui';
 import { StatusControl, useProjects, useUsers } from '../components/TaskStatus';
+import { BlockerEscalation, CAUSE_LABEL } from '../components/ext/EscalationBlocker';
 
 export default function TaskPage() {
   const { id } = useParams(); const nav = useNavigate();
@@ -133,13 +134,14 @@ function BlockerCard({ b, canEdit }: { b: any; canEdit: boolean }) {
   return (
     <div className="rounded-xl bg-critical-soft p-3.5 text-[13px] text-critical-ink">
       <div className="flex items-start gap-2"><XCircle className="mt-0.5 size-4 shrink-0" aria-hidden /><div className="flex-1">
-        <p className="font-semibold">Blocked · {b.cause}</p><p className="mt-0.5 text-ink">{b.reason}</p>
+        <p className="font-semibold">Blocked · {CAUSE_LABEL[b.cause] ?? b.cause}</p><p className="mt-0.5 text-ink">{b.reason}</p>
         <p className="mt-1 text-[12px]">Waiting on {b.waiting_on_name || b.waiting_on_text || '—'} · raised {fmtDateTime(b.raised_at)} by {b.raised_by_name}</p>
         {canEdit && <div className="mt-2 flex flex-wrap items-center gap-2">
           <label className="text-[12px]" htmlFor={`fu-${b.id}`}>Next follow-up{overdue ? ' (due)' : ''}</label>
           <Input id={`fu-${b.id}`} type="date" className="h-7 w-40" value={date} onChange={(e) => setDate(e.target.value)} />
           <Button size="sm" onClick={() => m.mutate()} disabled={!date} loading={m.isPending}>Save</Button>
         </div>}
+        <BlockerEscalation blockerId={b.id} />
       </div></div>
     </div>
   );
