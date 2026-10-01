@@ -126,7 +126,7 @@ export interface Assessment {
 }
 
 /** Explainable assessment of one open blocker under a policy. Pure: everything it needs is passed in. */
-export function assessBlocker(cal: CalendarData, p: EscalationPolicy, b: { raised_at: Date | string; next_follow_up: string | null }, today: string, fired: Fired[]): Assessment {
+export function assessBlocker(cal: CalendarData, p: EscalationPolicy, b: { raised_at: Date | string; next_follow_up: string | null; notifiesWaitingOn?: boolean }, today: string, fired: Fired[]): Assessment {
   const raisedOn = localDateOf(b.raised_at, cal.timezone);
   const quiet = p.quietWhenOwnerOnLeave;
   const status = dayCapacity(cal, today).status;
@@ -138,10 +138,12 @@ export function assessBlocker(cal: CalendarData, p: EscalationPolicy, b: { raise
   const currentLevel = [...LEVELS].reverse().find((l) => fired.some((f) => f.level === l && f.outcome === 'notified')) ?? null;
   const pending = steps.filter((s) => !done.has(s.level));
   const due = pending.filter((s) => age >= s.afterDays);
-  const upcoming = pending.find((s) => age < s.afterDays) ?? null;
   // A step that is already due comes first; it fires today only on a day that counts, otherwise on the next one.
-  const next = due[0] ? { ...due[0], date: actsToday ? today : dateAfterWorkingDays(cal, today, 1, quiet) }
-    : upcoming ? { ...upcoming, date: dateAfterWorkingDays(cal, raisedOn, upcoming.afterDays, quiet) } : null;
+  // "Next" names a step that will tell someone: a waiting-on step with no one in the app to notify is only recorded as skipped.
+  const tells = (s: { level: Level }) => s.level !== 'waiting_on' || b.notifiesWaitingOn !== false;
+  const dueNext = due.find(tells); const upNext = pending.find((s) => age < s.afterDays && tells(s));
+  const next = dueNext ? { ...dueNext, date: actsToday ? today : dateAfterWorkingDays(cal, today, 1, quiet) }
+    : upNext ? { ...upNext, date: dateAfterWorkingDays(cal, raisedOn, upNext.afterDays, quiet) } : null;
   let ownerReminderDue: Assessment['ownerReminderDue'] = null;
   if (p.remindOwner) {
     const key = b.next_follow_up ?? null;
@@ -182,7 +184,8 @@ export async function assessRows(db: Db, rows: any[], p: EscalationPolicy, opts:
   return rows.map((r) => {
     const cal = cals.get(r.owner_id)!;
     const today = opts.today ?? localToday(cal.timezone);
-    return { row: r, cal, fired: fired.get(r.id) ?? [], a: assessBlocker(cal, p, r, today, fired.get(r.id) ?? []) };
+    const notifiesWaitingOn = waitsOnInternal(r) && r.waiting_on_user_id !== r.owner_id;
+    return { row: r, cal, fired: fired.get(r.id) ?? [], a: assessBlocker(cal, p, { ...r, notifiesWaitingOn }, today, fired.get(r.id) ?? []) };
   });
 }
 
@@ -328,7 +331,10 @@ export async function blockerEscalation(db: Db, a: Actor, blockerId: string) {
     currentLevel: [...LEVELS].reverse().find((l) => esc.some((e) => e.level === l && e.outcome === 'notified')) ?? null,
     next: p.enabled ? assessed?.a.next ?? null : null,
     waitingOn: bl.waiting_on_name || bl.waiting_on_text || null,
-    nudge: { allowed: !bl.resolved_at && !unavailable && !nudgedToday, nudgedToday, reason: bl.resolved_at ? 'Resolved' : unavailable },
+    nudge: { allowed: !bl.resolved_at && !unavailable && !nudgedToday, nudgedToday, reason: bl.resolved_at ? 'Resolved' : unavailable,
+      // Plain-language cue shown on the card: the viewer is the one being waited on, or a contributor has no one in the app to nudge.
+      hint: bl.resolved_at ? null : bl.waiting_on_user_id === a.id ? 'This blocker is waiting on you.'
+        : contributor && !waitsOnInternal(bl) ? 'Waiting on someone outside the app, so there is no one to nudge here. Contact them directly.' : null },
     history,
   };
 }

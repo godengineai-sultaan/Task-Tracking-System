@@ -83,6 +83,14 @@ describe('working-day arithmetic (pure)', () => {
     expect(sat.due.map((d) => d.level)).toEqual(['manager']);
     expect(sat.next).toMatchObject({ level: 'manager', date: '2026-09-28' });
   });
+  it('does not name the person waited on as next when no one in the app can be told (the step is still due, to be recorded as skipped)', () => {
+    const p = { ...DEFAULT_POLICY, ...POLICY };
+    const ext = { raised_at: RAISED_FRI, next_follow_up: null, notifiesWaitingOn: false };
+    const due = assessBlocker(cal(), p, ext, '2026-09-23', []); // age 2: waiting-on due, manager after 3
+    expect(due.due.map((d) => d.level)).toEqual(['waiting_on']);
+    expect(due.next).toMatchObject({ level: 'manager', date: '2026-09-24' });
+    expect(assessBlocker(cal(), p, ext, '2026-09-22', []).next).toMatchObject({ level: 'manager', date: '2026-09-24' }); // age 1, nothing due
+  });
 });
 
 describe('escalation policy', () => {
@@ -250,6 +258,13 @@ describe('nudge', () => {
     expect(h.body.history[0]).toMatchObject({ type: 'nudge' });
     expect(h.body.nudge).toMatchObject({ allowed: false, nudgedToday: true });
     expect(h.body).toMatchObject({ ageWorkingDays: 0, currentLevel: null, waitingOn: 'Emp2' });
+    expect(h.body.nudge.hint).toBeNull();
+  });
+  it('tells the person waited on, and explains to the owner why an outside wait has no nudge', async () => {
+    const onMgr = await blocked(emp, 'Waiting on manager', { reason: 'Approve the scope', waitingOnUserId: org.users.manager });
+    expect((await mgr.get(`/api/blockers/${onMgr.blockerId}/escalation`)).body.nudge).toMatchObject({ allowed: false, hint: 'This blocker is waiting on you.' });
+    const ext = await blocked(emp, 'Waiting on client IT', { reason: 'Client', cause: 'client', waitingOnText: 'Client IT' });
+    expect((await emp.get(`/api/blockers/${ext.blockerId}/escalation`)).body.nudge).toMatchObject({ allowed: false, hint: expect.stringMatching(/outside the app/) });
   });
 });
 

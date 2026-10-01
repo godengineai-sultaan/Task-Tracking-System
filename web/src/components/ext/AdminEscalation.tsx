@@ -5,8 +5,8 @@ import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, Hourglass, RefreshCw } f
 import { api } from '../../lib/api';
 import { useMe, useRoles } from '../../lib/session';
 import { addDays, fmtDate, fmtDateTime } from '../../lib/format';
-import { Button, Callout, Card, Checkbox, Empty, ErrorState, IconButton, Input, Select, Skeleton, Stat, cx, useToast } from '../ui';
-import { CAUSE_LABEL, LEVEL_META, LevelBadge, STEP_WHO, wd, type Level } from './EscalationBlocker';
+import { Badge, Button, Card, Checkbox, Empty, ErrorState, IconButton, Input, Select, Skeleton, Stat, cx, useToast } from '../ui';
+import { CAUSE_LABEL, LevelBadge, STEP_WHO, wd, type Level } from './EscalationBlocker';
 
 interface Policy {
   enabled: boolean; remindOwner: boolean; quietWhenOwnerOnLeave: boolean;
@@ -45,13 +45,18 @@ function addWeekdays(date: string, n: number) {
   return d;
 }
 
-/** Admin tab owned by the 'escalation' feature area. */
+const WEEKDAY: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short' };
+const noAccess = (e: any) => e?.status === 403;
+
+/** Admin tab owned by the 'escalation' feature area. System admins edit the policy; managers and main admins come here for blocker aging. */
 export default function AdminEscalation() {
   const r = useRoles();
+  const aging = r.sysAdmin || r.routineAdmin || r.manager;
   return (
     <div className="space-y-4">
+      {!r.sysAdmin && aging && <AgingView />}
       <PolicyEditor canEdit={r.sysAdmin} />
-      {(r.sysAdmin || r.routineAdmin || r.manager) && <AgingView />}
+      {r.sysAdmin && <AgingView />}
     </div>
   );
 }
@@ -67,16 +72,26 @@ function PolicyEditor({ canEdit }: { canEdit: boolean }) {
     onError: (e: any) => { toast({ tone: 'critical', text: e.message }); if (e.status === 409) q.refetch(); },
   });
   if (q.isLoading || (!draft && !q.error)) return <Card title="Blocker escalation"><Skeleton className="h-64" /></Card>;
-  if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  if (q.error) return noAccess(q.error)
+    ? <Card title="Blocker escalation"><Empty title="Not available for your account">Blocker escalation settings are visible to staff only.</Empty></Card>
+    : <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const d = draft!;
+  if (!canEdit) return (
+    <Card title="How blocker escalation works" subtitle="Reminds the right people, in order, when a blocker stays open. Ages count the owner's working days only.">
+      <p className="mb-3 flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
+        <Badge tone={d.enabled ? 'good' : 'neutral'}>{d.enabled ? 'Smart escalation is on' : 'Smart escalation is off'}</Badge>
+        Only system admins can change this policy.
+      </p>
+      <LadderPreview d={d} readOnly />
+    </Card>
+  );
   const errs = validate(d);
   const dirty = JSON.stringify(toPolicy(d)) !== JSON.stringify(toPolicy(toDraft(q.data!)));
   const set = (patch: Partial<Draft>) => setDraft({ ...d, ...patch });
   const setStep = (l: Level, patch: Partial<{ on: boolean; n: string }>) => setDraft({ ...d, steps: { ...d.steps, [l]: { ...d.steps[l], ...patch } } });
-  const off = !canEdit || save.isPending;
+  const off = save.isPending;
   return (
     <Card title="Blocker escalation" subtitle="Reminds the right people, in order, when a blocker stays open. Ages count the owner's working days only.">
-      {!canEdit && <div className="mb-4"><Callout tone="neutral">Only system admins can change this policy. You can see how it works and the blockers in your scope below.</Callout></div>}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)]">
         <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); if (!Object.keys(errs).length) save.mutate(d); }}>
           <div className="rounded-lg bg-surface-2 p-3 ring-1 ring-inset ring-line">
@@ -101,13 +116,11 @@ function PolicyEditor({ canEdit }: { canEdit: boolean }) {
             ))}
             <Checkbox checked={d.quietWhenOwnerOnLeave} disabled={off} onChange={(v) => set({ quietWhenOwnerOnLeave: v })} label="Stay quiet while the owner is on full-day leave (the clock pauses)" />
           </fieldset>
-          {canEdit && (
             <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
               <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty || Object.keys(errs).length > 0}>Save policy</Button>
               {dirty && <Button type="button" variant="ghost" onClick={() => setDraft(toDraft(q.data!))}>Discard changes</Button>}
               <span className="text-[12px] text-ink-3">{dirty ? 'Unsaved changes' : q.data!.updatedAt ? `Last changed ${fmtDateTime(q.data!.updatedAt)}` : 'Not configured yet'}</span>
             </div>
-          )}
         </form>
         <LadderPreview d={d} />
       </div>
@@ -115,7 +128,7 @@ function PolicyEditor({ canEdit }: { canEdit: boolean }) {
   );
 }
 
-function LadderPreview({ d }: { d: Draft }) {
+function LadderPreview({ d, readOnly }: { d: Draft; readOnly?: boolean }) {
   const me = useMe();
   const steps = ORDER.filter((l) => d.steps[l].on && /^\d+$/.test(d.steps[l].n)).map((l) => ({ level: l, n: Number(d.steps[l].n) }));
   const items: { when: string; text: string }[] = [{ when: 'When blocked', text: 'If the task waits on someone in the app, they are told right away.' }];
@@ -128,7 +141,7 @@ function LadderPreview({ d }: { d: Draft }) {
   return (
     <section aria-labelledby="ladder-preview" className="rounded-xl bg-surface-2 p-4 ring-1 ring-inset ring-line">
       <h3 id="ladder-preview" className="text-[13px] font-semibold text-ink">What happens when a task is blocked</h3>
-      {!d.enabled && <p className="mt-1 text-[12.5px] text-warning-ink">Preview only: escalation is off.</p>}
+      {!d.enabled && <p className="mt-1 text-[12.5px] text-warning-ink">{readOnly ? 'Escalation is off: owners get only the standard daily follow-up reminder.' : 'Preview only: escalation is off.'}</p>}
       <ol className="mt-3 space-y-3">
         {items.map((it, i) => (
           <li key={i} className="relative flex gap-3 text-[13px]">
@@ -139,8 +152,8 @@ function LadderPreview({ d }: { d: Draft }) {
       </ol>
       {steps.length > 0 && (
         <p className="mt-4 rounded-lg bg-surface p-2.5 text-[12.5px] text-ink-2 ring-1 ring-line">
-          <span className="font-medium text-ink">Example.</span> Blocked today ({fmtDate(me.today, { weekday: 'short', day: 'numeric', month: 'short' })}), assuming a Monday to Friday schedule with no holidays or leave:{' '}
-          {steps.map((s, i) => <span key={s.level}>{i ? '; ' : ''}{fmtDate(addWeekdays(me.today, s.n), { weekday: 'short', day: 'numeric', month: 'short' })} for {STEP_WHO[s.level]}</span>)}.
+          <span className="font-medium text-ink">Example.</span> Blocked today ({fmtDate(me.today, WEEKDAY)}), assuming a Monday to Friday schedule with no holidays or leave:{' '}
+          {steps.map((s, i) => <span key={s.level}>{i ? '; ' : ''}{fmtDate(addWeekdays(me.today, s.n), WEEKDAY)} for {STEP_WHO[s.level]}</span>)}.
         </p>
       )}
       <ul className="mt-3 list-disc space-y-1 pl-4 text-[12px] text-ink-3">
@@ -161,9 +174,9 @@ interface Item {
 }
 interface Aging { scope: 'company' | 'team'; policy: { enabled: boolean }; summary: { open: number; medianAgeWorkingDays: number | null; escalated: number; external: number }; items: Item[] }
 type SortKey = 'task' | 'owner' | 'cause' | 'waitingOn' | 'age' | 'level' | 'followUp' | 'next';
-const COLS: { key: SortKey; label: string }[] = [
+const COLS: { key: SortKey; label: string; sub?: string }[] = [
   { key: 'task', label: 'Task' }, { key: 'owner', label: 'Owner' }, { key: 'cause', label: 'Cause' }, { key: 'waitingOn', label: 'Waiting on' },
-  { key: 'age', label: 'Age (working days)' }, { key: 'level', label: 'Level' }, { key: 'followUp', label: 'Next follow-up' }, { key: 'next', label: 'Next escalation' },
+  { key: 'age', label: 'Age', sub: 'working days' }, { key: 'level', label: 'Level' }, { key: 'followUp', label: 'Next follow-up' }, { key: 'next', label: 'Next escalation' },
 ];
 const LEVEL_RANK: Record<string, number> = { none: 0, waiting_on: 1, manager: 2, admin: 3 };
 const sortVal = (i: Item, k: SortKey): string | number => ({
@@ -186,7 +199,7 @@ function AgingView() {
     <Card title="Blocker aging" subtitle={d ? (d.scope === 'company' ? 'Every open blocker in the company.' : 'Open blockers on your team.') : undefined}
       actions={<IconButton label="Refresh blocker aging" onClick={() => q.refetch()}><RefreshCw className={cx('size-4', q.isFetching && 'animate-spin')} /></IconButton>}>
       {q.isLoading ? <div className="space-y-3"><Skeleton className="h-20" /><Skeleton className="h-48" /></div>
-        : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
+        : q.error ? (noAccess(q.error) ? <Empty title="Not available for your account">Blocker aging is for team managers and admins.</Empty> : <ErrorState error={q.error} onRetry={() => q.refetch()} />)
         : !d!.items.length ? <Empty icon={<CheckCircle2 className="size-8" />} title="No open blockers">Blocked tasks in your scope will appear here with their age in working days.</Empty>
         : <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -229,10 +242,11 @@ function AgingView() {
                 {COLS.map((c) => {
                   const active = sort.key === c.key; const Icon = !active ? ArrowUpDown : sort.dir === 'asc' ? ArrowUp : ArrowDown;
                   return (
-                    <th key={c.key} scope="col" aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'} className={cx('px-3 py-2 font-medium', c.key === 'age' && 'text-right')}>
+                    <th key={c.key} scope="col" aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'} className={cx('whitespace-nowrap px-3 py-2 align-bottom font-medium', c.key === 'age' && 'text-right')}>
                       <button type="button" onClick={() => toggle(c.key)} className={cx('inline-flex items-center gap-1 rounded hover:text-ink', active && 'text-ink')}>
                         {c.label}<Icon className="size-3" aria-hidden />
                       </button>
+                      {c.sub && <span className="block text-[11px] font-normal">{c.sub}</span>}
                     </th>);
                 })}
               </tr></thead>
@@ -260,11 +274,12 @@ function AgingView() {
 
 function FollowUp({ date, today }: { date: string | null; today: string }) {
   if (!date) return <span className="text-ink-3">Not set</span>;
-  return <span className={cx(date <= today && 'font-medium text-warning-ink')}>{fmtDate(date)}{date <= today ? ' (due)' : ''}</span>;
+  return <span className={cx(date <= today && 'font-medium text-warning-ink')}>{fmtDate(date, WEEKDAY)}{date <= today ? ' (due)' : ''}</span>;
 }
 function NextStep({ i, enabled }: { i: Item; enabled: boolean }) {
   if (!enabled) return <span className="text-ink-3">Escalation off</span>;
   if (!i.nextEscalation) return <span className="text-ink-3">All steps done</span>;
   const { level, date } = i.nextEscalation;
-  return <span title={LEVEL_META[level].label}>{STEP_WHO[level][0].toUpperCase() + STEP_WHO[level].slice(1)}{date ? `, ${fmtDate(date, { weekday: 'short', day: 'numeric', month: 'short' })}` : ''}</span>;
+  const who = STEP_WHO[level][0].toUpperCase() + STEP_WHO[level].slice(1);
+  return <span>{date && <span className="block whitespace-nowrap">{fmtDate(date, WEEKDAY)}</span>}<span className={cx('block', date && 'text-[12px] text-ink-3')}>{who}</span></span>;
 }
