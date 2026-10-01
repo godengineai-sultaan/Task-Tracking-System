@@ -18,7 +18,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD').refine
 const PRIORITIES = ['urgent', 'high', 'medium', 'low', 'none'] as const;
 
 export const changeSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('leave'), userId: uuid, start: isoDate, end: isoDate }),
+  z.object({ type: z.literal('leave'), userId: uuid, start: isoDate, end: isoDate })
+    .refine((c) => c.end >= c.start, { message: 'Leave end date must be on or after its start date', path: ['end'] }),
   z.object({ type: z.literal('reassign'), taskId: uuid, toUserId: uuid }),
   z.object({ type: z.literal('allocation'), userId: uuid, percent: z.number().int().min(0).max(100) }),
   z.object({ type: z.literal('deadline'), taskId: uuid, dueDate: isoDate }),
@@ -130,7 +131,8 @@ export async function planningContext(db: Db, a: Actor) {
     from tasks t left join projects p on p.id = t.project_id
     where t.owner_id = any($1::uuid[]) and t.status not in ('done','cancelled','backlog') and ${vis}
     order by t.due_date nulls last, t.number limit 2000`, [scope, ...params]);
-  const defaults = people.length <= 12 ? people.map((p) => p.id) : [a.id, ...a.managedUserIds].filter((id) => scope.includes(id));
+  const mine = new Set([a.id, ...a.managedUserIds]);
+  const defaults = people.length <= 12 ? people.map((p) => p.id) : people.filter((p) => mine.has(p.id)).map((p) => p.id);
   return { today: localToday(a.timezone), people, tasks, defaults };
 }
 
@@ -156,8 +158,6 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
   const scope = await simulationScope(db, a);
   const changes = input.changes;
 
-  for (const c of changes) if (c.type === 'leave' && c.end < c.start) throw badRequest('Leave end date must be on or after its start date');
-
   // Tasks referenced by changes must exist, be open, be visible to the actor and be owned by someone in scope.
   const refTaskIds = [...new Set(changes.flatMap((c) => (c.type === 'reassign' || c.type === 'deadline' ? [c.taskId] : [])))];
   const [vis, visParams] = taskVisibility(a, 2);
@@ -169,7 +169,11 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
     if (['done', 'cancelled', 'backlog'].includes(t.status)) throw badRequest(`Task #${t.number} is no longer open (${t.status}); remove that change and run again`);
   }
 
-  const requested = input.people && input.people.length ? input.people : (await planningContext(db, a)).defaults;
+  const asked = [...new Set(input.people && input.people.length ? input.people : (await planningContext(db, a)).defaults)];
+  // Deactivated or invited people (e.g. still listed on a manager's team) have no capacity to plan: leave them out instead of failing.
+  const active = new Set((await many(db, `select id from users where id = any($1::uuid[]) and status = 'active' and not ('customer' = any(roles))`, [asked])).map((r) => r.id));
+  const requested = asked.filter((id) => active.has(id));
+  const leftOut = asked.length - requested.length;
   const ids = [...new Set([...requested, ...referencedUserIds(changes), ...refTasks.map((t) => t.owner_id)])];
   if (!ids.length) throw badRequest('Pick at least one person');
   if (ids.length > 150) throw badRequest('Simulate at most 150 people at a time');
@@ -179,17 +183,17 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
   const name = new Map<string, string>(users.map((u) => [u.id, u.name]));
 
   // Real open work, with time already logged against each task.
-  const rows = await many(db, `select t.id, t.number, t.title, t.owner_id, t.status, t.priority, t.due_date, t.estimate_minutes,
-      coalesce((select sum(extract(epoch from (te.ended_at - te.started_at))) / 60 from time_entries te
-        where te.task_id = t.id and te.deleted_at is null and te.ended_at is not null), 0)::int logged_minutes,
-      ${vis} as visible
-    from tasks t left join projects p on p.id = t.project_id
-    where t.owner_id = any($1::uuid[]) and t.status not in ('done','cancelled','backlog')
-    order by t.due_date nulls last, t.number`, [ids, ...visParams]);
+  const rows = await many(db, `with open as (select t.id, t.number, t.title, t.owner_id, t.status, t.priority, t.due_date, t.estimate_minutes, ${vis} as visible
+      from tasks t left join projects p on p.id = t.project_id
+      where t.owner_id = any($1::uuid[]) and t.status not in ('done','cancelled','backlog')),
+    logged as (select te.task_id, sum(extract(epoch from (te.ended_at - te.started_at))) / 60 minutes from time_entries te
+      where te.task_id in (select id from open) and te.deleted_at is null and te.ended_at is not null group by te.task_id)
+    select o.*, coalesce(l.minutes, 0)::int logged_minutes from open o left join logged l on l.task_id = o.id
+    order by o.due_date nulls last, o.number`, [ids, ...visParams]);
   const N = input.unestimatedMinutes;
   const baseTasks: SimTask[] = rows.map((r, i) => {
     const used = r.estimate_minutes !== null && r.logged_minutes >= r.estimate_minutes;
-    const assumption = r.estimate_minutes === null ? 'unestimated' : used ? 'estimate_used_up' : null;
+    const assumption = r.status === 'in_review' ? null : r.estimate_minutes === null ? 'unestimated' : used ? 'estimate_used_up' : null;
     return {
       key: r.visible ? r.id : `private-${i + 1}`, id: r.id, number: r.number, title: r.visible ? r.title : 'Private task', visible: !!r.visible, ownerId: r.owner_id,
       status: r.status, priority: r.priority, dueDate: r.due_date, estimateMinutes: r.estimate_minutes, loggedMinutes: r.logged_minutes,
@@ -243,10 +247,12 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
     if (bo?.finish && so.finish) shiftDays = daysBetween(bo.finish, so.finish);
     const later = bo ? (bo.finish && !so.finish) || (shiftDays ?? 0) > 0 : false;
     const earlier = bo ? (!bo.finish && !!so.finish) || (shiftDays ?? 0) < 0 : false;
-    const change = !bo ? 'added' : so.late && !bo.late ? 'newly_late' : bo.late && !so.late ? 'recovered' : later ? 'later' : earlier ? 'earlier' : 'same';
+    // "Back on time" needs a projected finish: a scenario finish beyond the horizon is unknown, not on time.
+    const change = !bo ? 'added' : so.late && !bo.late ? 'newly_late' : bo.late && !so.late && so.finish ? 'recovered' : later ? 'later' : earlier ? 'earlier' : 'same';
     return {
       key: s.key, id: s.visible ? s.id : null, number: s.visible ? s.number : null, title: s.title, visible: s.visible, hypothetical: s.hypothetical,
-      status: s.status, priority: s.priority, estimateMinutes: s.estimateMinutes, loggedMinutes: s.loggedMinutes, remainingMinutes: s.remaining,
+      // Tasks the viewer cannot open count in load but keep their estimate and logged time private.
+      status: s.status, priority: s.priority, estimateMinutes: s.visible ? s.estimateMinutes : null, loggedMinutes: s.visible ? s.loggedMinutes : null, remainingMinutes: s.remaining,
       assumption: s.assumption, blocked: s.status === 'blocked', awaitingReview: s.status === 'in_review',
       baselineOwnerId: b?.ownerId ?? null, ownerId: s.ownerId, baselineDueDate: b?.dueDate ?? null, dueDate: s.dueDate,
       overdueAtStart: !!s.dueDate && s.dueDate < start,
@@ -278,7 +284,8 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
   const recovered = tasks.filter((t) => t.change === 'recovered');
   const unestimated = tasks.filter((t) => t.assumption).map((t) => ({
     key: t.key, id: t.id, number: t.number, title: t.title, ownerId: t.ownerId, assumption: t.assumption, assumedMinutes: N,
-    reason: t.assumption === 'unestimated' ? 'No estimate on the task' : `Estimate (${hm(t.estimateMinutes ?? 0)}) already used up by logged time`,
+    reason: t.assumption === 'unestimated' ? 'No estimate on the task'
+      : t.estimateMinutes === null ? 'Estimate already used up by logged time' : `Estimate (${hm(t.estimateMinutes)}) already used up by logged time`,
   }));
 
   // Plain-language findings: what each change does, then what happens to deadlines and load.
@@ -286,6 +293,7 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
   const label = (t: { title: string; visible: boolean; number: number | null }) => (t.visible ? `"${t.title}"` : 'a private task');
   const finishText = (o: Outcome | null) => (!o ? 'not scheduled' : o.finish ? fmtD(o.finish) : `after ${fmtD(end)}`);
   if (!changes.length) findings.push('No changes added yet, so the scenario matches the baseline projection.');
+  if (leftOut) findings.push(`${leftOut === 1 ? '1 selected person is' : `${leftOut} selected people are`} not active and ${leftOut === 1 ? 'was' : 'were'} left out.`);
   added = 0;
   for (const c of changes) {
     if (c.type === 'leave') {

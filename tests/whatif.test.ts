@@ -233,3 +233,62 @@ describe('saved scenarios', () => {
     expect((await mgr.post('/api/whatif/scenarios', { name: 'Peek', people: [org.users.outsider], changes: [] })).status).toBe(403);
   });
 });
+
+describe('what-if review fixes', () => {
+  it('a deactivated team member does not break the manager simulation or the capacity projection', async () => {
+    const o = await makeOrg();
+    const m = await login(o, 'manager');
+    await withOwner((db) => db.query(`update users set status = 'deactivated' where id = $1`, [o.users.emp2]));
+    const cap = await m.get(`/api/team/capacity?start=${START}&days=10`);
+    expect(cap.status).toBe(200);
+    const ids = cap.body.people.map((p: any) => p.user.id);
+    const r = await m.post('/api/whatif/simulate', { start: START, horizonDays: 14, people: ids, changes: [] });
+    expect(r.status).toBe(200);
+    expect(r.body.people.map((p: any) => p.id).sort()).toEqual(ids.filter((id: string) => id !== o.users.emp2).sort());
+    expect(r.body.findings.join(' ')).toMatch(/not active and (was|were) left out/);
+    expect((await m.post('/api/whatif/simulate', { start: START, horizonDays: 14, changes: [] })).status).toBe(200);
+    // A change that names the inactive person is still rejected.
+    expect((await m.post('/api/whatif/simulate', { start: START, horizonDays: 14, changes: [{ type: 'allocation', userId: o.users.emp2, percent: 50 }] })).status).toBe(400);
+  });
+
+  it('tasks in review need no owner time and are not listed as unestimated', async () => {
+    const o = await makeOrg();
+    const e = await login(o, 'emp');
+    const t = (await e.post('/api/tasks', { title: 'Awaiting review', dueDate: '2030-01-10' })).body;
+    await withOwner((db) => db.query(`update tasks set status = 'in_review' where id = $1`, [t.id]));
+    const r = await e.post('/api/whatif/simulate', { start: START, horizonDays: 14, unestimatedMinutes: 300 });
+    expect(r.status).toBe(200);
+    expect(r.body.tasks.find((x: any) => x.id === t.id)).toMatchObject({ remainingMinutes: 0, assumption: null, awaitingReview: true });
+    expect(r.body.unestimated).toEqual([]);
+    expect(r.body.findings.join(' ')).not.toMatch(/no usable estimate/);
+  });
+
+  it('a task is only "back on time" when its scenario finish is inside the horizon', async () => {
+    // Horizon Mon 01-07..Fri 01-11. At 10% allocation emp2 has 210 minutes, so E (1260m) cannot finish in the horizon.
+    const r = await sim(emp2, { horizonDays: 5, changes: [
+      { type: 'allocation', userId: org.users.emp2, percent: 10 },
+      { type: 'deadline', taskId: T.E.id, dueDate: '2030-01-31' },
+    ] });
+    expect(r.status).toBe(200);
+    expect(task(r, 'E').baseline).toMatchObject({ finish: '2030-01-09', late: true });
+    expect(task(r, 'E').scenario).toMatchObject({ finish: null, beyondHorizon: true });
+    expect(task(r, 'E').change).not.toBe('recovered');
+    expect(r.body.summary.recovered).toBe(0);
+  });
+
+  it('tasks the viewer cannot open hide their estimate and logged time', async () => {
+    // Founder has leadership (may plan for anyone) but cannot open emp2's tasks.
+    const r = await sim(founder, { people: [org.users.emp2] });
+    expect(r.status).toBe(200);
+    const hidden = r.body.tasks.filter((t: any) => !t.visible);
+    expect(hidden).toHaveLength(3);
+    for (const t of hidden) expect(t).toMatchObject({ id: null, number: null, title: 'Private task', estimateMinutes: null, loggedMinutes: null });
+    expect(JSON.stringify(r.body)).not.toContain(T.E.id);
+    expect(r.body.unestimated).toEqual([expect.objectContaining({ id: null, title: 'Private task', reason: 'Estimate already used up by logged time' })]);
+  });
+
+  it('saved scenarios reject leave that ends before it starts', async () => {
+    const r = await mgr.post('/api/whatif/scenarios', { name: 'Backwards leave', changes: [{ type: 'leave', userId: org.users.emp, start: '2030-01-09', end: '2030-01-08' }] });
+    expect(r.status).toBe(400);
+  });
+});
