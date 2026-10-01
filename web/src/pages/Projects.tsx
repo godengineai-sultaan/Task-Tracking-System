@@ -4,20 +4,24 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FolderPlus, Lock } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
-import { useRoles } from '../lib/session';
+import { useMe, useRoles } from '../lib/session';
 import { Badge, Button, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Select, Skeleton, Textarea, useToast } from '../components/ui';
 import { useProjects, useUsers } from '../components/TaskStatus';
+import { BudgetBadge } from '../components/ext/ProfitabilityParts';
 
 export default function Projects() {
   const q = useProjects(); const r = useRoles(); const [open, setOpen] = useState(false);
+  const me = useMe(); const budgetsVisible = r.costViewer || r.leadership || (q.data ?? []).some((p: any) => p.owner_id === me.user.id);
+  const badges = useQuery<any[]>({ queryKey: ['budget-badges'], queryFn: () => api.get('/api/profitability/badges'), enabled: !r.customer && budgetsVisible, staleTime: 60_000 });
   return (
     <div>
       <PageHeader title="Projects" subtitle="Company projects plus private projects you belong to." actions={(r.sysAdmin || r.leadership || r.manager) && <Button variant="primary" icon={<FolderPlus className="size-4" />} onClick={() => setOpen(true)}>New project</Button>} />
       {q.isLoading ? <Skeleton className="h-64" /> : q.error ? <ErrorState error={q.error} /> : q.data.length === 0 ? <Card><Empty title="No projects yet" /></Card> : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{q.data.map((p: any) => (
           <Link key={p.id} to={`/projects/${p.id}`} className="rounded-xl bg-surface p-4 ring-1 ring-line transition hover:ring-accent">
-            <div className="flex items-center gap-2"><Badge tone="info">{p.key}</Badge>{p.visibility === 'private' && <Badge icon={<Lock className="size-3" />}>Private</Badge>}{p.customer_name && <Badge>{p.customer_name}</Badge>}
-              {p.status !== 'active' && <Badge tone="warning">{p.status.replace('_', ' ')}</Badge>}</div>
+            <div className="flex flex-wrap items-center gap-2"><Badge tone="info">{p.key}</Badge>{p.visibility === 'private' && <Badge icon={<Lock className="size-3" />}>Private</Badge>}{p.customer_name && <Badge>{p.customer_name}</Badge>}
+              {p.status !== 'active' && <Badge tone="warning">{p.status.replace('_', ' ')}</Badge>}
+              {(() => { const b = badges.data?.find((x: any) => x.projectId === p.id); return b && <BudgetBadge b={b} />; })()}</div>
             <h2 className="mt-2 text-[15px] font-semibold">{p.name}</h2>
             <p className="mt-1 line-clamp-2 text-[13px] text-ink-2">{p.business_outcome || p.description || 'No outcome set.'}</p>
             <div className="mt-3 flex items-center gap-3 text-[12px] text-ink-3"><span>{p.open_tasks} open</span><span>{p.done_tasks} done</span>{p.target_date && <span>Target {fmtDate(p.target_date)}</span>}<span className="ml-auto">{p.owner_name}</span></div>

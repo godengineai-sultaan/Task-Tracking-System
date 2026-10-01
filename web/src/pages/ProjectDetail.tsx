@@ -9,6 +9,7 @@ import { Avatar, Badge, Button, Card, ErrorState, Input, PageHeader, Select, Ske
 import { useUsers } from '../components/TaskStatus';
 import { TaskTable } from './Tasks';
 import { TaskDrawer } from './TaskDetail';
+import { BudgetCard } from '../components/ext/ProfitabilityParts';
 
 export default function ProjectDetail() {
   const { id } = useParams(); const me = useMe(); const roles = useRoles(); const qc = useQueryClient(); const toast = useToast(); const users = useUsers();
@@ -32,6 +33,7 @@ export default function ProjectDetail() {
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">{tasks.isLoading ? <Skeleton className="h-64" /> : <TaskTable tasks={tasks.data ?? []} onOpen={setDrawer} today={me.today} />}</div>
         <div className="space-y-4">
+          {(roles.costViewer || roles.leadership || p.owner_id === me.user.id) && <BudgetCard projectId={p.id} />}
           <Card title="Milestones">
             <ul className="space-y-2">{milestones.map((m: any) => (
               <li key={m.id} className="text-[13px]"><div className="flex items-center gap-2"><span className="flex-1 font-medium">{m.name}</span>
