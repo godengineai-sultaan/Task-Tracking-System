@@ -94,8 +94,8 @@ test('individual report: period switch, explainable label and PDF export', async
 test('board: keyboard drag moves a card between columns', async ({ page }) => {
   await signIn(page, 'dev');
   const title = 'Board keyboard move check';
-  const created = await page.request.post('/api/tasks', { headers: { 'x-requested-with': 'fetch' }, data: { title } });
-  expect(created.ok()).toBeTruthy();
+  const status = await page.evaluate(async (t) => (await fetch('/api/tasks', { method: 'POST', headers: { 'x-requested-with': 'fetch', 'content-type': 'application/json' }, body: JSON.stringify({ title: t }) })).status, title);
+  expect(status).toBe(200);
   await page.goto('/tasks?view=board&mine=1');
   const planned = page.getByRole('region', { name: 'Planned column' });
   const card = planned.locator('li').filter({ hasText: title }).first();
