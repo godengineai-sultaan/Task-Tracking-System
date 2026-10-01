@@ -14,7 +14,7 @@ create table project_budgets (
   end_date date,
   alert_thresholds int[] not null default '{75,90,100}',
   notes text not null default '',
-  -- Bumped when the amount, hours, currency, billing type or bill rate change, so thresholds re-arm against the new budget.
+  -- Bumped when the amount, hours, currency, billing type, bill rate or start date change, so thresholds re-arm against the new budget.
   alert_epoch int not null default 1,
   version int not null default 1,
   created_by uuid references users(id) on delete set null,

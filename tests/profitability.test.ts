@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { DateTime } from 'luxon';
 import { drainJobs, localIso, login, makeOrg, pastWorkday, withOwner, type Org } from './helpers.js';
 import { withTenant } from '../server/src/lib/db.js';
 import { checkBudgetAlerts } from '../server/src/services/ext/profitability.js';
@@ -248,5 +249,81 @@ describe('profitability export', () => {
     const pdf = await exportAs(admin, 'pdf', { projectId: P.fixed.id });
     expect(pdf.type).toBe('application/pdf');
     expect(pdf.text.slice(0, 5)).toBe('%PDF-');
+  });
+
+  it('writes negative margins as numbers, not formula-guarded text', async () => {
+    expect((await admin.get(`/api/projects/${P.fixed.id}/budget`)).body.money.margin).toBeCloseTo(-500); // fee 6000, cost 6500
+    const a = await exportAs(admin, 'csv', { projectId: P.fixed.id });
+    const line = a.text.split('\n').find((l) => l.startsWith('FIX,'))!;
+    expect(line).toContain(',-500,');
+    expect(line).not.toContain("'-");
+  });
+});
+
+describe('review fixes', () => {
+  let o: Org; let oAdmin: any; let oMgr: any;
+  const project = async (key: string, entries: [string, string, string, string][]) => {
+    const p = (await oMgr.post('/api/projects', { key, name: `Project ${key}` })).body;
+    await withOwner(async (db) => {
+      const t = (await db.query(`insert into tasks (tenant_id, title, owner_id, created_by, project_id, status) values ($1,$2,$3,$3,$4,'in_progress') returning id`,
+        [o.tenantId, `${key} task`, o.users.emp, p.id])).rows[0].id;
+      for (const [user, zone, date, from] of entries) {
+        const s = DateTime.fromISO(`${date}T${from}`, { zone });
+        await db.query(`insert into time_entries (tenant_id, user_id, task_id, category, started_at, ended_at, source) values ($1,$2,$3,'task',$4,$5,'manual')`,
+          [o.tenantId, o.users[user], t, s.toUTC().toISO(), s.plus({ hours: 1 }).toUTC().toISO()]);
+      }
+    });
+    return p;
+  };
+  beforeAll(async () => {
+    o = await makeOrg();
+    [oAdmin, oMgr] = await Promise.all([login(o, 'admin'), login(o, 'manager')]);
+  });
+
+  it("prices time at the rate effective on the person's own local date, not the tenant's", async () => {
+    const LA = 'America/Los_Angeles';
+    const d = pastWorkday(LA, 3), dayBefore = d.minus({ days: 1 }).toISODate()!;
+    await withOwner(async (db) => {
+      await db.query(`update users set timezone = $2 where id = $1`, [o.users.emp2, LA]);
+      for (const [rate, from] of [[100, '2020-01-01'], [200, d.toISODate()!]] as const)
+        await db.query(`insert into cost_rates (tenant_id, user_id, hourly_rate, currency, effective_from) values ($1,$2,$3,'INR',$4)`, [o.tenantId, o.users.emp2, rate, from]);
+    });
+    // 20:00-21:00 in Los Angeles on the day before the raise is already the raise day in the tenant timezone (Asia/Kolkata).
+    const p = await project('TZR', [['emp2', LA, dayBefore, '20:00']]);
+    const r = (await oAdmin.put(`/api/projects/${p.id}/budget`, { billingType: 'internal', budgetAmount: 1000, currency: 'INR' })).body;
+    expect(r.money.costToDate).toBeCloseTo(100);
+  });
+
+  it('time that cannot be priced at all makes cost figures not measurable instead of zero', async () => {
+    const p = await project('UNP', [['emp', o.tz, pastWorkday(o.tz, 2).toISODate()!, '10:00']]); // emp has no cost rate in this org
+    const r = (await oAdmin.put(`/api/projects/${p.id}/budget`, { billingType: 'fixed_fee', budgetAmount: 10000, currency: 'INR' })).body;
+    expect(r.money).toMatchObject({ costToDate: 0, unpricedHours: 1, consumption: null, margin: null, marginPct: null, forecastCost: null });
+    expect(r.status.label).toBe('not_measurable');
+    expect(r.status.reasons.join(' ')).toMatch(/unpriced/);
+    const badge = (await oAdmin.get('/api/profitability/badges')).body.find((b: any) => b.projectId === p.id);
+    expect(badge.consumption).toBeNull();
+    const inr = (await oAdmin.get('/api/profitability/portfolio')).body.totals.byCurrency.find((t: any) => t.currency === 'INR');
+    expect(inr).toMatchObject({ revenue: 0, margin: 0 }); // the unmeasurable fixed fee is not counted as pure margin
+  });
+
+  it('re-saving the same amount does not re-arm alerts; moving the start date does', async () => {
+    const p = await project('ARM', []);
+    const put = (body: any) => oAdmin.put(`/api/projects/${p.id}/budget`, { billingType: 'internal', currency: 'INR', ...body });
+    const r1 = (await put({ budgetAmount: 1234.567 })).body;
+    expect(r1.budget).toMatchObject({ budgetAmount: 1234.57, alertEpoch: 1 });
+    const r2 = (await put({ budgetAmount: 1234.567, notes: 'Clarified scope', version: r1.budget.version })).body;
+    expect(r2.budget.alertEpoch).toBe(1);
+    const r3 = (await put({ budgetAmount: 1234.567, notes: 'Clarified scope', startDate: pastWorkday(o.tz, 1).toISODate(), version: r2.budget.version })).body;
+    expect(r3.budget.alertEpoch).toBe(2);
+    const audits = await withOwner(async (db) => (await db.query(`select details from audit_events where tenant_id = $1 and resource_id = $2 and action = 'project_budget.update' order by id`,
+      [o.tenantId, r1.budget.id])).rows.map((x: any) => x.details));
+    expect(audits[0]).toMatchObject({ fields: ['notes'], alertsRearmed: false });
+    expect(audits[1]).toMatchObject({ fields: ['start_date'], alertsRearmed: true });
+  });
+
+  it('rejects amounts too large for the stored columns with a 400', async () => {
+    const p = await project('BIG', []);
+    expect((await oAdmin.put(`/api/projects/${p.id}/budget`, { billingType: 'time_and_materials', budgetAmount: 1000, billRate: 5e10, currency: 'INR' })).status).toBe(400);
+    expect((await oAdmin.put(`/api/projects/${p.id}/budget`, { billingType: 'internal', budgetAmount: 5e12, currency: 'INR' })).status).toBe(400);
   });
 });

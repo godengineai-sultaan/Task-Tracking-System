@@ -40,7 +40,7 @@ export function BudgetBadge({ b }: { b: { label: string; consumption: number | n
 export function BurnBar({ label, value, forecast, detail, thresholds = [75, 90, 100], className }: {
   label: string; value: number | null; forecast?: number | null; detail: string; thresholds?: number[]; className?: string;
 }) {
-  if (value === null) return <span className="text-[12px] text-ink-3">Not set</span>;
+  if (value === null) return <span className="text-[12px] text-ink-3">Not measurable</span>;
   const domain = Math.min(2, Math.max(1, value, forecast ?? 0));
   const pos = (v: number) => `${(Math.min(v, domain) / domain) * 100}%`;
   const crossed = thresholds.filter((t) => t < 100 && value * 100 >= t).length;

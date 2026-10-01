@@ -5,14 +5,15 @@ import { badges, deleteBudget, portfolio, projectBudget, saveBudget } from '../.
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-const money = z.number().finite().nonnegative().max(1e12);
+// Bounds match the numeric(14,2) / numeric(12,2) columns so oversized values are a 400, not a database overflow 500.
+const money = (max: number) => z.number().finite().nonnegative().max(max);
 
 const budgetSchema = z.object({
   billingType: z.enum(['fixed_fee', 'time_and_materials', 'internal']),
-  budgetAmount: money.nullable().optional(),
+  budgetAmount: money(999_999_999_999).nullable().optional(),
   currency: z.string().regex(/^[A-Z]{3}$/, 'Use a 3-letter currency code such as INR or USD'),
   budgetHours: z.number().finite().nonnegative().max(1e6).nullable().optional(),
-  billRate: money.nullable().optional(),
+  billRate: money(9_999_999_999).nullable().optional(),
   startDate: date.nullable().optional(),
   endDate: date.nullable().optional(),
   alertThresholds: z.array(z.number().int().min(1).max(500)).min(1).max(6).default([75, 90, 100]),

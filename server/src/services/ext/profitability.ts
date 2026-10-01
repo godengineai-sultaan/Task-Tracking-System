@@ -59,13 +59,13 @@ async function computeFinancials(db: Db, projects: any[]) {
   const tz = (await one(db, `select t.timezone from tenants t where t.id = nullif(current_setting('app.tenant_id', true), '')::uuid`))?.timezone ?? 'UTC';
   const defaultCurrency = (await one(db, `select currency from cost_rates group by 1 order by count(*) desc, 1 limit 1`))?.currency ?? 'INR';
   // Confirmed time: finished, non-deleted entries on the project's tasks. Overlaps by one person within a project merge (counted once).
-  // Each merged span is priced at that person's rate effective on its local start date.
+  // Each merged span is priced at that person's rate effective on its start date in the person's own timezone (as elsewhere in the app).
   const segs = await many<Seg>(db, `with e as (
       select t.project_id, te.user_id, tstzrange(te.started_at, te.ended_at) r from time_entries te join tasks t on t.id = te.task_id
       where t.project_id = any($1::uuid[]) and te.deleted_at is null and te.ended_at is not null
     ), m as (select project_id, user_id, unnest(range_agg(r)) r from e group by 1, 2),
-    d as (select project_id, user_id, (lower(r) at time zone $2)::date as day, extract(epoch from upper(r) - lower(r)) / 3600.0 hours,
-      lower(r) >= now() - interval '28 days' recent from m)
+    d as (select m.project_id, m.user_id, (lower(m.r) at time zone coalesce(uz.timezone, $2))::date as day, extract(epoch from upper(m.r) - lower(m.r)) / 3600.0 hours,
+      lower(m.r) >= now() - interval '28 days' recent from m join users uz on uz.id = m.user_id)
     select d.project_id, d.user_id, u.name user_name, rate.hourly_rate, rate.currency,
       sum(d.hours)::float hours, coalesce(sum(d.hours) filter (where d.recent), 0)::float recent_hours
     from d join users u on u.id = d.user_id left join project_budgets b on b.project_id = d.project_id
@@ -100,7 +100,9 @@ async function computeFinancials(db: Db, projects: any[]) {
     const memberRate = memberRates.find((x) => x.project_id === p.id && x.currency === currency)?.rate ?? null;
     const blendedRate = pricedHours > 0 ? cost / pricedHours : memberRate;
     const blendedRateSource = pricedHours > 0 ? 'actual_mix' : memberRate !== null ? 'member_rates' : null;
-    const forecastCost = blendedRate !== null ? cost + remainingHours * blendedRate : remainingHours === 0 ? cost : null;
+    // Time recorded but none of it priceable: cost is unknown, not zero, so cost-based figures are not measurable.
+    const costKnown = pricedHours > 0 || hours === 0;
+    const forecastCost = !costKnown ? null : blendedRate !== null ? cost + remainingHours * blendedRate : remainingHours === 0 ? cost : null;
 
     const b = p.budget_id ? {
       id: p.budget_id as string, billingType: p.billing_type as BillingType, currency, budgetAmount: p.budget_amount as number | null, budgetHours: p.budget_hours as number | null,
@@ -110,10 +112,10 @@ async function computeFinancials(db: Db, projects: any[]) {
     let revenue: number | null = null, forecastRevenue: number | null = null;
     if (b?.billingType === 'fixed_fee') revenue = forecastRevenue = b.budgetAmount;
     if (b?.billingType === 'time_and_materials' && b.billRate !== null) { revenue = hours * b.billRate; forecastRevenue = forecastHours * b.billRate; }
-    const margin = revenue !== null ? revenue - cost : null;
+    const margin = revenue !== null && costKnown ? revenue - cost : null;
     const forecastMargin = forecastRevenue !== null && forecastCost !== null ? forecastRevenue - forecastCost : null;
     const tm = b?.billingType === 'time_and_materials';
-    const consumed = tm ? revenue : cost, forecastConsumed = tm ? forecastRevenue : forecastCost;
+    const consumed = tm ? revenue : costKnown ? cost : null, forecastConsumed = tm ? forecastRevenue : forecastCost;
     const amountBurn = tm ? (b!.billRate ?? 0) * recentHours / 4 : recentCost / 4;
     const budgetAmount = b?.budgetAmount ?? null, budgetHours = b?.budgetHours ?? null;
     out.set(p.id, {
@@ -126,10 +128,10 @@ async function computeFinancials(db: Db, projects: any[]) {
       },
       estimates: { openTasks: e.open_tasks, estimatedOpenTasks: e.estimated, coverage: e.open_tasks ? e.estimated / e.open_tasks : null },
       money: {
-        currency, costToDate: r2(cost), pricedHours: r2(pricedHours), unpricedHours: r2(hours - pricedHours),
+        currency, costToDate: r2(cost), costKnown, pricedHours: r2(pricedHours), unpricedHours: r2(hours - pricedHours),
         unpriced: [...unpriced.values()].map((u) => ({ ...u, hours: r2(u.hours) })).sort((x, y) => y.hours - x.hours),
         blendedRate: blendedRate === null ? null : r2(blendedRate), blendedRateSource, burnPerWeek: r2(recentCost / 4),
-        revenue: revenue === null ? null : r2(revenue), revenueBasis: b?.billingType ?? null, margin: margin === null ? null : r2(margin), marginPct: revenue ? margin! / revenue : null,
+        revenue: revenue === null ? null : r2(revenue), revenueBasis: b?.billingType ?? null, margin: margin === null ? null : r2(margin), marginPct: revenue && margin !== null ? margin / revenue : null,
         forecastCost: forecastCost === null ? null : r2(forecastCost), forecastRevenue: forecastRevenue === null ? null : r2(forecastRevenue),
         forecastMargin: forecastMargin === null ? null : r2(forecastMargin), budgetAmount, consumptionBasis: tm ? 'billable_value' : 'cost',
         consumption: ratio(consumed, budgetAmount), forecastConsumption: ratio(forecastConsumed, budgetAmount),
@@ -169,11 +171,12 @@ function present(f: any, a: Actor) {
   if (money) {
     facts.push(`Cost to date ${fm(m.currency, m.costToDate)} from ${fh(m.pricedHours)} priced at each person's cost rate effective on the entry date.`);
     if (m.unpricedHours > 0) facts.push(`${fh(m.unpricedHours)} unpriced (${m.unpriced.map((u: any) => `${u.name} ${fh(u.hours)}${u.reason === 'currency' ? ', rate in another currency' : ', no cost rate'}`).join('; ')}). Excluded from cost, not priced at zero: cost and forecast are understated.`);
+    if (!m.costKnown) facts.push(`None of the recorded time could be priced in ${m.currency}: cost-based consumption, margin and forecast cost are not measurable until cost rates exist.`);
     if (b?.billingType === 'fixed_fee') facts.push(`Revenue is the fixed fee of ${fm(m.currency, b.budgetAmount)}; consumption compares cost to the fee.`);
     if (b?.billingType === 'time_and_materials') facts.push(b.billRate === null ? 'No bill rate set: revenue cannot be computed.' : `Revenue = ${fh(h.toDate)} billable hours x bill rate ${fm(m.currency, b.billRate)}; consumption compares billable value to the ${fm(m.currency, b.budgetAmount)} cap.`);
     if (b?.billingType === 'internal') facts.push('Internal project: no revenue, so margin does not apply; consumption compares cost to the budget.');
     if (m.forecastCost !== null) facts.push(`Forecast cost at completion ${fm(m.currency, m.forecastCost)} = cost to date + ${fh(h.remainingEstimate)} remaining estimate x blended rate ${fm(m.currency, m.blendedRate)}/h.`);
-    else facts.push('Forecast cost unavailable: nobody on this project has a cost rate in the budget currency yet.');
+    else if (m.costKnown) facts.push('Forecast cost unavailable: nobody on this project has a cost rate in the budget currency yet.');
     if (m.blendedRateSource === 'member_rates') assumptions.push('No priced time yet: the blended rate is the average current rate of project members.');
     else if (m.blendedRateSource === 'actual_mix') assumptions.push('Blended rate = cost to date / priced hours (the actual mix of people so far).');
     if (!b) assumptions.push(`No budget: costs shown in ${m.currency}, the most common cost-rate currency.`);
@@ -182,6 +185,7 @@ function present(f: any, a: Actor) {
   if (label === 'no_budget') reasons.push('No budget set for this project.');
   if (label === 'not_measurable') reasons.push(money ? 'The budget has no amount or hours that can be measured yet.' : 'No hours budget is set; amount figures are visible to cost viewers only.');
   if (forecastOver) reasons.push('The forecast at completion exceeds the budget.');
+  if (money && b && m.unpricedHours > 0) reasons.push(`${fh(m.unpricedHours)} unpriced: ${m.costKnown ? 'cost-based figures are understated' : 'cost-based figures are not measurable'}.`);
   if (['watch', 'at_risk', 'over_budget'].includes(label)) reasons.push(`Consumption ${pc(Math.max(...(money ? [m.consumption, h.consumption] : [h.consumption]).filter((x: any) => x !== null)))} against alert thresholds ${b.alertThresholds.join('/')}%.`);
   return {
     project: f.project, access, canEdit: canEditBudget(a, { owner_id: f.project.ownerId }),
@@ -208,7 +212,7 @@ export async function portfolio(db: Db, a: Actor, f: { projectId?: string; statu
     const t = byCurrency.get(m.currency) ?? { currency: m.currency, projects: 0, budgetAmount: 0, costToDate: 0, revenue: 0, margin: 0, unpricedHours: 0 };
     t.projects++; t.costToDate += m.costToDate; t.unpricedHours += m.unpricedHours;
     if (m.budgetAmount !== null) t.budgetAmount += m.budgetAmount;
-    if (m.revenue !== null) { t.revenue += m.revenue; t.margin += m.margin; }
+    if (m.revenue !== null && m.margin !== null) { t.revenue += m.revenue; t.margin += m.margin; }
     byCurrency.set(m.currency, t);
   }
   return {
@@ -220,7 +224,7 @@ export async function portfolio(db: Db, a: Actor, f: { projectId?: string; statu
         revenue: r2(t.revenue), margin: r2(t.margin), marginPct: t.revenue ? t.margin / t.revenue : null, unpricedHours: r2(t.unpricedHours) })),
     },
     note: access === 'money'
-      ? 'Money totals are per currency and never mixed. Margin totals include only projects with revenue. Unpriced hours are excluded from cost, not priced at zero.'
+      ? 'Money totals are per currency and never mixed. Revenue and margin totals include only projects with revenue and a measurable cost. Unpriced hours are excluded from cost, not priced at zero.'
       : 'Hours-only view: money values are visible to cost viewers. Hours are recorded work evidence, not a productivity measure.',
   };
 }
@@ -231,7 +235,7 @@ export async function badges(db: Db, a: Actor) {
   const data = await portfolio(db, a).catch(() => null);
   return (data?.rows ?? []).filter((r) => r.budget).map((r) => ({
     projectId: r.project.id, label: r.status.label, basis: r.status.basis,
-    consumption: r.money ? Math.max(...[r.money.consumption, r.hours.consumption].filter((x): x is number => x !== null), 0) : r.hours.consumption,
+    consumption: ((v) => (v.length ? Math.max(...v) : null))((r.money ? [r.money.consumption, r.hours.consumption] : [r.hours.consumption]).filter((x): x is number => x !== null)),
   }));
 }
 
@@ -251,7 +255,6 @@ export interface BudgetInput {
   billingType: BillingType; budgetAmount?: number | null; currency: string; budgetHours?: number | null; billRate?: number | null;
   startDate?: string | null; endDate?: string | null; alertThresholds: number[]; notes: string; version?: number;
 }
-const REARM = ['billing_type', 'budget_amount', 'currency', 'budget_hours', 'bill_rate'] as const;
 
 async function loadEditable(db: Db, a: Actor, projectId: string) {
   const p = await one(db, `select p.id, p.key, p.owner_id from projects p where p.id = $3 and ${VISIBLE}`, [a.id, has(a, 'routine_admin'), projectId]);
@@ -275,14 +278,17 @@ export async function saveBudget(db: Db, a: Actor, projectId: string, b: BudgetI
       details: { projectId: p.id, billingType: next.billing_type } }); // amounts intentionally not logged (confidential)
   } else {
     if (b.version !== existing.version) throw conflict('This budget was changed by someone else. Reload to see the latest version.', { currentVersion: existing.version });
-    const changed = (Object.keys(next) as (keyof typeof next)[]).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(existing[k]));
-    const rearm = changed.some((k) => (REARM as readonly string[]).includes(k));
+    // Re-arm compares the stored (rounded) values in SQL, so re-saving an amount with extra decimals does not re-send every alert.
     row = await one(db, `update project_budgets set billing_type = $3, budget_amount = $4, currency = $5, budget_hours = $6, bill_rate = $7, start_date = $8, end_date = $9,
-        alert_thresholds = $10, notes = $11, updated_by = $12, updated_at = now(), version = version + 1, alert_epoch = alert_epoch + $13
+        alert_thresholds = $10, notes = $11, updated_by = $12, updated_at = now(), version = version + 1,
+        alert_epoch = alert_epoch + case when (billing_type, budget_amount, currency, budget_hours, bill_rate, start_date)
+          is distinct from ($3::text, $4::numeric(14,2), $5::text, $6::numeric(10,2), $7::numeric(12,2), $8::date) then 1 else 0 end
       where id = $1 and version = $2 returning *`,
       [existing.id, existing.version, next.billing_type, next.budget_amount, next.currency, next.budget_hours, next.bill_rate, next.start_date, next.end_date,
-       next.alert_thresholds, next.notes, a.id, rearm ? 1 : 0]);
+       next.alert_thresholds, next.notes, a.id]);
     if (!row) throw conflict('This budget was changed by someone else. Reload to see the latest version.');
+    const changed = (Object.keys(next) as (keyof typeof next)[]).filter((k) => JSON.stringify(row[k]) !== JSON.stringify(existing[k]));
+    const rearm = row.alert_epoch !== existing.alert_epoch;
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'project_budget.update', resourceType: 'project_budget', resourceId: row.id, resourceVersion: row.version,
       details: { projectId: p.id, fields: changed, alertsRearmed: rearm } });
   }
@@ -356,9 +362,11 @@ export async function checkBudgetAlerts(db: Db, tenantId: string, projectId?: st
 }
 
 // ---------- Export ----------
-const csv = (rows: unknown[][]) => rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n';
-const num = (v: number | null | undefined) => (v === null || v === undefined ? '' : String(v));
-const pctCell = (v: number | null | undefined) => (v === null || v === undefined ? '' : (v * 100).toFixed(1));
+// Real numbers cannot carry a formula, so they skip the guard (which would turn a negative margin into the text "'-500").
+const cell = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : csvCell(v));
+const csv = (rows: unknown[][]) => rows.map((r) => r.map(cell).join(',')).join('\n') + '\n';
+const num = (v: number | null | undefined) => (v === null || v === undefined ? '' : v);
+const pctCell = (v: number | null | undefined) => (v === null || v === undefined ? '' : Number((v * 100).toFixed(1)));
 
 export function profitabilityCsv(d: any) {
   const money = d.access === 'money';
