@@ -92,7 +92,7 @@ The password is prompted for, or read from `BOOTSTRAP_PASSWORD`; it is never pri
 
 ## Tests
 
-Test suites: 308 unit/integration tests and 107 browser tests at integration (final counts in PROGRESS.md).
+Test suites: 352 unit/integration tests and 122 browser tests, all passing after the post-integration audit (details in PROGRESS.md).
 
 ```bash
 npm test

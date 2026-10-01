@@ -72,17 +72,17 @@ export async function taskRoutes(app: FastifyInstance) {
     if (q.due === 'today') add(`t.due_date = $?`, today);
     if (q.due === 'week') add(`t.due_date between $? and ($?::date + 7)`.replace(/\$\?/g, `$${vals.length + 1}`), today);
     if (q.due === 'none') where.push('t.due_date is null');
+    // Client accounts get the same customer-safe projection as the task detail and portal (no owners, estimates, tags or internal blocker text).
+    if (has(a, 'customer')) return many(db, `select t.id, t.number, t.title, t.status, t.due_date, t.accepted_at, t.project_id, p.name project_name, p.key project_key, t.milestone_id
+      from tasks t left join projects p on p.id = t.project_id
+      where ${where.join(' and ')}
+      order by t.sort_order desc, t.created_at desc limit $${vals.length + 1}`, [...vals, q.limit]);
     // can_edit mirrors canContribute (services/access.ts) so the list only offers status changes the server accepts.
     vals.push(a.id, a.managedUserIds, isStaff(a), has(a, 'routine_admin'));
     const [me, managed, staff, routineAdmin] = [3, 2, 1, 0].map((k) => `$${vals.length - k}`);
     const canEdit = `(${staff}::boolean and (${routineAdmin}::boolean or ${me}::uuid in (t.owner_id, t.created_by, t.reviewer_id) or p.owner_id = ${me}::uuid
       or t.owner_id = any(${managed}::uuid[]) or exists (select 1 from task_collaborators c where c.task_id = t.id and c.user_id = ${me}::uuid)) is true)`;
     vals.push(q.limit);
-    // Client accounts get the same customer-safe projection as the task detail and portal (no owners, estimates, tags or internal blocker text).
-    if (has(a, 'customer')) return many(db, `select t.id, t.number, t.title, t.status, t.due_date, t.accepted_at, t.project_id, p.name project_name, p.key project_key, t.milestone_id
-      from tasks t left join projects p on p.id = t.project_id
-      where ${where.join(' and ')}
-      order by t.sort_order desc, t.created_at desc limit $${vals.length}`, vals);
     return many(db, `select t.id, t.number, t.title, t.status, t.priority, t.category, t.due_date, t.estimate_minutes, t.tags, t.version, t.sort_order,
         t.owner_id, u.name owner_name, t.project_id, p.name project_name, p.key project_key, t.milestone_id, t.requires_review, t.requires_evidence,
         t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at, t.customer_visible,

@@ -17,7 +17,15 @@ Per-requirement status: `REQUIREMENTS_MATRIX.md` (the extensions are rows 63–1
 
 ## Check results
 
-Final verification results: see the integration section
+Final verification results (2026-10-01, merged `main` after the audit):
+
+| Check | Result |
+|---|---|
+| Typecheck (server + web) | Pass |
+| Unit + integration tests (`npm test`) | **352 passed**, 0 failed (20 files) |
+| Browser tests incl. accessibility and mobile (`npm run test:e2e`) | **122 passed**, 0 failed |
+| Dependency advisories (`npm audit`) | 0 vulnerabilities |
+| Multi-lens audit | 81 issues reported by 6 independent auditors (security, data integrity, analytics, performance, feature seams, real-browser UX); 73 confirmed by skeptic verification and all 73 fixed with regression tests; 8 rejected as not real; none critical |
 
 At integration the suites hold 308 unit/integration tests and 107 browser tests.
 
