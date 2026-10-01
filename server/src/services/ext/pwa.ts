@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
 import { one, type Db } from '../../lib/db.js';
-import { badRequest } from '../../lib/errors.js';
+import { badRequest, conflict } from '../../lib/errors.js';
 import type { Actor } from '../access.js';
 import { localToday } from '../calendar.js';
 import { setPlan } from '../myday.js';
@@ -20,13 +20,15 @@ export async function stampClientRequest(db: Db, taskId: string, clientRequestId
   await db.query(`update tasks set client_request_id = $2 where id = $1`, [taskId, clientRequestId]);
 }
 
-export interface OfflineCapture { clientRequestId: string; text: string; capturedAt: string; projectId?: string | null; addToMyDay?: boolean }
+export interface OfflineCapture { clientRequestId: string; userId?: string; text: string; capturedAt: string; projectId?: string | null; addToMyDay?: boolean }
 
 /**
  * Create a task from a one-line capture that was queued on the device while offline.
  * Relative words ("today", "fri") are resolved against the day it was captured, not the day it synced.
  */
 export async function syncOfflineCapture(db: Db, a: Actor, c: OfflineCapture, correlationId?: string) {
+  // A capture queued under one account (e.g. in a tab left open after another person signed in on this device) is never created as someone else.
+  if (c.userId && c.userId !== a.id) throw conflict('This capture was saved on this device by a different account, so it was not created');
   const prior = await findClientRequest(db, a, c.clientRequestId);
   if (prior) return { task: prior, replayed: true, warnings: [] as string[], addedToMyDay: false, planFull: false };
   const now = DateTime.now();

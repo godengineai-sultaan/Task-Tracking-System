@@ -8,7 +8,7 @@ import { useSyncExternalStore } from 'react';
 
 export interface OutboxItem {
   clientRequestId: string; userId: string; text: string; projectId: string | null; addToMyDay: boolean;
-  capturedAt: string; status: 'pending' | 'failed'; error?: string;
+  capturedAt: string; status: 'pending' | 'failed'; error?: string; attempts?: number;
 }
 export interface SyncedCapture { task: { id: string; title: string }; replayed: boolean; warnings: string[]; addedToMyDay: boolean; planFull: boolean }
 interface PwaState { online: boolean; items: OutboxItem[]; syncing: boolean; updateReady: boolean }
@@ -30,6 +30,8 @@ export function newClientRequestId() {
 
 // ---------- IndexedDB outbox ----------
 const DB_NAME = 'tt-offline'; const STORE = 'captures';
+// Who the outbox belongs to, so the offline fallback page can queue captures for them. Removed on sign-out.
+const USER_KEY = 'tt-outbox-user';
 let dbp: Promise<IDBDatabase> | null = null;
 function idb() {
   dbp ??= new Promise<IDBDatabase>((res, rej) => {
@@ -59,8 +61,9 @@ async function refresh() {
 function changed() { channel?.postMessage('changed'); return refresh(); }
 
 /** Attach the outbox to the signed-in person. Drafts left by anyone else on this device are deleted, never sent under this session. */
-export async function bindOutbox(userId: string) {
+export async function bindOutbox(userId: string, canCapture = true) {
   currentUser = userId;
+  try { if (canCapture) localStorage.setItem(USER_KEY, userId); else localStorage.removeItem(USER_KEY); } catch { /* storage blocked */ }
   try { for (const i of await allItems()) if (i.userId !== userId) await delItem(i.clientRequestId); } catch { /* IndexedDB unavailable */ }
   await refresh();
   void syncOutbox();
@@ -75,7 +78,7 @@ export async function queueCapture(i: Omit<OutboxItem, 'status' | 'userId'>) {
 
 export async function retryCapture(id: string, text: string) {
   const i = state.items.find((x) => x.clientRequestId === id); if (!i) return;
-  await putItem({ ...i, text, status: 'pending', error: undefined });
+  await putItem({ ...i, text, status: 'pending', error: undefined, attempts: 0 });
   await changed(); void syncOutbox();
 }
 export async function discardCapture(id: string) { await delItem(id); await changed(); }
@@ -91,10 +94,16 @@ export function syncOutbox(): Promise<void> {
         let res: Response;
         try {
           res = await fetch('/api/pwa/captures', { method: 'POST', credentials: 'same-origin', headers: { 'x-requested-with': 'fetch', 'content-type': 'application/json' },
-            body: JSON.stringify({ clientRequestId: i.clientRequestId, text: i.text, capturedAt: i.capturedAt, projectId: i.projectId, addToMyDay: i.addToMyDay }) });
+            body: JSON.stringify({ clientRequestId: i.clientRequestId, userId: i.userId, text: i.text, capturedAt: i.capturedAt, projectId: i.projectId, addToMyDay: i.addToMyDay }) });
         } catch { break; } // still unreachable: keep everything for the next attempt
         if (res.ok) { done.push(await res.json()); await delItem(i.clientRequestId); continue; }
-        if (res.status === 401 || res.status === 408 || res.status === 429 || res.status >= 500) break; // sign in again / server busy: retry later
+        if (res.status === 401 || res.status === 408 || res.status === 429 || res.status >= 502) break; // sign in again / server unreachable or busy: retry later
+        if (res.status >= 500) {
+          // The server failed on this capture: retry it a few times, then let the person review it. It never blocks the captures behind it.
+          const attempts = (i.attempts ?? 0) + 1;
+          await putItem(attempts >= 3 ? { ...i, attempts, status: 'failed', error: 'The server could not create this capture. Edit it and retry, or discard it.' } : { ...i, attempts });
+          continue;
+        }
         const body = await res.json().catch(() => null);
         await putItem({ ...i, status: 'failed', error: body?.message ?? `Could not create the task (${res.status})` });
       }
@@ -118,6 +127,7 @@ export function confirmSignOut() {
 /** On sign-out: delete the outbox and every Cache Storage entry, then let the service worker re-cache the public app shell. */
 export async function clearOfflineData() {
   currentUser = null;
+  try { localStorage.removeItem(USER_KEY); } catch { /* storage blocked */ }
   try { await store('readwrite', (s) => s.clear()); } catch { /* nothing stored */ }
   channel?.postMessage('changed');
   set({ items: [] });

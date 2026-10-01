@@ -12,6 +12,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>Task Tracking & Productivity</title>
     <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- viewport-fit=cover lets the app draw under the notch; keep content inside the safe area in landscape. -->
+    <style>body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }</style>
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232a78d6'/><path d='M9 16.5l4.5 4.5L23 11.5' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   </head>

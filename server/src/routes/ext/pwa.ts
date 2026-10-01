@@ -6,6 +6,7 @@ import { syncOfflineCapture } from '../../services/ext/pwa.js';
 
 const captureSchema = z.object({
   clientRequestId: z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/),
+  userId: z.string().uuid().optional(),
   text: z.string().trim().min(1).max(500),
   capturedAt: z.string().datetime({ offset: true }),
   projectId: z.string().uuid().nullable().optional(),

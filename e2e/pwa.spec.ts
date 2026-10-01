@@ -8,6 +8,27 @@ const api = (page: Page, method: string, url: string, body?: unknown) => page.ev
 }, [method, url, body] as const);
 const axeSerious = async (page: Page) => (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze()).violations
   .filter((v) => ['serious', 'critical'].includes(v.impact ?? '')).map((v) => `${v.id}: ${v.help}`);
+/** A stand-in Web Speech API recogniser that "hears" one phrase (no microphone in CI). */
+const fakeSpeech = () => {
+  class FakeRecognition {
+    onresult: any; onend: any; onerror: any; lang = ''; interimResults = false; continuous = false; maxAlternatives = 1;
+    start() { setTimeout(() => { this.onresult?.({ results: [[{ transcript: 'Call the venue about seating tomorrow 15m' }]] }); this.onend?.(); }, 50); }
+    stop() { this.onend?.(); }
+    abort() { /* nothing recorded */ }
+  }
+  (window as any).webkitSpeechRecognition = FakeRecognition; (window as any).SpeechRecognition = FakeRecognition;
+};
+const outboxCount = (page: Page) => page.evaluate(() => new Promise<number>((res) => {
+  const r = indexedDB.open('tt-offline', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('captures', { keyPath: 'clientRequestId' });
+  r.onsuccess = () => { const c = r.result.transaction('captures').objectStore('captures').count(); c.onsuccess = () => res(c.result); };
+}));
+const captureOffline = async (page: Page, text: string) => {
+  await page.keyboard.press('q');
+  await page.getByLabel('Describe the task in one line').fill(text);
+  await page.getByRole('button', { name: 'Save offline' }).click();
+  await expect(page.getByLabel('Describe the task in one line')).toHaveCount(0);
+};
 const exactMatches = async (page: Page, title: string) => ((await api(page, 'GET', `/api/search?q=${encodeURIComponent(title)}`)).body.tasks as any[]).filter((t) => t.title === title).length;
 
 test('installable: manifest, icons, offline page and service worker are served', async ({ page, request }) => {
@@ -106,6 +127,95 @@ test.describe('network failure while online', () => {
   });
 });
 
+test('opening the app while offline shows the fallback page, which can still queue a capture', async ({ page, context }) => {
+  await signIn(page, 'dev');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expect.poll(() => page.evaluate(async () => !!navigator.serviceWorker.controller && !!(await caches.match('/offline.html')))).toBe(true);
+  await context.setOffline(true);
+  await page.goto('/tasks');
+  await expect(page.getByRole('heading', { name: "You're offline" })).toBeVisible();
+  const title = `Cold start offline capture ${Date.now().toString(36)}`;
+  await page.getByLabel(/Capture a task/).fill(`${title} today`);
+  await page.getByRole('button', { name: 'Save on this device' }).click();
+  await expect(page.getByText(/1 capture waiting to sync/)).toBeVisible();
+  expect(await axeSerious(page)).toEqual([]);
+  await context.setOffline(false); // the fallback page reloads into the app, which syncs the queued capture
+  await expect(page.getByText('1 offline capture synced')).toBeVisible();
+  expect(await exactMatches(page, title)).toBe(1);
+  expect(await outboxCount(page)).toBe(0);
+});
+
+test('client accounts get no offline capture on the fallback page', async ({ page, context }) => {
+  await page.goto('/login');
+  await page.evaluate(() => localStorage.setItem('tt-outbox-user', 'left-by-a-staff-session')); // e.g. a session that expired on this device
+  await signIn(page, 'lena', 'globex.example');
+  await page.goto('/portal');
+  await expect(page.getByRole('heading', { name: 'Your projects' })).toBeVisible();
+  await expect.poll(() => page.evaluate(async () => localStorage.getItem('tt-outbox-user') === null && !!navigator.serviceWorker.controller
+    && !!(await caches.match('/offline.html')))).toBe(true);
+  await context.setOffline(true);
+  await page.goto('/portal');
+  await expect(page.getByRole('heading', { name: "You're offline" })).toBeVisible();
+  await expect(page.getByLabel(/Capture a task/)).toBeHidden();
+  await context.setOffline(false);
+});
+
+test.describe('outbox safety', () => {
+  test.use({ serviceWorkers: 'block' }); // so page.route sees every request
+  test('a capture the server keeps failing on never blocks the others and can be discarded', async ({ page, context }) => {
+    await signIn(page, 'kabir');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    const stamp = Date.now().toString(36);
+    const bad = `Server rejects this capture ${stamp}`, good = `Healthy capture ${stamp}`;
+    await context.setOffline(true);
+    await expect(page.getByText("You're offline.")).toBeVisible();
+    await captureOffline(page, bad); // queued first, so it is sent first
+    await captureOffline(page, good);
+    await expect(page.getByText('2 captures waiting to sync')).toBeVisible();
+    await page.route('**/api/pwa/captures', (r) => (r.request().postDataJSON().text === bad
+      ? r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'internal', message: 'Something went wrong on the server.' }) })
+      : r.continue()));
+    await context.setOffline(false);
+    await expect.poll(() => exactMatches(page, good)).toBe(1); // the failing capture ahead of it did not hold it back
+    await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
+    const syncNow = page.getByRole('button', { name: 'Sync now' });
+    await expect.poll(async () => {
+      if (await syncNow.isVisible() && await syncNow.isEnabled()) await syncNow.click();
+      return page.getByText('1 capture needs attention').isVisible();
+    }, { timeout: 20_000 }).toBe(true);
+    await page.getByRole('button', { name: 'Review', exact: true }).click();
+    await expect(page.getByLabel('Capture text')).toHaveValue(bad);
+    await page.getByRole('button', { name: 'Discard' }).click();
+    await expect(page.getByText('needs attention')).toHaveCount(0);
+    expect(await outboxCount(page)).toBe(0);
+    expect(await exactMatches(page, bad)).toBe(0);
+  });
+
+  test('signing out asks first, needs a connection, then deletes the outbox', async ({ page, context }) => {
+    await signIn(page, 'meera');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    const dialogs: string[] = [];
+    page.on('dialog', (d) => { dialogs.push(d.message()); void d.accept(); });
+    await context.setOffline(true);
+    await expect(page.getByText("You're offline.")).toBeVisible();
+    await captureOffline(page, `Never synced capture ${Date.now().toString(36)}`);
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect.poll(() => dialogs.length).toBe(2);
+    expect(dialogs[0]).toMatch(/1 quick capture on this device has not synced yet/);
+    expect(dialogs[1]).toMatch(/Signing out needs a connection/);
+    await expect(page).not.toHaveURL(/\/login/);
+    expect(await outboxCount(page)).toBe(1); // nothing deleted while the session could not be ended
+
+    await page.route('**/api/pwa/captures', (r) => r.abort('internetdisconnected')); // keep it unsynced
+    await context.setOffline(false);
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL(/\/login/);
+    expect(dialogs).toHaveLength(3);
+    expect(await outboxCount(page)).toBe(0);
+    expect(await page.evaluate(() => localStorage.getItem('tt-outbox-user'))).toBeNull();
+  });
+});
+
 test('mobile bottom navigation at 390px', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
@@ -141,6 +251,7 @@ test('bottom navigation is hidden on desktop', async ({ page }) => {
 
 test('voice capture: hidden unless enabled by the organization and supported by the browser', async ({ page, browser }) => {
   // Disabled (default): no microphone, even where the browser supports speech recognition.
+  await page.addInitScript(fakeSpeech);
   await signIn(page, 'asha');
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
   await page.keyboard.press('q');
@@ -152,15 +263,7 @@ test('voice capture: hidden unless enabled by the organization and supported by 
   try {
     // Enabled + a browser with speech recognition (a stand-in that "hears" one phrase): transcript goes to the parser for confirmation.
     const ctx = await browser.newContext();
-    await ctx.addInitScript(() => {
-      class FakeRecognition {
-        onresult: any; onend: any; onerror: any; lang = ''; interimResults = false; continuous = false; maxAlternatives = 1;
-        start() { setTimeout(() => { this.onresult?.({ results: [[{ transcript: 'Call the venue about seating tomorrow 15m' }]] }); this.onend?.(); }, 50); }
-        stop() { this.onend?.(); }
-        abort() { /* nothing recorded */ }
-      }
-      (window as any).webkitSpeechRecognition = FakeRecognition; (window as any).SpeechRecognition = FakeRecognition;
-    });
+    await ctx.addInitScript(fakeSpeech);
     const p2 = await ctx.newPage();
     await signIn(p2, 'sara');
     await expect(p2.getByRole('heading', { level: 1 })).toBeVisible();

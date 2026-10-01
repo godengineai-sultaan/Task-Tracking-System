@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { CloudUpload, RefreshCw, TriangleAlert, WifiOff } from 'lucide-react';
-import { useMe } from '../../lib/session';
+import { useMe, useRoles } from '../../lib/session';
 import { bindOutbox, discardCapture, dismissUpdate, onSynced, reloadForUpdate, retryCapture, syncOutbox, usePwa } from '../../pwa';
 import { Button } from '../ui';
 
@@ -13,7 +13,8 @@ export function PwaStatus() {
   const s = usePwa();
   const [review, setReview] = useState(false);
   const [notice, setNotice] = useState('');
-  useEffect(() => { void bindOutbox(me.user.id); }, [me.user.id]);
+  const customer = useRoles().customer;
+  useEffect(() => { void bindOutbox(me.user.id, !customer); }, [me.user.id, customer]); // clients have no quick capture, so no offline capture either
   useEffect(() => onSynced((r) => {
     qc.invalidateQueries();
     const warn = r.flatMap((x) => x.warnings);

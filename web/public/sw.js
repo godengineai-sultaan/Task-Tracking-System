@@ -54,7 +54,8 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/assets/') || url.pathname.startsWith('/icons/')) {
     // Hashed, immutable build output: cache first.
     event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => {
-      if (res.ok && res.type === 'basic') { const copy = res.clone(); event.waitUntil(caches.open(CACHE).then((c) => c.put(req, copy))); }
+      // The server answers unknown paths with the SPA page (200 text/html): never store that under an asset URL.
+      if (res.ok && res.type === 'basic' && !(res.headers.get('content-type') || '').includes('text/html')) { const copy = res.clone(); event.waitUntil(caches.open(CACHE).then((c) => c.put(req, copy))); }
       return res;
     })));
   }

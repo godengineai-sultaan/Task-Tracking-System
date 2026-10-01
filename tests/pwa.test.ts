@@ -56,6 +56,25 @@ describe('idempotent task creation (clientRequestId)', () => {
     expect(x.body.id).not.toBe(y.body.id);
   });
 
+  it('a replay repeats no side effects: one assignment notification, one My Day entry', async () => {
+    const id = rid('side');
+    const body = { title: 'Replay side effects', ownerId: org.users.emp2, clientRequestId: id };
+    const a = await emp.post('/api/tasks', body); const b = await emp.post('/api/tasks', { ...body, addToMyDay: true });
+    expect(b.body).toMatchObject({ id: a.body.id, replayed: true });
+    const notes = await withOwner(async (db) => Number((await db.query(`select count(*) n from notifications where tenant_id = $1 and user_id = $2 and link = $3`,
+      [org.tenantId, org.users.emp2, `/tasks/${a.body.id}`])).rows[0].n));
+    expect(notes).toBe(1);
+    expect((await emp.get('/api/my-day')).body.intendedOutcomes.map((x: any) => x.id)).not.toContain(a.body.id);
+  });
+
+  it('customers cannot create tasks with a request id', async () => {
+    await withOwner((db) => db.query(`insert into users (tenant_id, email, name, password_hash, roles) select tenant_id, $2, 'Client', password_hash, '{customer}' from users where id = $1`,
+      [org.users.emp, `client@${org.slug}.test`]));
+    const cust = await login(org, 'client');
+    expect((await cust.post('/api/tasks', { title: 'Client task', clientRequestId: rid('cust') })).status).toBe(403);
+    expect((await cust.post('/api/pwa/captures', { clientRequestId: rid('cust'), text: 'Client capture', capturedAt: new Date().toISOString() })).status).toBe(403);
+  });
+
   it('rejects malformed ids', async () => {
     expect((await emp.post('/api/tasks', { title: 'Bad id', clientRequestId: 'short' })).status).toBe(400);
     expect((await emp.post('/api/tasks', { title: 'Bad id', clientRequestId: "x'; drop table tasks;--" })).status).toBe(400);
@@ -100,6 +119,16 @@ describe('offline outbox sync (POST /api/pwa/captures)', () => {
     expect((await emp.post('/api/pwa/captures', { clientRequestId: rid('bad'), text: '   ', capturedAt: new Date().toISOString() })).status).toBe(400);
     expect((await emp.post('/api/pwa/captures', { clientRequestId: rid('bad'), text: 'x', capturedAt: 'yesterday' })).status).toBe(400);
     expect((await emp.post('/api/pwa/captures', { clientRequestId: rid('bad'), text: '#OPS !high', capturedAt: new Date().toISOString() })).status).toBe(400);
+  });
+
+  it('never creates a capture queued under another account on this device', async () => {
+    const id = rid('wrong-user');
+    const r = await emp2.post('/api/pwa/captures', { clientRequestId: id, userId: org.users.emp, text: 'Emp draft left in an old tab', capturedAt: new Date().toISOString() });
+    expect(r.status).toBe(409);
+    expect(await countByRequest(id)).toBe(0);
+    const ok = await emp.post('/api/pwa/captures', { clientRequestId: id, userId: org.users.emp, text: 'Emp draft left in an old tab', capturedAt: new Date().toISOString() });
+    expect(ok.status).toBe(200);
+    expect(ok.body.task.created_by).toBe(org.users.emp);
   });
 
   it('requires a session', async () => {

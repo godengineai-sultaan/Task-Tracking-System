@@ -1,3 +1,4 @@
+import { DateTime } from 'luxon';
 import type { SeedCtx } from './types.js';
 
 /** Fictional DEMO fixtures for the 'pwa' feature area: captures made on a phone while offline, synced later. */
@@ -9,7 +10,8 @@ export default async function seed(ctx: SeedCtx) {
   ];
   for (const [i, c] of captures.entries()) {
     const capturedAt = today.minus({ days: c.capturedDaysAgo }).set({ hour: c.hour, minute: c.minute });
-    const syncedAt = capturedAt.plus({ hours: 13, minutes: 12 });
+    const synced = capturedAt.plus({ hours: 13, minutes: 12 }); const now = DateTime.now().setZone(ctx.TZ);
+    const syncedAt = synced > now ? now : synced; // never created in the future when the demo is seeded early in the morning
     const t = await ins('tasks', {
       project_id: P[c.project]?.id ?? null, title: c.title, owner_id: U[c.owner], created_by: U[c.owner], status: 'planned', priority: 'medium',
       category: 'operations', due_date: capturedAt.plus({ days: 1 }).toISODate(), estimate_minutes: c.est, tags: [], acceptance_criteria: '',
