@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, BarChart3, CheckCircle2, FileSpreadsheet, Info, Lightbulb, Loader2, ShieldCheck, Table2, Users } from 'lucide-react';
+import { AlertTriangle, BarChart3, CalendarRange, CheckCircle2, FileSpreadsheet, Info, Lightbulb, Loader2, ShieldCheck, Table2, Users } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { CATEGORY_LABEL, addDays, fmtDate, hm } from '../../lib/format';
 import { useMe } from '../../lib/session';
@@ -31,10 +31,14 @@ export default function Insights() {
     departmentId: sp.get('departmentId') ?? '', teamId: sp.get('teamId') ?? '', projectId: sp.get('projectId') ?? '' };
   const set = (o: Record<string, string>) => { const n = new URLSearchParams(sp); for (const [k, v] of Object.entries(o)) v ? n.set(k, v) : n.delete(k); setSp(n, { replace: true }); };
   const custom = f.period === 'custom';
-  const params = { weeks: custom ? undefined : Number(f.period), start: custom ? f.start || undefined : undefined, end: custom ? f.end || undefined : undefined,
+  // Validate a custom range here so a typo shows inline guidance instead of a failed request with a pointless Retry.
+  const badRange = custom && (!f.start || !f.end || f.start > f.end || f.end > me.today);
+  const hasFilters = !!(f.departmentId || f.teamId || f.projectId);
+  const clearFilters = () => set({ departmentId: '', teamId: '', projectId: '' });
+  const params ={ weeks: custom ? undefined : Number(f.period), start: custom ? f.start || undefined : undefined, end: custom ? f.end || undefined : undefined,
     scope: f.scope || undefined, departmentId: f.departmentId || undefined, teamId: f.teamId || undefined, projectId: f.projectId || undefined };
   const opts = useQuery({ queryKey: ['insights-options'], queryFn: () => api.get('/api/insights/options'), retry: false });
-  const q = useQuery({ queryKey: ['insights', params], queryFn: () => api.get(`/api/insights${qs(params)}`), retry: false, placeholderData: (prev) => prev });
+  const q = useQuery({ queryKey: ['insights', params], queryFn: () => api.get(`/api/insights${qs(params)}`), retry: false, enabled: !badRange, placeholderData: (prev) => prev });
   const o = opts.data; const d = q.data;
   const scope = f.scope || o?.defaultScope;
   const teams = (o?.teams ?? []).filter((t: any) => scope !== 'team' || t.managed_by_me);
@@ -46,15 +50,15 @@ export default function Insights() {
   return (
     <div>
       <PageHeader eyebrow={eyebrow} title="Insights"
-        subtitle="Team and organization patterns from recorded work evidence. Nothing here ranks people or scores productivity."
-        actions={<Button icon={<FileSpreadsheet className="size-4" />} disabled={!d || !!d.suppressed || !d.totals} onClick={exportCsv}>Export CSV</Button>} />
+        subtitle="Team and organization patterns from recorded work evidence."
+        actions={<Button icon={<FileSpreadsheet className="size-4" />} disabled={!d || badRange || !!d.suppressed || !d.totals} onClick={exportCsv}>Export CSV</Button>} />
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Segmented label="Period" value={f.period as any} onChange={(v) => set(v === 'custom' ? { period: v, start: f.start || addDays(me.today, -27), end: f.end || me.today } : { period: v, start: '', end: '' })}
           options={[{ value: '4', label: '4 weeks' }, { value: '8', label: '8 weeks' }, { value: '12', label: '12 weeks' }, { value: 'custom', label: 'Custom' }]} />
         {custom && <div className="flex items-center gap-1">
-          <Input aria-label="Start date" type="date" className="h-8 w-[150px]" max={me.today} value={f.start} onChange={(e) => set({ start: e.target.value })} />
+          <Input aria-label="Start date" type="date" className="h-8 w-[150px]" max={me.today} value={f.start} aria-invalid={badRange || undefined} aria-describedby={badRange ? 'insights-range-error' : undefined} onChange={(e) => set({ start: e.target.value })} />
           <span className="text-ink-3" aria-hidden>–</span>
-          <Input aria-label="End date" type="date" className="h-8 w-[150px]" max={me.today} value={f.end} onChange={(e) => set({ end: e.target.value })} />
+          <Input aria-label="End date" type="date" className="h-8 w-[150px]" max={me.today} value={f.end} aria-invalid={badRange || undefined} aria-describedby={badRange ? 'insights-range-error' : undefined} onChange={(e) => set({ end: e.target.value })} />
         </div>}
         {o && o.scopes.length > 1 && <Segmented label="Scope" value={scope} onChange={(v) => set({ scope: v, teamId: '' })}
           options={o.scopes.map((s: string) => ({ value: s, label: s === 'company' ? 'Company' : 'My teams' }))} />}
@@ -64,13 +68,17 @@ export default function Insights() {
           <option value="">{scope === 'team' ? 'All my teams' : 'All teams'}</option>{teams.map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
         <Select aria-label="Project" className="h-8 w-full sm:w-48" value={f.projectId} onChange={(e) => set({ projectId: e.target.value })}>
           <option value="">All projects</option>{(o?.projects ?? []).map((x: any) => <option key={x.id} value={x.id}>{x.key} · {x.name}</option>)}</Select>
-        {(f.departmentId || f.teamId || f.projectId) && <Button size="sm" variant="ghost" onClick={() => set({ departmentId: '', teamId: '', projectId: '' })}>Clear filters</Button>}
+        {hasFilters && <Button size="sm" variant="ghost" onClick={clearFilters}>Clear filters</Button>}
         {q.isFetching && !q.isLoading && <span className="flex items-center gap-1.5 text-[12px] text-ink-3" role="status"><Loader2 className="size-3.5 animate-spin" aria-hidden />Updating</span>}
       </div>
-      {q.isLoading ? <div className="space-y-4"><div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">{Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="h-24" />)}</div><Skeleton className="h-72" /></div>
+      {badRange ? <Card><Empty icon={<CalendarRange className="size-6" />} title="Choose a valid date range">
+          <span id="insights-range-error" role="alert">Pick both dates, with the start on or before the end, and the end no later than today ({fmtDate(me.today)}).</span></Empty></Card>
+        : q.isLoading ? <div className="space-y-4" role="status"><span className="sr-only">Loading insights…</span><div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">{Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="h-24" />)}</div><Skeleton className="h-72" /></div>
         : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
-        : d.suppressed ? <Card><Empty icon={<ShieldCheck className="size-6" />} title="Withheld to protect individuals">{d.suppressed}</Empty></Card>
-        : !d.totals ? <Card><Empty icon={<Users className="size-6" />} title="No one in this selection">Change the department, team or project filter to include people you can view.</Empty></Card>
+        : d.suppressed ? <Card><Empty icon={<ShieldCheck className="size-6" />} title="Withheld to protect individuals"
+            action={hasFilters ? <Button size="sm" onClick={clearFilters}>Clear filters</Button> : undefined}>{d.suppressed}</Empty></Card>
+        : !d.totals ? <Card><Empty icon={<Users className="size-6" />} title="No one in this selection"
+            action={hasFilters ? <Button size="sm" onClick={clearFilters}>Clear filters</Button> : undefined}>Change the department, team or project filter to include people you can view.</Empty></Card>
         : <Dashboard d={d} />}
     </div>
   );
@@ -102,16 +110,16 @@ function Dashboard({ d }: { d: any }) {
         <Stat label="Planned completion" value={fr(c.plannedCompletion)} sub={naSub(c.plannedCompletion, `${c.plannedCompletion.num}/${c.plannedCompletion.den} intended outcomes`)} delta={ptsDelta('plannedCompletion', c.plannedCompletion, p.plannedCompletion)} hint={def.plannedCompletion.definition} />
         <Stat label="Accepted outcomes" value={c.acceptedOutcomes} sub="tasks reaching Done" delta={numDelta(c.acceptedOutcomes, p.acceptedOutcomes)} hint={def.acceptedOutcomes.definition} />
         <Stat label="Deadline reliability" value={fr(c.deadlineReliability)} sub={`${c.deadlineReliability.met} met · ${c.deadlineReliability.late} late · ${c.deadlineReliability.overdue} overdue`} delta={ptsDelta('deadlineReliability', c.deadlineReliability, p.deadlineReliability)} hint={def.deadlineReliability.definition} />
-        <Stat label="Blockers" value={c.blockers.active} sub={`median age ${dur(c.blockers.medianAgeHours)} · ${c.blockers.openAtEnd} open`} delta={numDelta(c.blockers.active, p.blockers.active)} hint={def.blockers.definition} />
+        <Stat label="Active blockers" value={c.blockers.active} sub={`median age ${dur(c.blockers.medianAgeHours)} · ${c.blockers.openAtEnd} open`} delta={numDelta(c.blockers.active, p.blockers.active)} hint={def.blockers.definition} />
         <Stat label="Cycle time (median)" value={dur(c.cycleTime.medianHours)} sub={`p75 ${dur(c.cycleTime.p75Hours)} · ${c.cycleTime.n}/${c.cycleTime.accepted} with a start`} delta={numDelta(c.cycleTime.medianHours, p.cycleTime.medianHours, (v) => dur(v))} hint={def.cycleTime.definition} />
         <Stat label="Rework rate" value={fr(c.reworkRate)} sub={naSub(c.reworkRate, `${c.reworkRate.num}/${c.reworkRate.den} accepted outcomes`)} delta={ptsDelta('reworkRate', c.reworkRate, p.reworkRate)} hint={def.reworkRate.definition} />
         <Stat label="Work in progress" value={cnt(c.wip.value)} sub={`${c.wip.blocked} blocked · ${c.wip.inReview} in review`} delta={numDelta(c.wip.value, p.wip.value)} hint={def.wip.definition} />
         <Stat label="Meeting load" value={fr(c.meetingShare)} sub={naSub(c.meetingShare, `${hm(c.meetingShare.num)} of available time`)} delta={ptsDelta('meetingShare', c.meetingShare, p.meetingShare)} hint={def.meetingShare.definition} />
         <Stat label="Focus time" value={fr(c.focusShare)} sub={naSub(c.focusShare, `${hm(c.focusShare.num)} in 60m+ blocks`)} delta={ptsDelta('focusShare', c.focusShare, p.focusShare)} hint={def.focusShare.definition} />
-        <Stat label="Estimate accuracy" value={fx(c.estimateAccuracy.value)} sub={`${c.estimateAccuracy.n}/${c.estimateAccuracy.accepted} accepted qualify`} hint={def.estimateAccuracy.definition} />
+        <Stat label="Estimate accuracy" value={fx(c.estimateAccuracy.value)} sub={`${c.estimateAccuracy.n}/${c.estimateAccuracy.accepted} accepted qualify`} delta={numDelta(c.estimateAccuracy.value, p.estimateAccuracy.value, (v) => fx(v))} hint={def.estimateAccuracy.definition} />
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid items-start gap-4 lg:grid-cols-3">
         <Observations items={d.observations} />
         <Card title="Where scheduled time went" subtitle="Confirmed, non-overlapping time inside schedules. Hatched = unknown (not recorded), not idle.">
           <AllocationBar byCategory={d.timeComposition.byCategory} unknown={d.timeComposition.unknownMinutes} available={d.timeComposition.availableMinutes} height={14} />
@@ -130,9 +138,9 @@ function Dashboard({ d }: { d: any }) {
         <Card title="Cycle time" subtitle={`Start to acceptance for ${d.cycleTime.withStart} of ${d.cycleTime.accepted} accepted outcomes${d.cycleTime.withStart < d.cycleTime.accepted ? ' (the rest were never marked In Progress)' : ''}.`}>
           {d.cycleTime.withStart === 0 ? <p className="text-[13px] text-ink-3">No accepted outcomes with a recorded start in this period.</p> : <>
             <Histogram label="Accepted outcomes by cycle time" items={d.cycleTime.distribution} />
-            <ScrollX label="Cycle time by category" className="mt-4"><table className="w-full min-w-[360px] text-[13px] tabular">
+            <ScrollX label="Cycle time by category" className="mt-4"><table className="w-full min-w-[300px] text-[13px] tabular">
               <caption className="sr-only">Cycle time by category</caption>
-              <thead className="text-left text-[12px] text-ink-3"><tr><th className="py-1 font-medium">Category</th><th className="py-1 text-right font-medium">Accepted</th><th className="py-1 text-right font-medium">With start</th><th className="py-1 text-right font-medium">Median</th><th className="py-1 text-right font-medium">75th pct.</th></tr></thead>
+              <thead className="text-left text-[12px] text-ink-3"><tr><th className="py-1 font-medium">Category</th><th className="py-1 text-right font-medium">Accepted</th><th className="py-1 text-right font-medium">With start</th><th className="py-1 text-right font-medium">Median</th><th className="py-1 text-right font-medium"><abbr title="75th percentile" className="no-underline">p75</abbr></th></tr></thead>
               <tbody className="divide-y divide-line">{d.cycleTime.byCategory.map((x: any) => <tr key={x.category}><td className="py-1.5">{CATEGORY_LABEL[x.category] ?? x.category}</td>
                 <td className="text-right">{x.accepted}</td><td className="text-right">{x.n}</td><td className="text-right">{dur(x.medianHours)}</td><td className="text-right">{dur(x.p75Hours)}</td></tr>)}</tbody>
             </table></ScrollX></>}
@@ -205,10 +213,12 @@ function Trends({ d }: { d: any }) {
       points={mk((m) => [m.estimateAccuracy.value], () => false, (m) => [`${m.estimateAccuracy.n} of ${m.estimateAccuracy.accepted} accepted qualify`])} />,
   ];
   return (
-    <Card title="Weekly trends" subtitle="One chart per metric, each on its own scale. Hollow points and faded bars mark a partial week. Focus a chart and use the arrow keys to read each week."
+    <Card title="Weekly trends" subtitle="One chart per metric, each on its own scale."
       actions={<Segmented label="Chart or table" value={table ? 't' : 'c'} onChange={(v) => setTable(v === 't')}
         options={[{ value: 'c', label: <span className="flex items-center gap-1"><BarChart3 className="size-3.5" aria-hidden />Chart</span> }, { value: 't', label: <span className="flex items-center gap-1"><Table2 className="size-3.5" aria-hidden />Table</span> }]} />}>
-      {table ? <TrendTable d={d} /> : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{charts}</div>}
+      {table ? <TrendTable d={d} /> : <>
+        <p className="mb-3 text-[12px] text-ink-3">Hollow points and faded bars mark a partial week. Hover a chart, or focus it and use the arrow keys, to read each week.</p>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{charts}</div></>}
     </Card>
   );
 }
@@ -289,7 +299,7 @@ function Workload({ d }: { d: any }) {
         <caption className="sr-only">{people ? 'Workload per person, alphabetical. Load, not performance.' : 'Workload per department. Individual rows are not shown for this access level.'}</caption>
         <thead className="border-b border-line text-[12px] text-ink-3"><tr><th className="px-4 py-2 text-left font-medium">{people ? 'Person' : 'Department'}</th>
           {people ? <th className="px-3 py-2 text-left font-medium">Department</th> : <th className={th}>People</th>}
-          <th className={th}>Open tasks</th><th className={th}>Estimated</th><th className={th}>Open estimate</th><th className={th}>Available</th><th className={th}>Load</th>
+          <th className={th}>Open tasks</th><th className={th}>With estimate</th><th className={th}>Open estimate</th><th className={th}>Available</th><th className={th}>Load</th>
           <th className={th}>Blocked</th><th className={th}>Overdue</th></tr></thead>
         <tbody className="divide-y divide-line">{rows.map((r: any) => (
           <tr key={r.userId ?? r.id ?? 'none'}>

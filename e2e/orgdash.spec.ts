@@ -3,6 +3,10 @@ import AxeBuilder from '@axe-core/playwright';
 import { signIn } from './helpers';
 
 const insightsResponse = (page: any) => page.waitForResponse((r: any) => r.url().includes('/api/insights?') && r.ok());
+const seriousAxe = async (page: any) => {
+  const r = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
+  return r.violations.filter((v) => ['serious', 'critical'].includes(v.impact ?? '')).map((v) => `${v.id}: ${v.nodes.length} nodes — ${v.help}`);
+};
 
 test('main admin: company insights, filters, table view, keyboard chart reading and CSV export', async ({ page }) => {
   await signIn(page, 'asha');
@@ -72,27 +76,86 @@ test('employees have no Insights entry and are refused', async ({ page }) => {
   await expect(page.getByText(/available to team managers, the main administrator and leadership/)).toBeVisible();
 });
 
-test('accessibility: no serious or critical axe violations on /insights (charts and table)', async ({ page }) => {
+test('accessibility: no serious or critical axe violations on /insights (charts and table, light and dark)', async ({ page }) => {
+  await signIn(page, 'asha');
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.goto('/insights');
+    await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
+    expect(await seriousAxe(page)).toEqual([]);
+    await page.getByRole('radio', { name: 'Table' }).click();
+    expect(await seriousAxe(page)).toEqual([]);
+  }
+});
+
+test('accessibility: team-manager and leadership views, withheld and empty states pass axe', async ({ page }) => {
+  await signIn(page, 'priya');
+  await page.goto('/insights');
+  await expect(page.getByText('Team manager · your teams')).toBeVisible();
+  expect(await seriousAxe(page)).toEqual([]);
+  await page.context().clearCookies();
+  await signIn(page, 'vikram');
+  await page.goto('/insights');
+  await expect(page.getByRole('table', { name: /Workload per department/ })).toBeVisible();
+  expect(await seriousAxe(page)).toEqual([]);
+  await page.getByLabel('Department', { exact: true }).selectOption({ label: 'Finance' });
+  await expect(page.getByText('Withheld to protect individuals')).toBeVisible();
+  expect(await seriousAxe(page)).toEqual([]);
+  // One click back to the full view from the withheld state.
+  await page.getByRole('main').getByRole('button', { name: 'Clear filters' }).last().click();
+  await expect(page.getByRole('table', { name: /Workload per department/ })).toBeVisible();
+});
+
+test('empty selection explains itself and clears in one click', async ({ page }) => {
+  await signIn(page, 'asha');
+  await page.goto('/insights');
+  await page.getByLabel('Department', { exact: true }).selectOption({ label: 'Finance' });
+  await page.getByLabel('Team', { exact: true }).selectOption({ label: 'Engineering' });
+  await expect(page.getByText('No one in this selection')).toBeVisible();
+  expect(await seriousAxe(page)).toEqual([]);
+  await page.getByRole('main').getByRole('button', { name: 'Clear filters' }).last().click();
+  await expect(page.getByText('8 people in scope', { exact: true })).toBeVisible();
+  await expect(page).not.toHaveURL(/departmentId|teamId/);
+});
+
+test('custom period: an invalid range gets inline guidance, not a failed request', async ({ page }) => {
   await signIn(page, 'asha');
   await page.goto('/insights');
   await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
-  const check = async () => {
-    const r = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
-    return r.violations.filter((v) => ['serious', 'critical'].includes(v.impact ?? '')).map((v) => `${v.id}: ${v.nodes.length} nodes — ${v.help}`);
-  };
-  expect(await check()).toEqual([]);
-  await page.getByRole('radio', { name: 'Table' }).click();
-  expect(await check()).toEqual([]);
+  await page.getByRole('radio', { name: 'Custom' }).click();
+  await expect(page.getByLabel('Start date')).toBeVisible();
+  let badRequests = 0;
+  page.on('response', (r) => { if (r.url().includes('/api/insights?') && r.status() === 400) badRequests++; });
+  const day = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+  await page.getByLabel('Start date').fill(day(12));
+  await page.getByLabel('End date').fill(day(20));
+  await expect(page.getByText('Choose a valid date range')).toBeVisible();
+  await expect(page.getByLabel('Start date')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByText("Couldn't load this")).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
+  expect(await seriousAxe(page)).toEqual([]);
+  const ok = insightsResponse(page);
+  await page.getByLabel('End date').fill(day(5));
+  await ok;
+  await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
+  expect(badRequests).toBe(0);
 });
 
-test('mobile: Insights fits a 390px screen without horizontal page scroll', async ({ browser }) => {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-  const page = await ctx.newPage();
-  await signIn(page, 'priya');
-  await page.goto('/insights');
-  await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
-  await page.getByRole('radio', { name: 'Table' }).click();
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  expect(overflow).toBeLessThanOrEqual(0);
-  await ctx.close();
-});
+for (const [who, colorScheme] of [['priya', 'dark'], ['asha', 'light']] as const) {
+  test(`mobile: Insights fits a 390px screen without horizontal page scroll (${who}, ${colorScheme})`, async ({ browser }) => {
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme });
+    const page = await ctx.newPage();
+    await signIn(page, who);
+    await page.goto('/insights');
+    await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
+    const overflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(await overflow()).toBeLessThanOrEqual(0);
+    expect(await seriousAxe(page)).toEqual([]);
+    await page.getByRole('radio', { name: 'Table' }).click();
+    expect(await overflow()).toBeLessThanOrEqual(0);
+    await page.getByRole('radio', { name: 'Custom' }).click();
+    await expect(page.getByLabel('End date')).toBeVisible();
+    expect(await overflow()).toBeLessThanOrEqual(0);
+    await ctx.close();
+  });
+}

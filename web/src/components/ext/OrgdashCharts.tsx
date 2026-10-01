@@ -49,8 +49,9 @@ export function TrendChart({ title, headline, sub, hint, series, points, kind, f
   return (
     <div className="flex min-w-0 flex-col rounded-xl bg-surface p-3.5 ring-1 ring-line">
       <div className="flex items-start justify-between gap-2">
-        <h3 className="flex items-center gap-1 text-[13px] font-medium text-ink-2">{title}
-          {hint && <span title={hint} className="text-ink-3"><CircleHelp className="size-3" aria-label={hint} /></span>}</h3>
+        {/* The definition sits beside the heading, not inside it, so heading navigation reads just the metric name. */}
+        <div className="flex items-center gap-1"><h3 className="text-[13px] font-medium text-ink-2">{title}</h3>
+          {hint && <span title={hint} className="text-ink-3"><CircleHelp role="img" className="size-3" aria-label={hint} /></span>}</div>
         <div className="text-right text-[15px] font-semibold leading-tight tabular">{headline}</div>
       </div>
       {sub && <div className="mt-0.5 text-[12px] text-ink-3">{sub}</div>}
