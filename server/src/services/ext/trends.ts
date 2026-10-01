@@ -296,14 +296,19 @@ export function findPatterns({ series, workingDays, estimateAccuracy, coverageTh
   }
 
   // 2. Estimate accuracy by category and project (needs >= 3 measured tasks).
+  // A project holding exactly the same tasks as a category would repeat the same observation: fold it into a fact instead.
+  const sameTasks = (g: any) => `${g.accepted}|${g.measured}|${g.estimateMinutes}|${g.actualMinutes}`;
+  const byCategoryTasks = new Map<string, Pattern>();
   for (const [dim, groups] of [['category', estimateAccuracy.byCategory], ['project', estimateAccuracy.byProject]] as const) {
     for (const g of groups) {
       if (g.measured < T.estimateMinTasks || g.ratio === null) continue;
       const over = g.ratio >= T.overrunRatio, under = g.ratio <= T.underrunRatio;
       if (!over && !under) continue;
       const noProject = dim === 'project' && g.key === 'none';
+      const twin = dim === 'project' ? byCategoryTasks.get(sameTasks(g)) : undefined;
+      if (twin) { twin.facts.splice(2, 0, `The same ${g.accepted} task(s) are all ${noProject ? 'without a project' : `in project ${g.label}`}`); continue; }
       const where = dim === 'category' ? `Tasks in ${g.label}` : noProject ? 'Tasks without a project' : `Tasks in project ${g.label}`;
-      out.push({ id: `estimate-${dim}-${g.key}`, tone: over ? 'attention' : 'info',
+      const p: Pattern = { id: `estimate-${dim}-${g.key}`, tone: over ? 'attention' : 'info',
         title: over ? `${where} run ${xS(g.ratio)} their estimates on average (${g.measured} tasks)` : `${where} take about ${xS(g.ratio)} of their estimates on average (${g.measured} tasks)`,
         facts: [`${hmS(g.actualMinutes)} logged against ${hmS(g.estimateMinutes)} estimated across ${g.measured} accepted task(s)`,
           `Coverage: ${g.measured} of ${g.accepted} accepted task(s) had both an estimate and logged time`,
@@ -311,7 +316,9 @@ export function findPatterns({ series, workingDays, estimateAccuracy, coverageTh
         suggestion: over ? `When sizing new ${dim === 'category' ? g.label.toLowerCase() : noProject ? 'unassigned' : g.label} work, consider allowing roughly ${xS(g.ratio)} the first estimate or splitting it into smaller tasks.`
           : 'Estimates here look generous; tighter estimates make capacity planning more accurate.',
         assumptions: ['Actual = the owner\'s confirmed time linked to each task; unlogged time and collaborators\' time is not included (so ratios may be understated).',
-          `Ratio = total logged / total estimated for accepted tasks with both; needs at least ${T.estimateMinTasks} tasks.`] });
+          `Ratio = total logged / total estimated for accepted tasks with both; needs at least ${T.estimateMinTasks} tasks.`] };
+      out.push(p);
+      if (dim === 'category') byCategoryTasks.set(sameTasks(g), p);
     }
   }
 

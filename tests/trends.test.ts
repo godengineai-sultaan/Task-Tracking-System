@@ -256,4 +256,12 @@ describe('personal trends: review regressions', () => {
     expect(p.title).toBe('Tasks without a project run 2.0x their estimates on average (3 tasks)');
     expect(p.suggestion).toMatch(/new unassigned work/);
   });
+
+  it('a project holding exactly the tasks of a category does not repeat the same estimate pattern', () => {
+    const g = { accepted: 4, measured: 3, ratio: 2, actualMinutes: 360, estimateMinutes: 180, tasks: [] };
+    const ps = findPatterns({ series: [], workingDays: [], coverageThreshold: 0.5,
+      estimateAccuracy: { byCategory: [{ ...g, key: 'finance', label: 'Finance' }], byProject: [{ ...g, key: 'p1', label: 'Q3 close' }, { ...g, key: 'p2', label: 'Audit', actualMinutes: 400 }] } });
+    expect(ps.map((p: any) => p.id)).toEqual(['estimate-category-finance', 'estimate-project-p2']);
+    expect(ps[0].facts).toContain('The same 4 task(s) are all in project Q3 close');
+  });
 });

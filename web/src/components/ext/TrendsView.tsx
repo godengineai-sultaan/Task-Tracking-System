@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react';
+import { useId, useState, type KeyboardEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, BarChart3, CheckCircle2, Info, Lightbulb, Table2, TrendingUp } from 'lucide-react';
 import { api, qs } from '../../lib/api';
@@ -53,38 +53,40 @@ function niceMax(v: number) {
   return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
 }
 
-export function TrendsView({ uid, weeks, onWeeks }: { uid: string; weeks: number; onWeeks: (n: number) => void }) {
+/** Range line shown next to the weeks selector on the Analytics page. */
+export function trendsRangeText(d: any) {
+  const f = (x: string) => fmtDate(x, { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${f(d.range.start)} – ${f(d.range.end)} · ${d.summary.applicableWeeks} comparable week(s)${d.summary.notApplicableWeeks ? ` · ${d.summary.notApplicableWeeks} Not Applicable` : ''}`;
+}
+
+export function TrendsView({ uid, weeks }: { uid: string; weeks: number }) {
   const q = useTrends(uid, weeks);
-  const [table, setTable] = useState(false);
   const d = q.data;
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <Segmented label="Weeks shown" value={String(weeks)} onChange={(v) => onWeeks(Number(v))} options={[{ value: '8', label: '8 wk' }, { value: '12', label: '12 wk' }, { value: '26', label: '26 wk' }]} />
-        <Segmented label="Chart or table" value={table ? 't' : 'c'} onChange={(v) => setTable(v === 't')}
-          options={[{ value: 'c', label: <span className="flex items-center gap-1"><BarChart3 className="size-3.5" aria-hidden />Charts</span> }, { value: 't', label: <span className="flex items-center gap-1"><Table2 className="size-3.5" aria-hidden />Table</span> }]} />
-        {d && <span className="text-[13px] text-ink-2">{fmtDate(d.range.start, { day: 'numeric', month: 'short', year: 'numeric' })} – {fmtDate(d.range.end, { day: 'numeric', month: 'short', year: 'numeric' })}
-          {' · '}{d.summary.applicableWeeks} comparable week(s){d.summary.notApplicableWeeks ? ` · ${d.summary.notApplicableWeeks} Not Applicable` : ''}</span>}
-      </div>
-      {q.isLoading ? <div className="grid gap-4"><Skeleton className="h-24" /><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-40" />)}</div></div>
-        : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
-        : d ? <TrendsBody d={d} table={table} /> : null}
+      {q.isLoading ? <div className="grid gap-4" role="status"><span className="sr-only">Loading trends…</span><Skeleton className="h-24" /><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-40" />)}</div></div>
+        : q.error ? <ErrorState error={q.error} onRetry={(q.error as any).status === 403 || (q.error as any).status === 404 ? undefined : () => q.refetch()} />
+        : d ? <TrendsBody d={d} /> : null}
     </div>
   );
 }
 
-function TrendsBody({ d, table }: { d: any; table: boolean }) {
+function TrendsBody({ d }: { d: any }) {
+  const [table, setTable] = useState(false);
   const s = d.summary;
+  const first = d.subject.name.split(' ')[0];
   const anyRecords = d.weeks.some((w: Week) => w.explainedMinutes > 0 || w.intendedOutcomes > 0 || w.acceptedOutcomes > 0);
   if (!s.applicableWeeks || !anyRecords) {
     return <Card><Empty icon={<TrendingUp className="size-6" aria-hidden />} title={s.applicableWeeks ? 'No recorded work in these weeks yet' : 'No comparable working days in these weeks'}>
-      {s.applicableWeeks ? 'Trends appear once plans, time entries, recaps or accepted tasks are recorded. Nothing is inferred from activity monitoring.' : 'Every week was a holiday, leave or non-working week, so there is nothing to compare.'}
+      {s.applicableWeeks ? 'Trends appear once plans, time entries, recaps or accepted tasks are recorded. Nothing is inferred from activity monitoring.'
+        : d.recordsStart && d.recordsStart >= d.range.start ? `Records for ${first} begin on ${fmtDate(d.recordsStart, { day: 'numeric', month: 'short', year: 'numeric' })}. Weeks before that, weeks of only holidays or leave, and a week with no completed working day yet are Not Applicable, so there is nothing to compare yet.`
+        : 'Every week was a holiday, leave or non-working week, so there is nothing to compare.'}
     </Empty></Card>;
   }
   const ms = metrics(d.definitions);
   return (
     <>
-      <Callout tone="neutral"><span className="text-[12.5px]">These trends describe only what {d.subject.name.split(' ')[0]} recorded: plans, confirmed time, recaps, blockers and accepted tasks. They are not a productivity score, they are never compared with other people, and unknown time is not treated as idle. Weeks without comparable working days are shown as Not Applicable, not zero.</span></Callout>
+      <Callout tone="neutral"><span className="text-[12.5px]">These trends describe only what {first} recorded: plans, confirmed time, recaps, blockers and accepted tasks. They are not a productivity score, they are never compared with other people, and unknown time is not treated as idle. Weeks without comparable working days are shown as Not Applicable, not zero.</span></Callout>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <Stat label="Intended outcomes accepted" value={pct(s.plannedCompletion)} sub={`over ${s.comparableWorkingDays} working days`} hint={d.definitions.planned_commitment_completion} />
         <Stat label="Accepted outcomes" value={s.acceptedOutcomes} sub={`in ${d.range.weeks} weeks`} hint={d.definitions.accepted_outcomes} />
@@ -94,14 +96,18 @@ function TrendsBody({ d, table }: { d: any; table: boolean }) {
         <Stat label="Estimate ratio" value={s.estimateRatio === null ? 'N/A' : ratioX(s.estimateRatio)} sub={`${d.estimateAccuracy.overall.measured} of ${d.estimateAccuracy.overall.accepted} tasks measured`} hint={d.definitions.estimate_accuracy} />
       </div>
 
-      <Card title="Weekly trends" subtitle="One small chart per measure. Arrow keys move between weeks; Not Applicable weeks are gaps, not zeros." padded={!table}>
-        <WorkingDaysStrip weeks={d.weeks} />
-        {table ? <WeeklyTable weeks={d.weeks} /> : <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{ms.map((m) => <MiniChart key={m.key} m={m} weeks={d.weeks} />)}</div>}
-      </Card>
-
       <Card title={<span className="flex items-center gap-2"><Lightbulb className="size-4 text-accent" aria-hidden />Pattern review</span>}
         subtitle="Rule-based observations from these weeks, each with the facts behind it and a gentle suggestion.">
         <Patterns patterns={d.patterns} />
+      </Card>
+
+      <Card title="Weekly trends" subtitle="One small chart per measure. Arrow keys move between weeks; Not Applicable weeks are gaps, not zeros. Faded bars and hollow points are the week in progress.">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+          {table ? <span /> : <WorkingDaysStrip weeks={d.weeks} />}
+          <Segmented label="Chart or table" value={table ? 't' : 'c'} onChange={(v) => setTable(v === 't')}
+            options={[{ value: 'c', label: <span className="flex items-center gap-1"><BarChart3 className="size-3.5" aria-hidden />Charts</span> }, { value: 't', label: <span className="flex items-center gap-1"><Table2 className="size-3.5" aria-hidden />Table</span> }]} />
+        </div>
+        {table ? <WeeklyTable weeks={d.weeks} /> : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{ms.map((m) => <MiniChart key={m.key} m={m} weeks={d.weeks} />)}</div>}
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -124,8 +130,9 @@ function TrendsBody({ d, table }: { d: any; table: boolean }) {
 
 function WorkingDaysStrip({ weeks }: { weeks: Week[] }) {
   return (
-    <div className="px-4 pt-3 sm:px-0 sm:pt-0">
-      <p className="mb-1 text-[12px] font-medium text-ink-3">Comparable working days per week</p>
+    <div className="min-w-[240px] flex-1">
+      <p className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-ink-3">Comparable working days per week
+        <span className="inline-flex items-center gap-1 font-normal"><span aria-hidden className="hatch inline-block h-2.5 w-3.5 rounded-[3px] ring-1 ring-inset ring-line-strong" />Not Applicable</span></p>
       <ol className="grid gap-[2px]" style={{ gridTemplateColumns: `repeat(${weeks.length}, minmax(0, 1fr))` }}>
         {weeks.map((w) => (
           <li key={w.weekStart} title={`${weekLabel(w)}: ${w.status === 'applicable' ? `${w.workingDays} working day(s)` : w.naReason}`}
@@ -140,15 +147,22 @@ function WorkingDaysStrip({ weeks }: { weeks: Week[] }) {
 /** Single-series small multiple: plain HTML/SVG, one tab stop, arrow keys or hover reveal each week; table view elsewhere. */
 function MiniChart({ m, weeks }: { m: Metric; weeks: Week[] }) {
   const [hover, setHover] = useState<number | null>(null);
+  const hintId = useId();
   const vals = weeks.map((w) => (w.status === 'applicable' ? m.value(w) : null));
   const nums = vals.filter((v): v is number => v !== null);
   const top = Math.max(m.minMax ?? 0, ...nums, m.ref?.value ?? 0);
   const max = m.max ?? (m.minutes ? niceMax(top / 60) * 60 : niceMax(top)); // minute axes round to whole hours
   const N = weeks.length;
-  let lastIdx = -1; vals.forEach((v, i) => { if (v !== null) lastIdx = i; });
+  // Headline = latest completed week; the week in progress is only a fallback, so a half-finished week never reads as a drop.
+  let lastIdx = -1; vals.forEach((v, i) => { if (v !== null && (!weeks[i].partial || lastIdx < 0 || weeks[lastIdx].partial)) lastIdx = i; });
   const yPct = (v: number) => Math.min(100, (v / max) * 100);
-  const lines: number[][][] = []; let cur: number[][] = [];
-  vals.forEach((v, i) => { if (v === null) { if (cur.length) lines.push(cur); cur = []; } else cur.push([((i + 0.5) / N) * 100, 100 - yPct(v)]); });
+  const pt = (i: number) => [((i + 0.5) / N) * 100, 100 - yPct(vals[i]!)];
+  const lines: number[][][] = []; let cur: number[][] = []; let inProgress: number[][] | null = null;
+  vals.forEach((v, i) => {
+    if (v === null) { if (cur.length) lines.push(cur); cur = []; }
+    else if (weeks[i].partial && i > 0 && vals[i - 1] !== null) inProgress = [pt(i - 1), pt(i)]; // dashed: week in progress
+    else cur.push(pt(i));
+  });
   if (cur.length) lines.push(cur);
   const describe = (i: number) => {
     const w = weeks[i];
@@ -169,9 +183,10 @@ function MiniChart({ m, weeks }: { m: Metric; weeks: Week[] }) {
         <span className="text-[13px] font-medium text-ink" title={m.hint}>{m.title}</span>
         <span className="text-[14px] font-semibold tabular text-ink">{lastIdx >= 0 ? m.fmt(vals[lastIdx]!) : 'N/A'}</span>
       </figcaption>
-      <p className="text-[11.5px] text-ink-3">{lastIdx >= 0 ? `latest: ${weekLabel(weeks[lastIdx]).replace(/^Week/, 'week')}` : 'no applicable week'}</p>
-      <div className="relative mt-5 h-24" tabIndex={0} role="group" aria-roledescription="chart" onKeyDown={onKey}
-        aria-label={`${m.title} by week. Latest ${lastIdx >= 0 ? m.fmt(vals[lastIdx]!) : 'not applicable'}. Use left and right arrow keys to read each week.`}
+      <p className="text-[11.5px] text-ink-3">{lastIdx >= 0 ? `${weeks[lastIdx].partial ? 'latest' : 'last full week'}: ${weekLabel(weeks[lastIdx]).replace(/^Week/, 'week')}` : 'no applicable week'}</p>
+      <span id={hintId} className="sr-only">{m.hint}</span>
+      <div className="relative mt-5 h-24" tabIndex={0} role="group" aria-roledescription="chart" onKeyDown={onKey} aria-describedby={m.hint ? hintId : undefined}
+        aria-label={`${m.title} by week. ${lastIdx >= 0 ? `${weeks[lastIdx].partial ? 'Latest' : 'Last full week'} ${m.fmt(vals[lastIdx]!)}` : 'Not applicable'}. Use left and right arrow keys to read each week.`}
         onFocus={() => setHover((h) => h ?? (lastIdx >= 0 ? lastIdx : N - 1))} onBlur={() => setHover(null)} onMouseLeave={() => setHover(null)}>
         <div aria-hidden className="absolute inset-x-0 top-0 border-t border-dashed border-line" />
         <span aria-hidden className="absolute -top-3.5 right-0 text-[10px] leading-none text-ink-3 tabular">{m.fmt(max)}</span>
@@ -180,16 +195,17 @@ function MiniChart({ m, weeks }: { m: Metric; weeks: Week[] }) {
           <span className="absolute left-0 top-0.5 rounded bg-surface/80 px-0.5 text-[10px] leading-none text-ink-3">{m.ref.label}</span></div>}
         {m.kind === 'line' && <svg aria-hidden className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none">
           {lines.map((pts, i) => <polyline key={i} points={pts.map((p) => p.join(',')).join(' ')} fill="none" stroke={m.color} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />)}
+          {inProgress && <polyline points={(inProgress as number[][]).map((p) => p.join(',')).join(' ')} fill="none" stroke={m.color} strokeWidth={2} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" strokeLinecap="round" />}
         </svg>}
         <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${N}, minmax(0, 1fr))` }}>
           {weeks.map((w, i) => {
             const v = vals[i]; const na = w.status !== 'applicable';
             return (
               <div key={w.weekStart} className={cx('relative h-full', hover === i && 'bg-ink/5 rounded-[3px]')} onMouseEnter={() => setHover(i)}>
-                {m.kind === 'bar' && v !== null && v > 0 && <div aria-hidden className={cx('absolute inset-x-[18%] bottom-0 rounded-t-[4px]', m.hatch && 'hatch ring-1 ring-inset ring-line-strong')}
+                {m.kind === 'bar' && v !== null && v > 0 && <div aria-hidden className={cx('absolute inset-x-[18%] bottom-0 rounded-t-[4px]', m.hatch && 'hatch ring-1 ring-inset ring-line-strong', w.partial && 'opacity-45')}
                   style={{ height: `${Math.max(2, yPct(v))}%`, background: m.hatch ? undefined : m.color }} />}
                 {m.kind === 'line' && v !== null && <span aria-hidden className="absolute left-1/2 size-2 -translate-x-1/2 translate-y-1/2 rounded-full ring-2 ring-surface"
-                  style={{ bottom: `${yPct(v)}%`, background: m.color }} />}
+                  style={{ bottom: `${yPct(v)}%`, background: w.partial ? 'var(--surface)' : m.color, border: w.partial ? `2px solid ${m.color}` : undefined }} />}
                 {na && <span aria-hidden className="absolute bottom-0.5 left-1/2 -translate-x-1/2 text-[9px] leading-none text-ink-3">{N <= 13 ? 'N/A' : '–'}</span>}
                 {hover === i && <div role="tooltip" className={cx('pointer-events-none absolute bottom-full z-20 mb-2 w-52 rounded-lg bg-surface p-2.5 text-[12px] shadow-xl ring-1 ring-line', tipAlign(i))}>
                   <div className="font-semibold">{weekLabel(w)}</div>
@@ -210,20 +226,20 @@ function MiniChart({ m, weeks }: { m: Metric; weeks: Week[] }) {
 }
 
 function WeeklyTable({ weeks }: { weeks: Week[] }) {
-  const cols = ['Working days', 'Intended accepted', 'Accepted outcomes', 'Focus', 'Meetings', 'Switches / day', 'Carryover', 'Logging coverage', 'Unknown', 'Blocked', 'Estimate ratio', 'Recaps'];
+  const cols = ['Working days', 'Intended accepted', 'Accepted outcomes', 'Focus time', 'Meetings', 'Switches / day', 'Carryover', 'Logging coverage', 'Unknown', 'Blocked', 'Estimate ratio', 'Recaps'];
   return (
-    <div className="mt-3 overflow-x-auto border-t border-line">
+    <div className="-mx-4 -mb-4 overflow-x-auto border-t border-line" tabIndex={0} role="region" aria-label="Weekly trend values (scrolls sideways)">
       <table className="w-full min-w-[980px] text-[12.5px] tabular">
         <caption className="sr-only">Weekly trend values</caption>
-        <thead className="text-left text-ink-3"><tr><th scope="col" className="px-4 py-2 font-medium">Week</th>{cols.map((c) => <th key={c} scope="col" className="py-2 pr-3 font-medium">{c}</th>)}</tr></thead>
-        <tbody className="divide-y divide-line">{weeks.map((w) => (
+        <thead className="text-left text-ink-3"><tr><th scope="col" className="sticky left-0 bg-surface px-4 py-2 font-medium">Week</th>{cols.map((c) => <th key={c} scope="col" className="py-2 pr-3 font-medium">{c}</th>)}</tr></thead>
+        <tbody className="divide-y divide-line whitespace-nowrap">{weeks.map((w) => (
           <tr key={w.weekStart}>
-            <th scope="row" className="whitespace-nowrap px-4 py-1.5 text-left font-medium">{wk(w.weekStart)}{w.partial && <span className="font-normal text-ink-3"> (so far)</span>}</th>
-            {w.status !== 'applicable' ? <td colSpan={cols.length} className="py-1.5 pr-3 text-ink-3">Not Applicable — {w.naReason}{w.acceptedOutcomes ? ` (${w.acceptedOutcomes} accepted outcome(s) recorded)` : ''}</td> : <>
+            <th scope="row" className="sticky left-0 whitespace-nowrap bg-surface px-4 py-1.5 text-left font-medium">{wk(w.weekStart)}{w.partial && <span className="font-normal text-ink-3"> (so far)</span>}</th>
+            {w.status !== 'applicable' ? <td colSpan={cols.length} className="whitespace-normal py-1.5 pr-3 text-ink-3">Not Applicable — {w.naReason}{w.acceptedOutcomes ? ` (${w.acceptedOutcomes} accepted outcome(s) recorded)` : ''}</td> : <>
               <td className="pr-3">{w.workingDays}</td>
               <td className="pr-3">{w.intendedOutcomes ? `${pct(w.plannedCompletion)} (${w.acceptedPlanned}/${w.intendedOutcomes})` : 'N/A'}</td>
               <td className="pr-3">{w.acceptedOutcomes}</td>
-              <td className="pr-3">{hm(w.focusMinutes)} · {w.focusBlocks} blk</td>
+              <td className="pr-3">{hm(w.focusMinutes)} <span className="text-ink-3">({w.focusBlocks} block{w.focusBlocks === 1 ? '' : 's'})</span></td>
               <td className="pr-3">{hm(w.meetingMinutes)} ({pct(w.meetingShare)})</td>
               <td className="pr-3">{w.switchesPerDay === null ? 'N/A' : w.switchesPerDay.toFixed(1)}</td>
               <td className="pr-3">{pct(w.carryoverRate)}</td>
@@ -317,7 +333,7 @@ function EstimateTable({ ea }: { ea: any }) {
   return (
     <div>
       <div className="px-4 pt-3"><Segmented label="Group estimate accuracy by" value={by} onChange={setBy} options={[{ value: 'category', label: 'By category' }, { value: 'project', label: 'By project' }]} /></div>
-      <div className="mt-2 overflow-x-auto">
+      <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-label={`Estimate accuracy ${by === 'category' ? 'by category' : 'by project'} (scrolls sideways)`}>
         <table className="w-full min-w-[480px] text-[12.5px] tabular">
           <caption className="sr-only">Estimate accuracy {by === 'category' ? 'by category' : 'by project'}</caption>
           <thead className="text-left text-ink-3"><tr><th scope="col" className="px-4 py-1.5 font-medium">{by === 'category' ? 'Category' : 'Project'}</th><th scope="col" className="pr-3 font-medium">Accepted</th>

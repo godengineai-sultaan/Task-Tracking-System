@@ -8,7 +8,7 @@ import { useMe, useRoles } from '../lib/session';
 import { AssessmentBadge, Badge, Button, Callout, Card, ErrorState, Input, PageHeader, Segmented, Select, Skeleton, Stat, cx, useToast } from '../components/ui';
 import { AllocationBar } from '../components/time';
 import { downloadExport } from './util';
-import { TrendsView, useTrends } from '../components/ext/TrendsView';
+import { TrendsView, trendsRangeText, useTrends } from '../components/ext/TrendsView';
 
 type Kind = 'day' | 'week' | 'month' | 'custom';
 
@@ -43,7 +43,10 @@ export default function Analytics() {
         </>} />
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Segmented label="View" value={view} onChange={(v) => set({ view: v })} options={[{ value: 'report', label: 'Report' }, { value: 'trends', label: 'Trends' }]} />
-        {view === 'trends' ? null : <>
+        {view === 'trends' ? <>
+          <Segmented label="Weeks shown" value={String(weeks)} onChange={(v) => set({ weeks: v })} options={[{ value: '8', label: '8 wk' }, { value: '12', label: '12 wk' }, { value: '26', label: '26 wk' }]} />
+          {tq.data && <span className="text-[13px] text-ink-2">{trendsRangeText(tq.data)}</span>}
+        </> : <>
         <Segmented label="Period" value={kind} onChange={(v) => set({ kind: v })} options={[{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }, { value: 'custom', label: 'Custom' }]} />
         {kind !== 'custom' ? <div className="flex items-center gap-1">
           <Button size="sm" variant="ghost" aria-label="Previous period" onClick={() => shift(-1)}><ChevronLeft className="size-4" /></Button>
@@ -57,7 +60,7 @@ export default function Analytics() {
         {r && <Badge tone={r.reportState === 'provisional' ? 'warning' : 'good'}>{r.reportState === 'provisional' ? 'Provisional' : r.reportState === 'manager_reviewed' ? 'Manager reviewed' : 'Confirmed'}</Badge>}
         </>}
       </div>
-      {view === 'trends' ? <TrendsView uid={uid} weeks={weeks} onWeeks={(n) => set({ weeks: String(n) })} /> : q.isLoading ? <div className="grid gap-4"><Skeleton className="h-40" /><Skeleton className="h-64" /></div> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <Report r={r} kind={kind} own={uid === me.user.id} />}
+      {view === 'trends' ? <TrendsView uid={uid} weeks={weeks} /> : q.isLoading ? <div className="grid gap-4"><Skeleton className="h-40" /><Skeleton className="h-64" /></div> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <Report r={r} kind={kind} own={uid === me.user.id} />}
     </div>
   );
 }
