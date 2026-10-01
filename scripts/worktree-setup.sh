@@ -6,16 +6,16 @@
 set -euo pipefail
 export LC_ALL=C LANG=C
 cd "$(dirname "$0")/.."
-AREA=${1:?area}; PORT=${2:?e2e port}
+AREA=${1:?area}; E2EP=${2:?e2e port}
 WT=.worktrees/$AREA
 [ -d "$WT" ] || git worktree add -q "$WT" -b "feat/$AREA"
 ln -sfn "$PWD/node_modules" "$WT/node_modules"
 set -a; . ./.env; set +a
 sed -e "s#/taskapp\$#/taskapp_$AREA#" -e "s#^TEST_DATABASE_NAME=.*#TEST_DATABASE_NAME=taskapp_test_$AREA#" .env > "$WT/.env"
-printf 'E2E_PORT=%s\nPG_POOL_MAX=6\nSTORAGE_DIR=.data/storage\n' "$PORT" >> "$WT/.env"
+printf 'E2E_PORT=%s\nPG_POOL_MAX=6\nSTORAGE_DIR=.data/storage\n' "$E2EP" >> "$WT/.env"
 for db in "taskapp_$AREA" "taskapp_test_$AREA"; do
   psql -h /tmp -p "$PGPORT" -U postgres -q -d postgres -tAc "select 1 from pg_database where datname='$db'" | grep -q 1 || \
     psql -h /tmp -p "$PGPORT" -U postgres -q -d postgres -c "create database $db owner taskapp_owner"
   psql -h /tmp -p "$PGPORT" -U postgres -q -d "$db" -c "revoke all on schema public from public; grant usage, create on schema public to taskapp_owner; grant usage on schema public to taskapp; create extension if not exists pgcrypto;" 2>/dev/null
 done
-echo "$WT ready (branch feat/$AREA, db taskapp_$AREA, e2e port $PORT)"
+echo "$WT ready (branch feat/$AREA, db taskapp_$AREA, e2e port $E2EP)"
