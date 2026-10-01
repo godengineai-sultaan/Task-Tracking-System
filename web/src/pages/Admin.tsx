@@ -76,7 +76,8 @@ function Org() {
         <div className="space-y-2.5">
           <Checkbox checked={!!s.ai_enabled} onChange={(v) => setS('ai_enabled', v)} label="Allow optional AI drafting (task drafts, recap drafts — always reviewed by the person)" />
           <p className="text-[12px] text-ink-3">Requires an ANTHROPIC_API_KEY on the server. Drafts send only the person's own task titles/notes; prompts are versioned and every run is logged.</p>
-          <Checkbox checked={!!s.voice_capture_enabled} disabled onChange={() => {}} label="Voice note capture (not available in this build)" />
+          <Checkbox checked={!!s.voice_capture_enabled} onChange={(v) => setS('voice_capture_enabled', v)} label="Allow voice capture in quick capture (off by default; people choose whether to use the microphone)" />
+          <p className="text-[12px] text-ink-3">Shows a microphone button in quick capture on browsers with built-in speech recognition. The browser's speech service turns speech into text; only the transcript is used and confirmed by the person. No audio reaches or is stored by this app.</p>
           <Field label="Retention for telemetry, notifications and ignored integration events (days)">{(id) => <Input id={id} type="number" min={30} max={3650} className="w-28" value={s.retention_days ?? 730} onChange={(e) => setS('retention_days', Number(e.target.value))} />}</Field>
           <Button size="sm" loading={retention.isPending} onClick={() => retention.mutate()}>Run retention now</Button>
         </div>
