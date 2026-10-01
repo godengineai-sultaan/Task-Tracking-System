@@ -97,3 +97,11 @@ test('automations page: accessible and fits a phone screen', async ({ browser, p
   expect(await overflow()).toBeLessThanOrEqual(0);
   await ctx.close();
 });
+
+test('a system admin editing a manager\'s team rule sees that manager\'s team, not their own', async ({ page }) => {
+  await signIn(page, 'asha');
+  await page.goto('/automations');
+  await page.getByRole('button', { name: 'Edit Portal tasks: due-tomorrow reminder' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit automation rule' });
+  await expect(dialog.getByText('When a task in WEB is due by tomorrow, notify the owner. Only for tasks owned by Priya Nair\'s team.')).toBeVisible();
+});

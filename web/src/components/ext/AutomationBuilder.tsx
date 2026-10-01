@@ -11,7 +11,7 @@ import { useProjects, useUsers } from '../TaskStatus';
 export type Trigger = { type: string; from?: string | null; to?: string | null; decision?: string | null; days?: number };
 export type Conditions = { projectIds?: string[]; categories?: string[]; priorities?: string[]; tags?: string[]; ownerIds?: string[]; statuses?: string[] };
 export type Action = { type: string; target?: string; owner?: string; userId?: string | null; message?: string; title?: string; dueInDays?: number | null; priority?: string; text?: string };
-export interface Draft { id?: string; version?: number; name: string; description: string; enabled: boolean; scope: 'company' | 'team'; trigger: Trigger; conditions: Conditions; actions: Action[]; preset?: string | null }
+export interface Draft { id?: string; version?: number; ownerId?: string; ownerName?: string; name: string; description: string; enabled: boolean; scope: 'company' | 'team'; trigger: Trigger; conditions: Conditions; actions: Action[]; preset?: string | null }
 export interface Lookups { projects: Map<string, string>; users: Map<string, string>; ownerName?: string }
 
 export const TRIGGERS = [
@@ -52,7 +52,7 @@ export function emptyDraft(scope: 'company' | 'team'): Draft {
   return { name: '', description: '', enabled: true, scope, trigger: { type: 'task.status_changed', from: null, to: 'blocked' }, conditions: {}, actions: [{ ...DEFAULT_ACTION.notify, target: 'manager' }] };
 }
 export function draftFrom(r: any): Draft {
-  return { id: r.id, version: r.version, name: r.name, description: r.description ?? '', enabled: r.enabled ?? true, scope: r.scope, trigger: { ...r.trigger },
+  return { id: r.id, version: r.version, ownerId: r.owner_id, ownerName: r.owner_name, name: r.name, description: r.description ?? '', enabled: r.enabled ?? true, scope: r.scope, trigger: { ...r.trigger },
     conditions: { ...(r.conditions ?? {}) }, actions: (r.actions ?? []).map((a: Action) => ({ ...a })), preset: r.preset ?? r.key ?? null };
 }
 
@@ -170,9 +170,11 @@ export function RuleBuilder({ open, onClose, initial, permissions }: { open: boo
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const editing = !!d.id;
-  const teamIds = new Set([me.user.id, ...me.user.managedUserIds]);
-  const people = (users.data ?? []).filter((u: any) => d.scope === 'company' || teamIds.has(u.id)).map((u: any) => ({ value: u.id, label: u.name }));
-  const owners = d.scope === 'team' ? people.filter((p: any) => p.value !== me.user.id) : people;
+  const ruleOwner = d.ownerId ?? me.user.id;
+  // A system admin editing another manager's team rule: that team is not known here, so list everyone and let the server check each person.
+  const teamIds = ruleOwner === me.user.id ? new Set([me.user.id, ...me.user.managedUserIds]) : null;
+  const people = (users.data ?? []).filter((u: any) => d.scope === 'company' || !teamIds || teamIds.has(u.id)).map((u: any) => ({ value: u.id, label: u.name }));
+  const owners = d.scope === 'team' ? people.filter((p: any) => p.value !== ruleOwner) : people;
   const setTrigger = (t: Partial<Trigger>) => setD({ ...d, trigger: { ...d.trigger, ...t } });
   const setCond = (k: keyof Conditions, v: string[]) => setD({ ...d, conditions: { ...d.conditions, [k]: v } });
   const setAction = (i: number, a: Action) => setD({ ...d, actions: d.actions.map((x, j) => (j === i ? a : x)) });
@@ -198,7 +200,7 @@ export function RuleBuilder({ open, onClose, initial, permissions }: { open: boo
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['automations'] }); toast({ tone: 'good', text: editing ? 'Rule saved' : `Rule "${d.name.trim()}" created${d.enabled ? ' and running' : ''}` }); onClose(); },
     onError: (e: any) => setError(e.message),
   });
-  const preview = describeRule({ ...payload(), scope: d.scope } as Draft, { ...lookups, ownerName: d.scope === 'team' ? me.user.name : undefined });
+  const preview = describeRule({ ...payload(), scope: d.scope } as Draft, { ...lookups, ownerName: d.scope === 'team' ? d.ownerName ?? me.user.name : undefined });
   const t = d.trigger;
 
   return (

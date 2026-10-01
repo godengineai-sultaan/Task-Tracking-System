@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
 import type { Db } from '../../lib/db.js';
@@ -5,7 +6,7 @@ import { many, one } from '../../lib/db.js';
 import { audit } from '../../lib/audit.js';
 import { badRequest, forbidden } from '../../lib/errors.js';
 import { log } from '../../lib/log.js';
-import { type Actor, has } from '../access.js';
+import { type Actor, has, loadActor, taskVisibility } from '../access.js';
 import { notify } from '../notify.js';
 import { CATEGORIES, PRIORITIES, STATUSES, createTask, label } from '../tasks.js';
 import { asAutomation, emitTaskEvent, type TaskEvent } from '../events.js';
@@ -195,6 +196,19 @@ export async function checkConditions(db: Db, c: Conditions, task: any) {
   return checks;
 }
 
+/** SQL form of checkConditions (alias t = tasks), appending its parameters to `params`. */
+function conditionFilters(c: Conditions, params: unknown[]) {
+  const out: string[] = [];
+  const p = (v: unknown) => { params.push(v); return `$${params.length}`; };
+  if (c.projectIds?.length) out.push(`t.project_id = any(${p(c.projectIds)}::uuid[])`);
+  if (c.categories?.length) out.push(`t.category = any(${p(c.categories)}::text[])`);
+  if (c.priorities?.length) out.push(`t.priority = any(${p(c.priorities)}::text[])`);
+  if (c.statuses?.length) out.push(`t.status = any(${p(c.statuses)}::text[])`);
+  if (c.ownerIds?.length) out.push(`t.owner_id = any(${p(c.ownerIds)}::uuid[])`);
+  if (c.tags?.length) out.push(`exists (select 1 from unnest(t.tags) tg where lower(tg) = any(${p(c.tags.map((x) => x.toLowerCase()))}::text[]))`);
+  return out;
+}
+
 async function scopeCheck(db: Db, rule: { scope: string; owner_id: string }, task: any) {
   if (rule.scope !== 'team') return { ok: true, detail: 'Company-wide rule' };
   const team = await teamOf(db, rule.owner_id);
@@ -235,10 +249,26 @@ async function resolveTarget(db: Db, rule: any, kind: string, userId: string | n
   return { people, why };
 }
 
+/** Single pass with a function replacer: task text is inserted literally ("$&" stays "$&", a "{owner.name}" inside a title is not expanded). */
 export function renderTemplate(s: string, task: any) {
-  const due = task.due_date ? DateTime.fromISO(task.due_date).toFormat('d LLL') : 'no due date';
-  return s.replace(/\{task\.title\}/g, task.title).replace(/\{task\.number\}/g, String(task.number ?? ''))
-    .replace(/\{task\.due\}/g, due).replace(/\{project\.key\}/g, task.project_key ?? '').replace(/\{owner\.name\}/g, task.owner_name ?? '');
+  const vals: Record<string, string> = {
+    'task.title': task.title ?? '', 'task.number': String(task.number ?? ''), 'project.key': task.project_key ?? '', 'owner.name': task.owner_name ?? '',
+    'task.due': task.due_date ? DateTime.fromISO(task.due_date).toFormat('d LLL') : 'no due date',
+  };
+  return s.replace(/\{(task\.title|task\.number|task\.due|project\.key|owner\.name)\}/g, (_m, k: string) => vals[k]);
+}
+
+/** Can this user open the task? Same predicate as the task screens. */
+async function canOpenTask(db: Db, tenantId: string, userId: string, taskId: string) {
+  const viewer = await loadActor(db, tenantId, userId);
+  if (!viewer) return false;
+  const [vis, params] = taskVisibility(viewer, 2);
+  return !!(await one(db, `select 1 from tasks t left join projects p on p.id = t.project_id where t.id = $1 and ${vis}`, [taskId, ...params]));
+}
+/** A specific person only receives task text (notification titles, follow-up titles) when they can already open the task. */
+async function hiddenFrom(db: Db, rule: any, kind: string, person: { id: string; name: string }, task: any) {
+  return kind === 'user' && !(await canOpenTask(db, rule.tenant_id, person.id, task.id))
+    ? `${person.name} cannot open this task, so nothing about it was sent to them` : null;
 }
 
 async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<Plan> {
@@ -249,6 +279,8 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
     case 'notify': {
       const { people, why } = await resolveTarget(db, rule, act.target, act.userId, task);
       if (!people.length) return { summary: 'Notify', skip: `Nobody to notify: ${why}` };
+      const hidden = await hiddenFrom(db, rule, act.target, people[0], task);
+      if (hidden) return { summary: `Notify ${people[0].name}`, skip: hidden };
       const names = people.map((p) => p.name).join(', ');
       return { summary: `Notify ${names}${act.target !== 'user' ? ` (${TARGET_LABEL[act.target]})` : ''}`, apply: async () => {
         const title = act.message ? renderTemplate(act.message, task) : `${rule.name}: ${task.title}`;
@@ -261,6 +293,8 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
       const { people, why } = await resolveTarget(db, rule, act.owner, act.userId, task);
       if (!people.length) return { summary: 'Create follow-up', skip: `No owner for the follow-up: ${why}` };
       const owner = people[0];
+      const hidden = await hiddenFrom(db, rule, act.owner, owner, task);
+      if (hidden) return { summary: `Create follow-up for ${owner.name}`, skip: hidden };
       const title = renderTemplate(act.title, task).slice(0, 300);
       const dueDate = act.dueInDays === null || act.dueInDays === undefined ? null : DateTime.fromISO(ctx.today).plus({ days: act.dueInDays }).toISODate();
       return { summary: `Create follow-up "${title}" for ${owner.name}${dueDate ? `, due ${dueDate}` : ''}`, apply: async () => {
@@ -342,6 +376,8 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
 }
 
 // ---------- Execution ----------
+/** Depth of this engine's rule chain, per async context (rules run at depth + 1 of the event that fired them). */
+const chainDepth = new AsyncLocalStorage<number>();
 let spSeq = 0;
 /** Run fn inside a savepoint; on error roll back just that work and rethrow. Keeps the surrounding transaction usable. */
 async function guarded<T>(db: Db, fn: () => Promise<T>): Promise<T> {
@@ -384,7 +420,7 @@ async function evaluateRule(db: Db, rule: any, task: any, ev: EventInfo, today: 
   }
   const results: ActionResult[] = [];
   try {
-    await guarded(db, () => asAutomation(async () => {
+    await guarded(db, () => chainDepth.run(ev.depth + 1, () => asAutomation(async () => {
       for (const [i, act] of (rule.actions as Action[]).entries()) {
         const fresh = await loadTask(db, task.id);
         if (!fresh) throw new Error('The task no longer exists');
@@ -396,7 +432,7 @@ async function evaluateRule(db: Db, rule: any, task: any, ev: EventInfo, today: 
           throw new Error(`Action ${i + 1} (${act.type.replace(/_/g, ' ')}): ${e?.message ?? e}`);
         }
       }
-    }));
+    })));
   } catch (e: any) {
     await recordRun(db, rule, task.id, ctx, 'failed', `${e?.message ?? e}. Nothing from this rule was applied; the original change went through.`, results);
     return 'failed';
@@ -417,12 +453,17 @@ export async function handleTaskEvent(db: Db, ev: TaskEvent) {
   const rules = await many(db, `select * from automation_rules where enabled and archived_at is null and trigger->>'type' = $1 order by created_at, id`, [ev.type]);
   if (!rules.length) return;
   const today = await tenantToday(db, ev.tenantId);
-  const info: EventInfo = { trigger: ev.type, from: ev.from ?? null, to: ev.to ?? null, decision: (ev.details?.decision as string) ?? null, depth: ev.depth };
+  // events.ts counts automation depth in one process-wide counter, so concurrent requests inflate ev.depth.
+  // Inside this engine's own chain the async-local depth is exact; a person's direct change (actor set, no chain) is depth 0.
+  const depth = chainDepth.getStore() ?? (ev.actorId ? 0 : ev.depth);
+  const info: EventInfo = { trigger: ev.type, from: ev.from ?? null, to: ev.to ?? null, decision: (ev.details?.decision as string) ?? null, depth };
   for (const rule of rules) await evaluateRule(db, rule, ev.task, info, today);
 }
 
 /** Hourly tenant tick: due-soon and overdue rules, at most once per rule, task and due date. */
 export async function runTimeTriggers(db: Db, tenantId: string) {
+  // One tick per tenant at a time: an overlapping tick waits, then its "already fired" check sees the first tick's committed runs.
+  await db.query(`select pg_advisory_xact_lock(hashtext('automation.time_rules:' || $1))`, [tenantId]);
   const today = await tenantToday(db, tenantId);
   const rules = await many(db, `select * from automation_rules where enabled and archived_at is null and trigger->>'type' = any($1::text[]) order by created_at, id`, [[...TIME_TRIGGERS]]);
   let fired = 0;
@@ -431,9 +472,18 @@ export async function runTimeTriggers(db: Db, tenantId: string) {
     const window = rule.trigger.type === 'task.due_soon'
       ? `t.due_date between $2::date and $2::date + $3::int`
       : `t.due_date between $2::date - ${OVERDUE_LOOKBACK_DAYS} and $2::date - $3::int`;
-    const tasks = await many(db, `select t.* from tasks t where t.status not in ('done','cancelled') and ${window}
+    // Conditions and team scope are filtered in SQL so the per-tick limit only ever counts tasks the rule can match
+    // (otherwise a busy window of non-matching tasks would starve the matching ones forever).
+    const params: unknown[] = [`${rule.trigger.type}:${rule.id}`, today, days];
+    const filters = conditionFilters(rule.conditions ?? {}, params);
+    if (rule.scope === 'team') {
+      const team = await teamOf(db, rule.owner_id);
+      if (!team.length) continue;
+      params.push(team); filters.push(`t.owner_id = any($${params.length}::uuid[])`);
+    }
+    const tasks = await many(db, `select t.* from tasks t where t.status not in ('done','cancelled') and ${window} ${filters.map((f) => `and ${f}`).join(' ')}
       and not exists (select 1 from automation_runs r where r.dedupe_key = $1 || ':' || t.id || ':' || t.due_date)
-      order by t.due_date, t.id limit ${PER_RULE_TICK_LIMIT}`, [`${rule.trigger.type}:${rule.id}`, today, days]);
+      order by t.due_date, t.id limit ${PER_RULE_TICK_LIMIT}`, params);
     for (const t of tasks)
       if (await evaluateRule(db, rule, t, { trigger: rule.trigger.type, depth: 0, dedupeKey: `${rule.trigger.type}:${rule.id}:${t.id}:${t.due_date}` }, today)) fired++;
   }

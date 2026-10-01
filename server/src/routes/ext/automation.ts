@@ -93,7 +93,7 @@ export default async function (app: FastifyInstance) {
     return { ok: true };
   }));
 
-  // Run log. Task titles are shown only for tasks the viewer can already see.
+  // Run log. Task titles and what the rule did (recipients, follow-ups, errors) are shown only for tasks the viewer can already see.
   app.get('/api/automations/runs', async (req) => tx(req, async (db, a) => {
     requireStaff(a);
     const q = z.object({ ruleId: uuid.optional(), status: z.enum(['success', 'skipped', 'failed']).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
@@ -103,7 +103,8 @@ export default async function (app: FastifyInstance) {
     if (q.ruleId) { vals.push(q.ruleId); where.push(`x.rule_id = $${vals.length}`); }
     if (q.status) { vals.push(q.status); where.push(`x.status = $${vals.length}`); }
     vals.push(q.limit);
-    return many(db, `select x.id, x.rule_id, x.rule_version, x.task_id, x.trigger, x.status, x.message, x.results, x.depth, x.created_at,
+    return many(db, `select x.id, x.rule_id, x.rule_version, x.task_id, x.trigger, x.status, x.depth, x.created_at,
+        case when vt.id is not null then x.message end message, case when vt.id is not null then x.results else '[]'::jsonb end results,
         r.name rule_name, r.scope rule_scope, vt.title task_title, vt.number task_number, (vt.id is not null) task_visible
       from automation_runs x join automation_rules r on r.id = x.rule_id
       left join lateral (select t.id, t.title, t.number from tasks t left join projects p on p.id = t.project_id where t.id = x.task_id and ${vis}) vt on true

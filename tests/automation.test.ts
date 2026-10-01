@@ -4,6 +4,9 @@ import { client, drainJobs, makeOrg, withOwner, type Org } from './helpers.js';
 import { enqueue } from '../server/src/lib/jobs.js';
 import { newToken, sha256 } from '../server/src/lib/crypto.js';
 import { SESSION_COOKIE } from '../server/src/app.js';
+import { withTenant } from '../server/src/lib/db.js';
+import { asAutomation } from '../server/src/services/events.js';
+import { renderTemplate, runTimeTriggers } from '../server/src/services/ext/automation.js';
 
 type C = ReturnType<typeof client>;
 /** Sign in by issuing a session directly (login itself and its rate limit are covered by the security tests). */
@@ -119,10 +122,23 @@ describe('event triggers and actions', () => {
   it('blocker.raised: notify a specific person', async () => {
     const r = await rule(s.admin, { name: 'Blockers to emp2', trigger: { type: 'blocker.raised' }, conditions: { tags: ['t-blocker'] },
       actions: [{ type: 'notify', target: 'user', userId: s.org.users.emp2 }] });
-    const t = (await s.emp.post('/api/tasks', { title: 'API integration', tags: ['t-blocker'] })).body;
+    // emp2 can open the task (as a collaborator), so the notification goes out.
+    const t = (await s.emp.post('/api/tasks', { title: 'API integration', tags: ['t-blocker'], collaboratorIds: [s.org.users.emp2] })).body;
     await s.emp.post(`/api/tasks/${t.id}/status`, { to: 'blocked', blocker: { reason: 'Need staging access' } });
     expect((await notes(s.org.users.emp2)).filter((x) => x.link === `/tasks/${t.id}`)).toHaveLength(1);
     expect((await runsOf(r.id))[0]).toMatchObject({ status: 'success', trigger: 'blocker.raised' });
+  });
+
+  it('a specific person who cannot open the task is never sent its title (notify or follow-up)', async () => {
+    const r = await rule(s.admin, { name: 'Private to emp2', trigger: { type: 'task.created' }, conditions: { tags: ['t-private'] },
+      actions: [{ type: 'notify', target: 'user', userId: s.org.users.emp2, message: 'New: {task.title}' },
+        { type: 'create_follow_up', title: 'Check {task.title}', owner: 'user', userId: s.org.users.emp2 }] });
+    const t = (await s.emp.post('/api/tasks', { title: 'Confidential salary review', tags: ['t-private'] })).body;
+    expect((await notes(s.org.users.emp2)).filter((x) => x.link === `/tasks/${t.id}`)).toHaveLength(0);
+    expect(await q(`select 1 from tasks where tenant_id = $1 and title = 'Check Confidential salary review'`, [s.org.tenantId])).toHaveLength(0);
+    const [run] = await runsOf(r.id);
+    expect(run.status).toBe('skipped');
+    expect(run.message).toMatch(/cannot open this task/);
   });
 
   it('task.reviewed (changes requested): create a follow-up task from the title template; accepted reviews do not fire', async () => {
@@ -186,6 +202,23 @@ describe('engine safety', () => {
     const runs = (await runsOf(r.id)).sort((x, y) => x.depth - y.depth);
     expect(runs.map((x) => [x.status, x.depth])).toEqual([['success', 0], ['success', 1], ['success', 2], ['skipped', 3]]);
     expect(runs[3].message).toMatch(/Loop guard/);
+  });
+
+  it('automation work running elsewhere in the process does not trip the loop guard for a person\'s own change', async () => {
+    const r = await rule(s.admin, { name: 'Busy server', trigger: { type: 'task.created' }, conditions: { tags: ['t-concurrent'] }, actions: [{ type: 'add_comment', text: 'Ran' }] });
+    let release!: () => void;
+    const held = new Promise<void>((res) => { release = res; });
+    // Three nested automation scopes from some other request stay open while emp creates a task.
+    const busy = asAutomation(() => asAutomation(() => asAutomation(() => held)));
+    const t = await s.emp.post('/api/tasks', { title: 'Created while the server is busy', tags: ['t-concurrent'] });
+    release(); await busy;
+    expect(t.status).toBe(200);
+    expect((await runsOf(r.id)).map((x) => [x.status, x.depth])).toEqual([['success', 0]]);
+  });
+
+  it('templates insert task text literally', () => {
+    const task = { title: 'Pay $& and $\' {owner.name}', number: 7, due_date: null, project_key: 'FIN', owner_name: 'Ana $1' };
+    expect(renderTemplate('{task.title} / {owner.name} / {project.key}-{task.number}', task)).toBe('Pay $& and $\' {owner.name} / Ana $1 / FIN-7');
   });
 
   it('a failing rule records a failed run, rolls back its own partial work, and never breaks the original action', async () => {
@@ -308,6 +341,33 @@ describe('time-based triggers', () => {
     expect(await runsOf(soon.id)).toHaveLength(2);
   });
 
+  it('matching tasks are reached even when hundreds of other tasks are due in the same window', async () => {
+    const d0 = today(s.org);
+    const r = await rule(s.admin, { name: 'Finance due soon', trigger: { type: 'task.due_soon', days: 1 }, conditions: { categories: ['finance'], tags: ['t-busy'] },
+      actions: [{ type: 'notify', target: 'owner' }] });
+    await q(`insert into tasks (tenant_id, title, owner_id, created_by, category, tags, due_date)
+      select $1, 'Filler ' || g, $2, $2, 'delivery', '{t-busy}', $3::date from generate_series(1, 250) g`, [s.org.tenantId, s.org.users.emp2, d0.toISODate()]);
+    const fin = (await s.emp.post('/api/tasks', { title: 'Quarter close', category: 'finance', tags: ['t-busy'], dueDate: d0.plus({ days: 1 }).toISODate() })).body;
+    await tick(s.org, 'busy');
+    expect((await runsOf(r.id)).map((x) => x.task_id)).toEqual([fin.id]);
+  });
+
+  it('overlapping ticks never send the same reminder twice', async () => {
+    const d0 = today(s.org);
+    const r = await rule(s.admin, { name: 'Overlap', trigger: { type: 'task.due_soon', days: 1 }, conditions: { tags: ['t-overlap'] },
+      actions: [{ type: 'notify', target: 'owner', message: 'Overlap: {task.title}' }] });
+    const t = (await s.emp.post('/api/tasks', { title: 'Overlap check', tags: ['t-overlap'], dueDate: d0.plus({ days: 1 }).toISODate() })).body;
+    // Tick A has done its work but not committed yet when tick B starts (two workers, or a reclaimed stale job).
+    let aWorked!: () => void;
+    const ready = new Promise<void>((res) => { aWorked = res; });
+    const a = withTenant(s.org.tenantId, async (db) => { await runTimeTriggers(db, s.org.tenantId); aWorked(); await new Promise((res) => setTimeout(res, 300)); });
+    await ready;
+    const b = withTenant(s.org.tenantId, (db) => runTimeTriggers(db, s.org.tenantId));
+    await Promise.all([a, b]);
+    expect((await notes(s.org.users.emp)).filter((x) => x.link === `/tasks/${t.id}`)).toHaveLength(1);
+    expect(await runsOf(r.id)).toHaveLength(1);
+  });
+
   it('time rules respect team scope too', async () => {
     const r = await rule(s.mgr, { name: 'Team due soon', scope: 'team', trigger: { type: 'task.due_soon', days: 0 }, conditions: { tags: ['t-time-team'] },
       actions: [{ type: 'notify', target: 'owner' }] });
@@ -327,7 +387,10 @@ describe('run log', () => {
     const mine = await s.emp.get(`/api/automations/runs?ruleId=${r.id}`);
     expect(mine.body[0]).toMatchObject({ rule_name: 'Log me', status: 'success', task_id: t.id, task_title: 'Visible to emp', task_visible: true });
     const other = await s.outsider.get(`/api/automations/runs?ruleId=${r.id}`);
-    expect(other.body[0]).toMatchObject({ task_title: null, task_visible: false });
+    expect(other.body[0]).toMatchObject({ task_title: null, task_number: null, task_visible: false });
+    // What the rule did (recipients, follow-up numbers, errors) is part of the task's story: hidden too.
+    expect(other.body[0].message).toBeNull();
+    expect(other.body[0].results).toEqual([]);
     const list = (await s.admin.get('/api/automations')).body.rules.find((x: any) => x.id === r.id);
     expect(list).toMatchObject({ last_status: 'success', success_7d: 1 });
   });
