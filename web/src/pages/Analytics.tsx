@@ -8,6 +8,7 @@ import { useMe, useRoles } from '../lib/session';
 import { AssessmentBadge, Badge, Button, Callout, Card, ErrorState, Input, PageHeader, Segmented, Select, Skeleton, Stat, cx, useToast } from '../components/ui';
 import { AllocationBar } from '../components/time';
 import { downloadExport } from './util';
+import { TrendsView, trendsRangeText, useTrends } from '../components/ext/TrendsView';
 
 type Kind = 'day' | 'week' | 'month' | 'custom';
 
@@ -18,23 +19,34 @@ export default function Analytics() {
   const date = sp.get('date') ?? me.today;
   const start = sp.get('start') ?? addDays(me.today, -13); const end = sp.get('end') ?? me.today;
   const uid = userId ?? me.user.id;
+  const view = sp.get('view') === 'trends' ? 'trends' : 'report';
+  const weeks = [8, 12, 26].includes(Number(sp.get('weeks'))) ? Number(sp.get('weeks')) : 12;
+  const tq = useTrends(uid, weeks, view === 'trends');
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.get('/api/people'), enabled: roles.canReview });
-  const q = useQuery({ queryKey: ['report', uid, kind, date, start, end], queryFn: () => api.get(`/api/reports/individual${qs({ userId: uid, kind, date: kind === 'custom' ? undefined : date, start: kind === 'custom' ? start : undefined, end: kind === 'custom' ? end : undefined })}`) });
+  const q = useQuery({ queryKey: ['report', uid, kind, date, start, end], queryFn: () => api.get(`/api/reports/individual${qs({ userId: uid, kind, date: kind === 'custom' ? undefined : date, start: kind === 'custom' ? start : undefined, end: kind === 'custom' ? end : undefined })}`), enabled: view === 'report' });
   const set = (o: Record<string, string>) => { const n = new URLSearchParams(sp); for (const [k, v] of Object.entries(o)) n.set(k, v); setSp(n, { replace: true }); };
   const shift = (dir: number) => set({ date: addDays(date, dir * (kind === 'day' ? 1 : kind === 'week' ? 7 : 30)) });
   const exp = (format: 'pdf' | 'csv') => downloadExport(api, { format, report: 'individual', params: { userId: uid, kind, start: q.data.period.start, end: q.data.period.end } }, toast).catch((e) => toast({ tone: 'critical', text: e.message }));
   const r = q.data;
+  const subject = view === 'trends' ? tq.data?.subject : r?.subject;
+  const expTrends = () => downloadExport(api, { format: 'csv', report: 'personal_trends', params: { userId: uid, weeks } }, toast).catch((e) => toast({ tone: 'critical', text: e.message }));
   return (
     <div>
-      <PageHeader eyebrow={uid === me.user.id ? 'My Analytics' : 'Individual report'} title={r ? r.subject.name : 'Report'}
-        subtitle={r ? `${r.subject.title || ''}${r.subject.department ? ` · ${r.subject.department}` : ''} · role profile “${r.roleProfile.name}”` : undefined}
+      <PageHeader eyebrow={uid === me.user.id ? 'My Analytics' : 'Individual report'} title={subject ? subject.name : view === 'trends' ? 'Trends' : 'Report'}
+        subtitle={view === 'trends' ? (subject ? `${subject.title ? `${subject.title} · ` : ''}personal ${weeks}-week trends` : undefined) : r ? `${r.subject.title || ''}${r.subject.department ? ` · ${r.subject.department}` : ''} · role profile “${r.roleProfile.name}”` : undefined}
         actions={<>
           {roles.canReview && <Select aria-label="Person" className="h-9 w-48" value={uid} onChange={(e) => nav(`/analytics/${e.target.value === me.user.id ? '' : e.target.value}?${sp.toString()}`)}>
             {(people.data ?? []).map((p: any) => <option key={p.id} value={p.id}>{p.id === me.user.id ? `${p.name} (me)` : p.name}</option>)}</Select>}
-          <Button icon={<Download className="size-4" />} disabled={!r} onClick={() => exp('pdf')}>PDF</Button>
-          <Button icon={<FileSpreadsheet className="size-4" />} disabled={!r} onClick={() => exp('csv')}>CSV</Button>
+          {view === 'trends' ? <Button icon={<FileSpreadsheet className="size-4" />} disabled={!tq.data} onClick={expTrends}>CSV</Button> : <>
+            <Button icon={<Download className="size-4" />} disabled={!r} onClick={() => exp('pdf')}>PDF</Button>
+            <Button icon={<FileSpreadsheet className="size-4" />} disabled={!r} onClick={() => exp('csv')}>CSV</Button></>}
         </>} />
       <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Segmented label="View" value={view} onChange={(v) => set({ view: v })} options={[{ value: 'report', label: 'Report' }, { value: 'trends', label: 'Trends' }]} />
+        {view === 'trends' ? <>
+          <Segmented label="Weeks shown" value={String(weeks)} onChange={(v) => set({ weeks: v })} options={[{ value: '8', label: '8 wk' }, { value: '12', label: '12 wk' }, { value: '26', label: '26 wk' }]} />
+          {tq.data && <span className="text-[13px] text-ink-2">{trendsRangeText(tq.data)}</span>}
+        </> : <>
         <Segmented label="Period" value={kind} onChange={(v) => set({ kind: v })} options={[{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }, { value: 'custom', label: 'Custom' }]} />
         {kind !== 'custom' ? <div className="flex items-center gap-1">
           <Button size="sm" variant="ghost" aria-label="Previous period" onClick={() => shift(-1)}><ChevronLeft className="size-4" /></Button>
@@ -46,8 +58,9 @@ export default function Analytics() {
           <Input aria-label="End date" type="date" className="h-8 w-40" value={end} onChange={(e) => set({ end: e.target.value })} /></div>}
         {r && <span className="text-[13px] text-ink-2">{fmtDate(r.period.start, { day: 'numeric', month: 'short', year: 'numeric' })}{r.period.end !== r.period.start && ` – ${fmtDate(r.period.end, { day: 'numeric', month: 'short', year: 'numeric' })}`}</span>}
         {r && <Badge tone={r.reportState === 'provisional' ? 'warning' : 'good'}>{r.reportState === 'provisional' ? 'Provisional' : r.reportState === 'manager_reviewed' ? 'Manager reviewed' : 'Confirmed'}</Badge>}
+        </>}
       </div>
-      {q.isLoading ? <div className="grid gap-4"><Skeleton className="h-40" /><Skeleton className="h-64" /></div> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <Report r={r} kind={kind} own={uid === me.user.id} />}
+      {view === 'trends' ? <TrendsView uid={uid} weeks={weeks} /> : q.isLoading ? <div className="grid gap-4"><Skeleton className="h-40" /><Skeleton className="h-64" /></div> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <Report r={r} kind={kind} own={uid === me.user.id} />}
     </div>
   );
 }
