@@ -25,7 +25,9 @@ export function registerJobs() {
   });
   // Blocker reminders: open blockers whose follow-up date has arrived. Idempotent per blocker per day.
   registerJob('blockers.remind', async (db, _p, job) => {
-    const t = await one(db, `select timezone from tenants where id = $1`, [job.tenantId]);
+    const t = await one(db, `select timezone, settings from tenants where id = $1`, [job.tenantId]);
+    // Smart escalation (jobs/ext/escalation.ts) owns owner follow-up reminders when enabled: do not remind twice.
+    if (t.settings?.escalation?.enabled === true) return;
     const today = DateTime.now().setZone(t.timezone).toISODate()!;
     const due = await many(db, `select b.id, b.reason, t.id task_id, t.title, t.owner_id from blockers b join tasks t on t.id = b.task_id
       where b.resolved_at is null and (b.next_follow_up is null and b.raised_at < now() - interval '1 day' or b.next_follow_up <= $1)

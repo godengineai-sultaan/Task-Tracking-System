@@ -7,6 +7,7 @@ import { CATEGORY_LABEL, PRIORITY_LABEL, STATUS_LABEL, fmtDate, fmtDateTime, hm 
 import { useMe } from '../lib/session';
 import { Avatar, Badge, Button, Callout, Card, Checkbox, Drawer, ErrorState, Field, IconButton, Input, Modal, Select, Spinner, StatusBadge, StatusDot, Textarea, cx, useToast } from '../components/ui';
 import { StatusControl, useProjects, useUsers } from '../components/TaskStatus';
+import { BlockerEscalation } from '../components/ext/EscalationBlocker';
 
 export default function TaskPage() {
   const { id } = useParams(); const nav = useNavigate();
@@ -140,6 +141,7 @@ function BlockerCard({ b, canEdit }: { b: any; canEdit: boolean }) {
           <Input id={`fu-${b.id}`} type="date" className="h-7 w-40" value={date} onChange={(e) => setDate(e.target.value)} />
           <Button size="sm" onClick={() => m.mutate()} disabled={!date} loading={m.isPending}>Save</Button>
         </div>}
+        <BlockerEscalation blockerId={b.id} />
       </div></div>
     </div>
   );
