@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Archive, ArchiveRestore, ChevronLeft, ClipboardCheck, Copy, FolderInput, GitBranch, LayoutTemplate, ListChecks, Lock, Paperclip, Pencil, Play, Plus, Search } from 'lucide-react';
 import { api, qs } from '../../lib/api';
+import { useRoles } from '../../lib/session';
 import { CATEGORY_LABEL, PRIORITY_LABEL, fmtDate, fmtDateTime, hm } from '../../lib/format';
-import { Badge, Button, Callout, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Spinner, useToast } from '../../components/ui';
+import { Badge, Button, Callout, Card, Empty, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Spinner, cx, useToast } from '../../components/ui';
 import { useProjects } from '../../components/TaskStatus';
 import { CategoryIcon, TEMPLATE_CATEGORIES, TEMPLATE_CATEGORY_LABEL, offsetLabel, plural, spanLabel } from '../../components/ext/TemplatesShared';
 import { TemplateEditor } from '../../components/ext/TemplatesEditor';
@@ -15,6 +16,15 @@ export default function Templates() {
   const [sp, setSp] = useSearchParams();
   const id = sp.get('t'); const mode = sp.get('mode');
   const go = (next: Record<string, string>) => setSp(next);
+  const { customer } = useRoles();
+  if (customer) return (
+    <div>
+      <PageHeader title="Templates" />
+      <Card><Empty icon={<LayoutTemplate className="size-6" />} title="Templates are for staff only"
+        action={<Link to="/portal" className="font-medium text-accent-ink underline">Go to your projects</Link>}>
+        The team uses templates to plan its own work. Your shared projects and their progress are in the client portal.
+      </Empty></Card>
+    </div>);
   if (mode === 'new') return <NewTemplate onDone={(tid) => go(tid ? { t: tid } : {})} />;
   if (id) return <TemplateDetail key={id} id={id} editing={mode === 'edit'} go={go} />;
   return <Gallery go={go} />;
@@ -28,6 +38,7 @@ function Gallery({ go }: { go: (p: Record<string, string>) => void }) {
   const list = useQuery({
     queryKey: ['templates', { q, category, view }],
     queryFn: () => api.get(`/api/templates${qs({ q, category, archived: view === 'archived' ? '1' : undefined })}`),
+    placeholderData: keepPreviousData,
   });
   const filtered = !!(q || category);
   return (
@@ -58,7 +69,7 @@ function Gallery({ go }: { go: (p: Record<string, string>) => void }) {
             {filtered ? 'Try another word or category.' : view === 'archived' ? 'Archived templates appear here and can be restored.' : 'Create one, or save a finished project as a template.'}
           </Empty></Card>
         ) : (
-          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Templates">
+          <ul className={cx('grid gap-3 transition-opacity sm:grid-cols-2 xl:grid-cols-3', list.isPlaceholderData && 'opacity-60')} aria-label="Templates" aria-busy={list.isPlaceholderData}>
             {list.data.templates.map((t: any) => (
               <li key={t.id}>
                 <Link to={`/templates?t=${t.id}`} className="flex h-full flex-col rounded-xl bg-surface p-4 ring-1 ring-line shadow-card transition hover:ring-accent focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none">
@@ -85,6 +96,7 @@ function Gallery({ go }: { go: (p: Record<string, string>) => void }) {
               </li>))}
           </ul>
         )}
+      <p className="sr-only" role="status">{list.data && !list.isPlaceholderData ? plural(list.data.templates.length, 'template') + (filtered ? ' match' : '') : ''}</p>
       <FromProjectModal open={fromProject} canPublish={!!list.data?.canPublish} onClose={() => setFromProject(false)} onCreated={(tid) => go({ t: tid, mode: 'edit' })} />
     </div>
   );
@@ -122,7 +134,7 @@ function TemplateDetail({ id, editing, go }: { id: string; editing: boolean; go:
     onError: err });
 
   if (q.isLoading) return <div><BackLink /><Skeleton className="mb-4 h-16" /><Skeleton className="h-96" /></div>;
-  if (q.error) return <div><BackLink />{(q.error as any).status === 404 ? <Card><Empty title="Template not found">It may be private to someone else, or the link is wrong.</Empty></Card> : <ErrorState error={q.error} onRetry={() => q.refetch()} />}</div>;
+  if (q.error) return <div><BackLink />{[400, 404].includes((q.error as any).status) ? <Card><Empty title="Template not found">It may be private to someone else, or the link is wrong.</Empty></Card> : <ErrorState error={q.error} onRetry={() => q.refetch()} />}</div>;
   const { template: t, items, versions, usage, myApplications, canPublish } = q.data;
 
   if (editing) {
@@ -160,9 +172,9 @@ function TemplateDetail({ id, editing, go }: { id: string; editing: boolean; go:
               <li key={i.position} className="flex gap-3 px-4 py-3">
                 <span aria-hidden className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-surface-2 text-[12px] font-semibold text-ink-2 ring-1 ring-line">{i.position}</span>
                 <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                    <h3 className="text-sm font-medium break-words"><span className="sr-only">Step {i.position}: </span>{i.title}</h3>
-                    <span className="text-[12px] font-medium text-ink-2">{offsetLabel(i.due_offset_days)}</span>
+                  <div className="flex items-baseline justify-between gap-x-3">
+                    <h3 className="min-w-0 text-sm font-medium break-words"><span className="sr-only">Step {i.position}: </span>{i.title}</h3>
+                    <span className="shrink-0 text-[12px] font-medium whitespace-nowrap text-ink-2">{offsetLabel(i.due_offset_days)}</span>
                   </div>
                   {i.description && <p className="mt-0.5 text-[13px] text-ink-2">{i.description}</p>}
                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px] text-ink-3">
@@ -233,7 +245,7 @@ function VersionModal({ templateId, version, onClose }: { templateId: string; ve
         <div className="space-y-2 text-[13px]">
           <p><span className="font-medium">{q.data.snapshot.name}</span>{q.data.change_note && <span className="text-ink-3"> · {q.data.change_note}</span>}</p>
           <ol className="list-decimal space-y-1 pl-5">{q.data.snapshot.items.map((i: any, n: number) => (
-            <li key={n}>{i.title} <span className="text-ink-3">· {offsetLabel(i.dueOffsetDays)}{i.dependsOn?.length ? ` · after ${i.dependsOn.join(', ')}` : ''}</span></li>))}</ol>
+            <li key={n}>{i.title} <span className="text-ink-3">· {offsetLabel(i.dueOffsetDays)}{i.dependsOn?.length ? ` · after step ${i.dependsOn.join(', ')}` : ''}</span></li>))}</ol>
         </div>)}
     </Modal>
   );
@@ -246,8 +258,8 @@ function ApplicationModal({ id, onClose }: { id: string | null; onClose: () => v
       {q.isLoading ? <Spinner /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : q.data && (
         q.data.tasks.length === 0 ? <Empty title="No tasks visible">The tasks may have been moved somewhere you can no longer see.</Empty> : (
           <ul className="divide-y divide-line text-[13px]">{q.data.tasks.map((t: any) => (
-            <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
-              <Link to={`/tasks/${t.id}`} className="min-w-0 flex-1 font-medium text-accent-ink hover:underline"><span className="text-ink-3">#{t.number}</span> {t.title}</Link>
+            <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-2">
+              <Link to={`/tasks/${t.id}`} className="min-w-0 basis-full font-medium text-accent-ink hover:underline sm:flex-1 sm:basis-0"><span className="text-ink-3">#{t.number}</span> {t.title}</Link>
               <span className="text-ink-2">{t.owner_name}</span>
               <span className="text-ink-3">{t.due_date ? fmtDate(t.due_date) : 'No due date'}</span>
             </li>))}</ul>))}
@@ -276,7 +288,7 @@ function FromProjectModal({ open, canPublish, onClose, onCreated }: { open: bool
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Category">{(id) => <Select id={id} value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
             {TEMPLATE_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</Select>}</Field>
-          <Field label="Who can use it">{(id) => <Select id={id} value={f.visibility} onChange={(e) => setF({ ...f, visibility: e.target.value })}>
+          <Field label="Who can use it" hint={canPublish ? undefined : 'Managers and system admins publish company templates.'}>{(id) => <Select id={id} value={f.visibility} onChange={(e) => setF({ ...f, visibility: e.target.value })}>
             <option value="private">Only me (private)</option>
             <option value="company" disabled={!canPublish}>Everyone in the company</option></Select>}</Field>
         </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, ClipboardCheck, GitBranch, Paperclip } from 'lucide-react';
@@ -9,6 +9,7 @@ import { Badge, Button, Callout, ErrorState, Field, Input, Modal, Select, Skelet
 import { useProjects } from '../TaskStatus';
 import { newApplyKey, offsetLabel, plural } from './TemplatesShared';
 
+const STEPS = ['Where and when', 'Owners and dates', 'Created'];
 const longDate = (d: string | null) => (d ? fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : 'No due date');
 
 /** Apply wizard: where and when, then owners and computed due dates, then the created tasks. */
@@ -19,6 +20,10 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
   const [assign, setAssign] = useState<Record<string, string>>({});
   const [applyKey, setApplyKey] = useState(newApplyKey);
   const [result, setResult] = useState<any>(null);
+  // Moving between steps replaces the focused button, so move focus to the step heading to keep it inside the dialog.
+  const headRef = useRef<HTMLHeadingElement>(null); const moved = useRef(false);
+  const goTo = (s: 1 | 2 | 3) => { moved.current = true; setStep(s); };
+  useEffect(() => { if (moved.current) { moved.current = false; headRef.current?.focus(); } }, [step]);
   useEffect(() => {
     if (!open) return;
     setStep(1); setF({ startDate: me.today, projectId: '', milestoneId: '', defaultOwnerId: me.user.id }); setAssign({}); setApplyKey(newApplyKey()); setResult(null);
@@ -36,7 +41,7 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
   });
   const apply = useMutation({
     mutationFn: () => api.post(`/api/templates/${template.id}/apply`, { ...body, applyKey }),
-    onSuccess: (r: any) => { setResult(r); setStep(3); qc.invalidateQueries({ queryKey: ['tasks'] }); qc.invalidateQueries({ queryKey: ['template', template.id] }); qc.invalidateQueries({ queryKey: ['templates'] }); },
+    onSuccess: (r: any) => { setResult(r); goTo(3); qc.invalidateQueries({ queryKey: ['tasks'] }); qc.invalidateQueries({ queryKey: ['template', template.id] }); qc.invalidateQueries({ queryKey: ['templates'] }); },
   });
 
   const people: any[] = assignees.data ?? [];
@@ -51,21 +56,22 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
 
   const footer = step === 1 ? (
     <><Button variant="ghost" onClick={onClose}>Cancel</Button>
-      <Button variant="primary" disabled={!validDate} onClick={() => setStep(2)}>Next: owners and dates</Button></>
+      <Button variant="primary" disabled={!validDate} onClick={() => goTo(2)}>Next: owners and dates</Button></>
   ) : step === 2 ? (
-    <><Button variant="ghost" onClick={() => setStep(1)} disabled={apply.isPending}>Back</Button>
+    <><Button variant="ghost" onClick={() => goTo(1)} disabled={apply.isPending}>Back</Button>
       <Button variant="primary" loading={apply.isPending} disabled={!preview.data || preview.isFetching || !!preview.error} onClick={() => apply.mutate()}>
         Create {plural(items.length, 'task')}</Button></>
   ) : <Button variant="primary" onClick={onClose}>Done</Button>;
 
   return (
-    <Modal open={open} onClose={onClose} title={`Apply "${template.name}"`} width="max-w-3xl" footer={footer}>
+    <Modal open={open} onClose={apply.isPending ? () => {} : onClose} title={`Apply "${template.name}"`} width="max-w-3xl" footer={footer}>
       <ol className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]" aria-label="Progress">
-        {['Where and when', 'Owners and dates', 'Created'].map((s, i) => (
+        {STEPS.map((s, i) => (
           <li key={s} className={cx('flex items-center gap-1.5', step === i + 1 ? 'font-semibold text-ink' : 'text-ink-3')} aria-current={step === i + 1 ? 'step' : undefined}>
             <span className={cx('inline-flex size-5 items-center justify-center rounded-full text-[11px]', step > i ? 'bg-accent text-on-accent' : 'bg-surface-2 ring-1 ring-line')}>{i + 1}</span>{s}
           </li>))}
       </ol>
+      <h3 ref={headRef} tabIndex={-1} className="sr-only">Step {step} of 3: {STEPS[step - 1]}</h3>
 
       {step === 1 && (
         <div className="grid gap-3 sm:grid-cols-2">
@@ -146,10 +152,10 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
           {result.warnings?.map((w: string) => <Callout key={w} tone="warning">{w}</Callout>)}
           <ul className="divide-y divide-line rounded-xl ring-1 ring-line" aria-label="Created tasks">
             {result.tasks.map((t: any) => (
-              <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
-                <Link to={`/tasks/${t.id}`} className="min-w-0 flex-1 font-medium text-accent-ink hover:underline"><span className="text-ink-3">#{t.number}</span> {t.title}</Link>
+              <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-2 text-[13px]">
+                <Link to={`/tasks/${t.id}`} className="min-w-0 basis-full font-medium text-accent-ink hover:underline sm:flex-1 sm:basis-0"><span className="text-ink-3">#{t.number}</span> {t.title}</Link>
                 <span className="text-ink-2">{t.owner_name}</span>
-                <span className="w-28 text-right text-ink-3">{t.due_date ? fmtDate(t.due_date, { weekday: 'short', day: 'numeric', month: 'short' }) : 'No due date'}</span>
+                <span className="text-ink-3 sm:w-28 sm:text-right">{t.due_date ? fmtDate(t.due_date, { weekday: 'short', day: 'numeric', month: 'short' }) : 'No due date'}</span>
               </li>))}
           </ul>
         </div>
