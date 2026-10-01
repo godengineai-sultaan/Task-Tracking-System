@@ -346,8 +346,8 @@ describe('holiday import', () => {
 
     const recent = (await admin.get('/api/calendar/holidays/imports')).body;
     expect(recent[recent.length - 1]).toMatchObject({ source_label: 'company-holidays.ics', imported_count: 3 });
-    const a = await withOwner((db) => db.query(`select count(*)::int n from audit_events where tenant_id = $1 and action = 'holiday.import'`, [org.tenantId]));
-    expect(a.rows[0].n).toBe(2);
+    const a = await withOwner((db) => db.query(`select details from audit_events where tenant_id = $1 and action = 'holiday.import' order by id`, [org.tenantId]));
+    expect(a.rows.map((r) => r.details.dates)).toEqual([[`${Y}-03-10`, `${Y}-04-06`, `${Y}-04-07`], []]); // the audit names exactly which dates were added
   });
 
   it('imports a selected subset, and fetches https URLs through the same SSRF guard', async () => {
@@ -371,5 +371,129 @@ describe('holiday import', () => {
     const ny = items.filter((i) => i.name === 'New Year').map((i) => i.date);
     expect(ny).toEqual([0, 1, 2, 3, 4].map((k) => `${now.getFullYear() - 1 + k}-01-01`));
     expect(items.find((i) => i.date === `${Y}-09-09`)?.name).toBe('Holiday');
+  });
+});
+
+describe('calendar review fixes', () => {
+  let org: Org; let emp: any; let emp2: any;
+  beforeAll(async () => { org = await makeOrg(); [emp, emp2] = await Promise.all([login(org, 'emp'), login(org, 'emp2')]); });
+  const tick = () => withOwner((db) => enqueue(db, { tenantId: org.tenantId, kind: 'calendar.subscriptions.tick', idempotencyKey: `t-${Math.random()}` }));
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('a 304 never hides a meeting that ended after the last full read', async () => {
+    const now = DateTime.now();
+    const key = 'cal.example.com/etag-pending/basic.ics';
+    let fullReads = 0;
+    const body = cal(vevent('soon-1', now.minus({ minutes: 30 }), now.plus({ seconds: 2 }), 'Ends in a moment'));
+    route(key, (q, s) => {
+      if (q.headers['if-none-match'] === '"p1"') { s.writeHead(304); s.end(); return; }
+      fullReads++; s.writeHead(200, { etag: '"p1"' }); s.end(body);
+    });
+    const first = await emp.put('/api/calendar/subscription', { url: `https://${key}` });
+    expect(first.body.subscription.lastResult).toMatchObject({ received: 0 }); // still running: not offered yet
+    await sleep(2500);
+    const second = await emp.post('/api/calendar/subscription/sync');
+    expect(second.body.subscription.lastResult).toMatchObject({ received: 1, notModified: false });
+    // Nothing is pending any more, so the next check may be conditional and the unchanged file answers 304.
+    const third = await emp.post('/api/calendar/subscription/sync');
+    expect(third.body.subscription.lastStatus).toBe('not_modified');
+    expect(fullReads).toBe(2);
+    await drainJobs();
+    expect((await emp.get('/api/suggestions')).body.filter((x: any) => x.kind === 'time_entry').map((x: any) => x.title)).toContain('Ends in a moment');
+  });
+
+  it('one unreadable repeat rule does not block the other meetings', async () => {
+    const now = DateTime.now();
+    route('cal.example.com/bad-rule/basic.ics', (_q, s) => { s.writeHead(200); s.end(cal(
+      vevent('spam-1', now.minus({ days: 30 }), now.minus({ days: 30 }).plus({ seconds: 1 }), 'Every minute', ['RRULE:FREQ=MINUTELY']),
+      vevent('real-1', now.minus({ hours: 3 }), now.minus({ hours: 2 }), 'Real meeting'))); });
+    const r = await emp.put('/api/calendar/subscription', { url: 'https://cal.example.com/bad-rule/basic.ics' });
+    expect(r.body.subscription).toMatchObject({ lastStatus: 'ok', lastResult: { received: 1, unreadable: 1 } });
+  });
+
+  it('a slow calendar server holds no transaction or row lock while it is fetched', async () => {
+    const key = 'cal.example.com/slow-ok/basic.ics';
+    let slow = false;
+    route(key, (_q, s) => { setTimeout(() => { s.writeHead(200); s.end(cal()); }, slow ? 1500 : 0); });
+    expect((await emp.put('/api/calendar/subscription', { url: `https://${key}` })).status).toBe(200);
+    slow = true;
+    const syncing = emp.post('/api/calendar/subscription/sync');
+    await sleep(300);
+    const t0 = Date.now();
+    expect((await emp.patch('/api/calendar/subscription', { status: 'paused' })).status).toBe(200);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    const done = await syncing;
+    expect(done.status).toBe(200);
+    expect(done.body.subscription.status).toBe('paused'); // the late result does not override the newer state
+    await emp.patch('/api/calendar/subscription', { status: 'active' });
+  });
+
+  it('a paused calendar connection is reported instead of silently skipping Sync now', async () => {
+    const st = (await emp.get('/api/calendar/subscription')).body;
+    expect((await emp.patch(`/api/integrations/${st.connectionId}`, { status: 'paused' })).status).toBe(200);
+    const r = await emp.post('/api/calendar/subscription/sync');
+    expect(r.status).toBe(400);
+    expect(r.body.message).toMatch(/connection is paused/);
+    expect((await emp.get('/api/calendar/subscription')).body.connectionStatus).toBe('paused');
+    await emp.patch(`/api/integrations/${st.connectionId}`, { status: 'active' });
+  });
+
+  it('after the calendar connection is revoked, a new address replaces the stored one and the controls act on it', async () => {
+    const st = (await emp.get('/api/calendar/subscription')).body;
+    expect((await emp.patch(`/api/integrations/${st.connectionId}`, { status: 'revoked' })).status).toBe(200);
+    expect((await emp.get('/api/calendar/subscription')).body.subscription).toBeNull();
+    route('cal.example.com/new-address/basic.ics', (_q, s) => { s.writeHead(200); s.end(cal()); });
+    const r = await emp.put('/api/calendar/subscription', { url: 'https://cal.example.com/new-address/basic.ics' });
+    expect(r.status).toBe(200);
+    expect(r.body.connectionId).not.toBe(st.connectionId);
+    const rows = await withOwner((db) => db.query(`select url_enc from calendar_subscriptions where user_id = $1`, [org.users.emp]));
+    expect(rows.rows.map((x) => decrypt(x.url_enc))).toEqual(['https://cal.example.com/new-address/basic.ics']);
+    expect((await emp.patch('/api/calendar/subscription', { status: 'paused' })).body.subscription.status).toBe('paused');
+  });
+
+  it('tells the person once when the hourly sync has failed 3 times in a row', async () => {
+    await emp.patch('/api/calendar/subscription', { status: 'active' });
+    route('cal.example.com/new-address/basic.ics', (_q, s) => { s.writeHead(503); s.end(); });
+    const sub = (await withOwner((db) => db.query(`select id from calendar_subscriptions where user_id = $1`, [org.users.emp]))).rows[0];
+    for (let k = 0; k < 4; k++) {
+      await withOwner((db) => enqueue(db, { tenantId: org.tenantId, kind: 'calendar.subscription.sync', payload: { subscriptionId: sub.id }, idempotencyKey: `f-${Math.random()}` }));
+      await drainJobs();
+    }
+    const st = (await emp.get('/api/calendar/subscription')).body.subscription;
+    expect(st).toMatchObject({ lastStatus: 'error', failures: 4 });
+    const n = await withOwner((db) => db.query(`select title, body, link from notifications where user_id = $1 and kind = 'calendar_sync'`, [org.users.emp]));
+    expect(n.rows).toHaveLength(1);
+    expect(n.rows[0]).toMatchObject({ link: '/integrations' });
+    expect(n.rows[0].body).toMatch(/HTTP 503/);
+    expect(JSON.stringify(n.rows)).not.toContain('new-address'); // the secret path never appears
+  });
+
+  it('stops syncing the calendar of a deactivated person', async () => {
+    const key = 'cal.example.com/emp2-leaver/basic.ics';
+    route(key, (_q, s) => { s.writeHead(200); s.end(cal()); });
+    expect((await emp2.put('/api/calendar/subscription', { url: `https://${key}` })).status).toBe(200);
+    const before = hits[key];
+    const sub = (await withOwner((db) => db.query(`update calendar_subscriptions set last_fetch_at = now() - interval '2 hours' where user_id = $1 returning id`, [org.users.emp2]))).rows[0];
+    await withOwner((db) => db.query(`update users set status = 'deactivated' where id = $1`, [org.users.emp2]));
+    await tick(); await drainJobs();
+    // A sync queued before the deactivation does not fetch either.
+    await withOwner((db) => enqueue(db, { tenantId: org.tenantId, kind: 'calendar.subscription.sync', payload: { subscriptionId: sub.id }, idempotencyKey: `s-${Math.random()}` }));
+    await drainJobs();
+    expect(hits[key]).toBe(before);
+    await withOwner((db) => db.query(`update users set status = 'active' where id = $1`, [org.users.emp2]));
+  });
+
+  it('task titles cannot add lines or properties to the feed', async () => {
+    const due = DateTime.now().setZone(org.tz).plus({ days: 2 }).toISODate();
+    await withOwner((db) => db.query(`insert into tasks (tenant_id, title, owner_id, status, due_date) values ($1,$2,$3,'planned',$4)`,
+      [org.tenantId, 'Renewal\rEND:VEVENT\rBEGIN:VEVENT\rSUMMARY:Injected\nURL:https://evil.example\u0007', org.users.emp, due]));
+    const path = new URL((await emp.post('/api/calendar/feed/rotate')).body.url).pathname;
+    const res = await (await getApp()).inject({ method: 'GET', url: path });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toMatch(/\r(?!\n)|(?<!\r)\n|\u0007/); // only CRLF line breaks, no stray control characters
+    const lines = res.body.replace(/\r\n /g, '').split('\r\n');
+    expect(lines).not.toContain('SUMMARY:Injected');
+    expect(lines.some((l) => l.startsWith('URL:https://evil'))).toBe(false);
+    expect(lines.filter((l) => l === 'BEGIN:VEVENT').length).toBe(lines.filter((l) => l.startsWith('SUMMARY:')).length);
   });
 });

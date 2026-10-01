@@ -6,13 +6,14 @@ import { fmtDateTime } from '../../lib/format';
 import { Badge, Button, Callout, ErrorState, Field, Input, Modal, Skeleton, useToast } from '../ui';
 
 interface Sub { id: string; host: string; status: 'active' | 'paused'; lastFetchAt: string | null; lastSuccessAt: string | null; lastStatus: 'ok' | 'not_modified' | 'error' | null;
-  lastError: string | null; lastResult: { received?: number; duplicates?: number; notModified?: boolean }; failures: number }
-interface State { connectionId: string | null; subscription: Sub | null }
+  lastError: string | null; lastResult: { received?: number; duplicates?: number; unreadable?: number; notModified?: boolean }; failures: number }
+interface State { connectionId: string | null; connectionStatus: string | null; subscription: Sub | null }
 
 function resultText(s: Sub) {
   if (s.lastStatus === 'not_modified' || s.lastResult?.notModified) return 'No changes since the previous check.';
   const n = s.lastResult?.received ?? 0, d = s.lastResult?.duplicates ?? 0;
-  return `${n} new meeting${n === 1 ? '' : 's'} offered as suggestions${d ? `, ${d} already seen` : ''}.`;
+  const u = s.lastResult?.unreadable ?? 0;
+  return `${n} new meeting${n === 1 ? '' : 's'} offered as suggestions${d ? `, ${d} already seen` : ''}.${u ? ` ${u} entr${u === 1 ? 'y' : 'ies'} with an unreadable repeat rule skipped.` : ''}`;
 }
 
 /** Subscribe to a calendar's secret iCal (ICS) address. The address is stored encrypted; only its host is ever shown back. */
@@ -36,6 +37,7 @@ export function CalendarSubscription() {
   if (q.isLoading) return <Skeleton className="h-24" />;
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const s = q.data?.subscription ?? null;
+  const connPaused = q.data?.connectionStatus === 'paused';
 
   const form = (
     <form className="grid gap-2" onSubmit={(e) => { e.preventDefault(); if (url.trim()) save.mutate(); }}>
@@ -56,8 +58,8 @@ export function CalendarSubscription() {
       {!s || editing ? form : (
         <div className="grid gap-3">
           <div className="flex flex-wrap items-center gap-2 text-[13px]">
-            <Badge tone={s.status === 'paused' ? 'neutral' : s.lastStatus === 'error' ? 'critical' : 'good'}>
-              {s.status === 'paused' ? 'Paused' : s.lastStatus === 'error' ? 'Sync failing' : 'Active · hourly'}</Badge>
+            <Badge tone={s.status === 'paused' || connPaused ? 'neutral' : s.lastStatus === 'error' ? 'critical' : 'good'}>
+              {s.status === 'paused' ? 'Paused' : connPaused ? 'Calendar paused' : s.lastStatus === 'error' ? 'Sync failing' : 'Active · hourly'}</Badge>
             <code className="min-w-0 truncate rounded bg-surface-2 px-1.5 py-0.5 text-[12px] text-ink-2" title="Only the host of the stored address is shown">{s.host}</code>
           </div>
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12.5px]">
@@ -65,9 +67,10 @@ export function CalendarSubscription() {
             <dt className="text-ink-3">Last success</dt><dd className="text-ink-2">{s.lastSuccessAt ? fmtDateTime(s.lastSuccessAt) : 'Not yet'}</dd>
             {s.lastSuccessAt && <><dt className="text-ink-3">Result</dt><dd className="text-ink-2">{resultText(s)}</dd></>}
           </dl>
+          {connPaused && s.status === 'active' && <Callout tone="info">Your calendar connection is paused, so this address is not checked. Resume the calendar above to sync again.</Callout>}
           {s.lastStatus === 'error' && <Callout tone="critical"><b>Last check failed{s.failures > 1 ? ` (${s.failures} times in a row)` : ''}:</b> {s.lastError}</Callout>}
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" icon={<RefreshCw className="size-3.5" aria-hidden />} loading={sync.isPending} disabled={s.status === 'paused'} onClick={() => sync.mutate()}>Sync now</Button>
+            <Button size="sm" icon={<RefreshCw className="size-3.5" aria-hidden />} loading={sync.isPending} disabled={s.status === 'paused' || connPaused} onClick={() => sync.mutate()}>Sync now</Button>
             <Button size="sm" variant="ghost" icon={s.status === 'active' ? <Pause className="size-3.5" aria-hidden /> : <Play className="size-3.5" aria-hidden />} loading={status.isPending}
               onClick={() => status.mutate(s.status === 'active' ? 'paused' : 'active')}>{s.status === 'active' ? 'Pause syncing' : 'Resume syncing'}</Button>
             <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>Change address</Button>

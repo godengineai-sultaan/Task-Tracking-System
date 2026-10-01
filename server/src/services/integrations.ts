@@ -158,13 +158,19 @@ export async function ingestIcs(db: Db, tenantId: string, connectionId: string, 
     throw badRequest(`Could not read calendar file: ${e.message}`);
   }
   const { from, to } = window;
-  let received = 0, duplicates = 0;
+  let received = 0, duplicates = 0, unreadable = 0;
+  // Earliest end among events skipped only because they were still running or upcoming (tells a URL subscription when a full re-read is due).
+  let nextEnd: Date | null = null;
   for (const ev of Object.values(parsed) as any[]) {
     if (ev.type !== 'VEVENT' || !ev.start) continue;
-    const instances = ev.rrule ? ical.expandRecurringEvent(ev, { from, to }) : [{ start: ev.start, end: ev.end ?? ev.start, summary: ev.summary, isFullDay: ev.datetype === 'date' }];
+    let instances: any[];
+    // One unreadable repeat rule (e.g. an endless minute-level rule) must not block every other event.
+    try { instances = ev.rrule ? ical.expandRecurringEvent(ev, { from, to }) : [{ start: ev.start, end: ev.end ?? ev.start, summary: ev.summary, isFullDay: ev.datetype === 'date' }]; }
+    catch { unreadable++; continue; }
     for (const inst of instances as any[]) {
       const start = new Date(inst.start), end = new Date(inst.end ?? inst.start);
-      if (start < from || start > to || !(end > start) || (window.endedBy && end > window.endedBy)) continue;
+      if (start < from || start > to || !(end > start)) continue;
+      if (window.endedBy && end > window.endedBy) { if (!nextEnd || end < nextEnd) nextEnd = end; continue; }
       const priv = ['PRIVATE', 'CONFIDENTIAL'].includes(String(ev.class ?? '').toUpperCase());
       const summary = priv ? 'Private event' : String(typeof inst.summary === 'object' ? inst.summary?.val ?? '' : inst.summary ?? ev.summary ?? '').slice(0, 200);
       const eventId = `${ev.uid}:${start.toISOString()}`;
@@ -177,7 +183,7 @@ export async function ingestIcs(db: Db, tenantId: string, connectionId: string, 
       await enqueue(db, { tenantId, kind: 'integration.process', payload: { eventId: row.id }, idempotencyKey: `integration.process:${row.id}` });
     }
   }
-  return { received, duplicates };
+  return { received, duplicates, unreadable, nextEnd };
 }
 
 export async function decideSuggestion(db: Db, a: Actor, id: string, decision: 'accept' | 'dismiss', opts: { taskId?: string } = {}) {

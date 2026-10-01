@@ -56,7 +56,8 @@ export async function serveFeed(file: string): Promise<string | null> {
   });
 }
 
-const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+// A lone CR is a line break to many calendar parsers: escape every line break and drop other control characters so a title cannot add properties.
+const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r\n?|\n/g, '\\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 /** RFC 5545 line folding at 75 octets. */
 function fold(line: string) {
   const out: string[] = []; let cur = '', bytes = 0;

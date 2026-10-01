@@ -93,3 +93,14 @@ test('calendar pages fit a 390px phone screen', async ({ browser }) => {
   }
   await ctx.close();
 });
+
+test('calendar subscription: a private address is refused with a clear message and nothing is stored', async ({ page }) => {
+  await signIn(page, 'dev');
+  await page.goto('/integrations');
+  const sec = page.locator('section', { has: page.getByRole('heading', { name: 'Subscribe by address' }) });
+  await sec.getByLabel('Secret address in iCal format').fill('https://127.0.0.1/calendar.ics');
+  await sec.getByRole('button', { name: 'Subscribe' }).click();
+  await expect(page.getByText(/private, local or reserved address/).first()).toBeVisible();
+  const state = await page.evaluate(() => fetch('/api/calendar/subscription', { headers: { 'x-requested-with': 'fetch' } }).then((r) => r.json()));
+  expect(state.subscription).toBeNull();
+});
