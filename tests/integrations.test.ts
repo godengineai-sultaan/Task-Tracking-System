@@ -112,3 +112,42 @@ describe('exports', () => {
     expect((await admin.get(`/api/exports/${team.body.id}`)).body.status).toBe('ready');
   });
 });
+
+describe('documents and KYC contracts', () => {
+  it('a finalized PO is attached to the approval task as a restricted reference; KYC gaps create one follow-up', async () => {
+    const appr = (await admin.post('/api/integrations', { kind: 'module_approvals', name: 'Approvals 2' })).body;
+    await deliver(appr.id, appr.secret, envelope({ event_id: 'a-9', event_type: 'approval.approved', resource_id: 'REQ-9',
+      payload: { title: 'Execute purchase: chairs', owner_email: `emp@${org.slug}.test`, request_ref: 'REQ-9', kind: 'purchase' } }));
+    const docs = (await admin.post('/api/integrations', { kind: 'module_documents', name: 'Docs' })).body;
+    await drainJobs();
+    await deliver(docs.id, docs.secret, envelope({ event_id: 'd-1', event_type: 'document.finalized', resource_id: 'DOC-PO-9',
+      payload: { document_ref: 'DOC-PO-9', kind: 'Purchase order', related_request_ref: 'REQ-9' } }));
+    const kyc = (await admin.post('/api/integrations', { kind: 'module_kyc', name: 'KYC' })).body;
+    for (const id of ['k-1', 'k-2']) await deliver(kyc.id, kyc.secret, envelope({ event_id: id, event_type: 'kyc.document_missing', resource_id: 'SUBJ-4',
+      payload: { subject_ref: 'SUBJ-4', required_item: 'Address proof', status: 'missing', owner_email: `emp@${org.slug}.test` } }));
+    await drainJobs();
+    const ev = await withOwner((db) => db.query(`select e.restricted, e.source_reference, e.allowed_user_ids, t.owner_id from evidence_links e join tasks t on t.id = e.task_id
+      where t.tenant_id = $1 and e.source_module = 'documents'`, [org.tenantId]));
+    expect(ev.rows).toHaveLength(1);
+    expect(ev.rows[0]).toMatchObject({ restricted: true, source_reference: 'DOC-PO-9' });
+    expect(ev.rows[0].allowed_user_ids).toEqual([ev.rows[0].owner_id]);
+    const asAdmin = (await admin.get('/api/tasks?q=chairs')).body[0];
+    const detail = (await admin.get(`/api/tasks/${asAdmin.id}`)).body;
+    expect(detail.evidence.find((e: any) => e.source_module === 'documents').hidden).toBe(true);
+    const k = await withOwner((db) => db.query(`select title, source_ref from tasks where tenant_id = $1 and source_type = 'kyc'`, [org.tenantId]));
+    expect(k.rows).toHaveLength(1);
+    expect(k.rows[0].title).toBe('Follow up: Address proof for SUBJ-4');
+  });
+});
+
+describe('retention', () => {
+  it('purges expired telemetry per policy and records the purge in the audit log', async () => {
+    await withOwner((db) => db.query(`insert into ux_timings (tenant_id, user_id, flow, duration_ms, date, created_at) values ($1,$2,'recap',1000,'2020-01-01','2020-01-01')`, [org.tenantId, org.users.emp]));
+    expect((await admin.post('/api/admin/retention/run')).status).toBe(200);
+    await drainJobs();
+    const left = await withOwner((db) => db.query(`select count(*)::int n from ux_timings where tenant_id = $1 and created_at < '2021-01-01'`, [org.tenantId]));
+    expect(left.rows[0].n).toBe(0);
+    const a = await withOwner((db) => db.query(`select details from audit_events where tenant_id = $1 and action = 'retention.purge'`, [org.tenantId]));
+    expect(a.rows[0].details.uxTimings).toBe(1);
+  });
+});
