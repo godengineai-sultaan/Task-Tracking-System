@@ -14,10 +14,13 @@ function MyReviewCard({ review, highlight }: { review: any; highlight: boolean }
   const [text, setText] = useState(review.employeeResponse ?? '');
   useEffect(() => { setText(review.employeeResponse ?? ''); setEditing(!review.employeeResponse); }, [review.version, review.employeeResponse]);
   useEffect(() => { if (highlight) ref.current?.scrollIntoView({ block: 'center' }); }, [highlight]);
+  // Switching between the response and the form removes the focused control; move focus to its counterpart.
+  const textRef = useRef<HTMLTextAreaElement>(null); const editRef = useRef<HTMLButtonElement>(null); const focusNext = useRef<'text' | 'edit' | null>(null);
+  useEffect(() => { if (focusNext.current) (focusNext.current === 'text' ? textRef : editRef).current?.focus(); focusNext.current = null; }, [editing]);
   const reviewer = review.reviewer.name.split(' ')[0];
   const m = useMutation({
     mutationFn: () => api.post(`/api/team-review/reviews/${review.id}/respond`, { response: text, version: review.version }),
-    onSuccess: () => { toast({ tone: 'good', text: `Response sent to ${reviewer}` }); qc.invalidateQueries({ queryKey: ['team-review-mine'] }); },
+    onSuccess: () => { focusNext.current = 'edit'; toast({ tone: 'good', text: `Response sent to ${reviewer}` }); qc.invalidateQueries({ queryKey: ['team-review-mine'] }); },
     onError: (e: any) => {
       toast({ tone: 'critical', text: e.status === 409 ? 'This review changed since you opened it. The latest version has been loaded.' : e.message });
       if (e.status === 409) qc.invalidateQueries({ queryKey: ['team-review-mine'] });
@@ -45,16 +48,16 @@ function MyReviewCard({ review, highlight }: { review: any; highlight: boolean }
           <div className="rounded-lg bg-surface-2 p-3">
             <div className="text-[12px] text-ink-3">Your response · {fmtDateTime(review.employeeRespondedAt)}</div>
             <p className="mt-0.5 whitespace-pre-wrap break-words text-ink">{review.employeeResponse}</p>
-            <Button size="sm" variant="ghost" className="mt-1 -ml-2" onClick={() => setEditing(true)}>Edit response</Button>
+            <Button ref={editRef} size="sm" variant="ghost" className="mt-1 -ml-2" onClick={() => { focusNext.current = 'text'; setEditing(true); }}>Edit response</Button>
           </div>
         ) : (
           <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) m.mutate(); }}>
             <Field label="Your response" hint={`Optional. ${reviewer} is notified. Add context, agree next steps or correct a misunderstanding.`}>
-              {(id) => <Textarea id={id} rows={3} maxLength={3000} value={text} onChange={(e) => setText(e.target.value)} />}
+              {(id) => <Textarea ref={textRef} id={id} rows={3} maxLength={3000} value={text} onChange={(e) => setText(e.target.value)} />}
             </Field>
             <div className="flex flex-wrap gap-2">
               <Button type="submit" size="sm" variant="primary" icon={<Send className="size-4" aria-hidden />} loading={m.isPending} disabled={!text.trim()}>Send response</Button>
-              {review.employeeResponse && <Button type="button" size="sm" variant="ghost" onClick={() => { setText(review.employeeResponse); setEditing(false); }}>Cancel</Button>}
+              {review.employeeResponse && <Button type="button" size="sm" variant="ghost" onClick={() => { focusNext.current = 'edit'; setText(review.employeeResponse); setEditing(false); }}>Cancel</Button>}
             </div>
           </form>
         )}

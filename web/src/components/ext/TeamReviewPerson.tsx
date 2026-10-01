@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { CalendarRange, CircleCheck, ExternalLink, Flag, ListChecks, MessagesSquare } from 'lucide-react';
 import { api } from '../../lib/api';
 import { addDays, fmtDate, fmtDateTime, hm, pct } from '../../lib/format';
-import { AssessmentBadge, Avatar, Badge, Button, Checkbox, Field, Input, Modal, StatusBadge, Textarea, cx, useToast } from '../ui';
+import { AssessmentBadge, Avatar, Badge, Button, Callout, Checkbox, Field, Input, Modal, StatusBadge, Textarea, cx, useToast } from '../ui';
 
 export type ReviewAction = 'acknowledge' | 'discussed' | 'needs_follow_up';
 export const REVIEW_STATUS: Record<string, { label: string; tone: 'good' | 'info' | 'warning' }> = {
@@ -98,7 +98,7 @@ export function PersonCard({ p, week, onReview }: { p: any; week: string; onRevi
         <Avatar name={p.user.name} size={32} />
         <div className="min-w-0 flex-1">
           <h2 id={id} className="text-[15px] font-semibold leading-tight"><Link to={reportLink} className="hover:underline">{p.user.name}</Link>{p.isSelf && <span className="ml-1.5 text-[12px] font-normal text-ink-3">(you)</span>}</h2>
-          <p className="mt-0.5 truncate text-[12px] text-ink-3">{[p.user.title, p.user.department, `profile “${p.roleProfile}”`].filter(Boolean).join(' · ')}</p>
+          <p className="mt-0.5 break-words text-[12px] text-ink-3">{[p.user.title, p.user.department, `role profile “${p.roleProfile}”`].filter(Boolean).join(' · ')}</p>
         </div>
         <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto">
           <AssessmentBadge label={p.assessment.label} />
@@ -158,7 +158,7 @@ export function PersonCard({ p, week, onReview }: { p: any; week: string; onRevi
 /** Table view of the same facts (alphabetical, no ranking). Scrolls inside its own container on small screens. */
 export function TeamTable({ people, week, range, onReview }: { people: any[]; week: string; range: string; onReview: (p: any, action: ReviewAction) => void }) {
   return (
-    <div className="overflow-x-auto rounded-xl bg-surface ring-1 ring-line">
+    <div role="region" aria-label="Team week table" tabIndex={0} className="overflow-x-auto rounded-xl bg-surface ring-1 ring-line">
       <table className="w-full min-w-[1120px] text-[13px]">
         <caption className="sr-only">Team week summary for {range}, in alphabetical order. Not a ranking.</caption>
         <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr>
@@ -194,37 +194,44 @@ const OUTCOMES: { value: ReviewAction; label: string; hint: string }[] = [
   { value: 'needs_follow_up', label: 'Needs follow-up', hint: 'Something needs action; optionally create a task.' },
 ];
 
-/** Record or update the reviewer's review of one person's week. Saving notifies the employee; it never edits their recaps or time. */
+/** Record or update the reviewer's review of one person's week. Saving notifies the employee; it never edits their recaps or time.
+ *  Render with a key per opening (person + action) so its form state starts fresh. */
 export function ReviewModal({ person, week, initial, today, onClose }: { person: any | null; week: string; initial: ReviewAction; today: string; onClose: () => void }) {
   const qc = useQueryClient(); const toast = useToast();
+  // State starts from props on every opening (the caller keys this component per person and action), so the first
+  // frame already shows the saved note, and a refetch after a version conflict never wipes what the reviewer is typing.
   const [action, setAction] = useState<ReviewAction>(initial);
-  const [note, setNote] = useState(''); const [withTask, setWithTask] = useState(false);
+  const [note, setNote] = useState<string>(person?.review?.note ?? ''); const [withTask, setWithTask] = useState(false);
   const [title, setTitle] = useState(''); const [due, setDue] = useState('');
-  useEffect(() => {
-    if (!person) return;
-    setAction(initial); setNote(person.review?.note ?? ''); setWithTask(false); setTitle(''); setDue('');
-  }, [person?.user.id, person?.review?.version, initial]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [conflict, setConflict] = useState<string | null>(null);
   const name = person ? firstName(person.user.name) : '';
+  const openTask = person?.review?.followUpTask && !['done', 'cancelled'].includes(person.review.followUpTask.status) ? person.review.followUpTask : null;
+  const makeTask = action === 'needs_follow_up' && withTask && !openTask;
   const m = useMutation({
     mutationFn: () => api.post('/api/team-review/reviews', {
       subjectUserId: person.user.id, week, action, note, version: person.review?.version,
-      followUp: action === 'needs_follow_up' && withTask ? { title: title.trim(), dueDate: due || null } : undefined,
+      followUp: makeTask ? { title: title.trim(), dueDate: due || null } : undefined,
     }),
     onSuccess: () => {
       toast({ tone: 'good', text: `Review saved as ${REVIEW_STATUS[ACTION_STATUS[action]].label.toLowerCase()}. ${name} has been notified.` });
       qc.invalidateQueries({ queryKey: ['team-review'] }); onClose();
     },
     onError: (e: any) => {
-      if (e.status === 409) { toast({ tone: 'critical', text: 'This review changed elsewhere. The latest version has been loaded; check it and save again.' }); qc.invalidateQueries({ queryKey: ['team-review'] }); onClose(); }
-      else toast({ tone: 'critical', text: e.message });
+      // Keep the dialog and the typed note; the refetch hands the dialog the latest saved version to save over.
+      if (e.status === 409) {
+        setConflict(/follow-up task/.test(e.message ?? '') ? e.message : `This review changed while you were editing (for example, ${name} responded). The latest saved version is shown below and your note is kept. Check it, then save again.`);
+        qc.invalidateQueries({ queryKey: ['team-review'] });
+      } else toast({ tone: 'critical', text: e.message });
     },
   });
-  const openTask = person?.review?.followUpTask && !['done', 'cancelled'].includes(person.review.followUpTask.status) ? person.review.followUpTask : null;
-  const invalid = (action === 'needs_follow_up' && !note.trim() && !(withTask && title.trim())) || (withTask && action === 'needs_follow_up' && !title.trim());
+  const invalid = (action === 'needs_follow_up' && !note.trim() && !(makeTask && title.trim())) || (makeTask && !title.trim());
   return (
     <Modal open={!!person} onClose={onClose} title={person ? `Review ${person.user.name}'s week` : 'Review'}
-      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={m.isPending} disabled={invalid} onClick={() => m.mutate()}>Save review</Button></>}>
+      footer={<>{invalid && <p id="review-save-hint" className="mr-auto self-center text-[12px] text-ink-2">{makeTask && !title.trim() ? 'Add a task title to save.' : 'Add a note or a follow-up task to save.'}</p>}
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" loading={m.isPending} disabled={invalid} aria-describedby={invalid ? 'review-save-hint' : undefined} onClick={() => m.mutate()}>Save review</Button></>}>
       {person && <div className="space-y-4">
+        {conflict && <div className="space-y-2"><div role="alert"><Callout tone="warning">{conflict}</Callout></div>{person.review && <ReviewNote review={person.review} subjectName={person.user.name} mine />}</div>}
         <p className="text-[13px] text-ink-2">{weekRange(week)} · <AssessmentBadge label={person.assessment.label} /></p>
         <fieldset>
           <legend className="mb-1.5 text-[13px] font-medium text-ink-2">Review outcome</legend>
@@ -233,7 +240,7 @@ export function ReviewModal({ person, week, initial, today, onClose }: { person:
               <label key={x.value} className={cx('flex cursor-pointer gap-2 rounded-lg p-2.5 ring-1 ring-inset focus-within:ring-2 focus-within:ring-accent',
                 action === x.value ? 'bg-accent-soft ring-accent' : 'bg-surface ring-line-strong hover:bg-surface-2')}>
                 <input type="radio" name="review-outcome" value={x.value} checked={action === x.value} onChange={() => setAction(x.value)} className="mt-0.5 accent-[var(--accent)]" />
-                <span><span className="block text-[13px] font-medium text-ink">{x.label}</span><span className="block text-[12px] text-ink-3">{x.hint}</span></span>
+                <span><span className="block text-[13px] font-medium text-ink">{x.label}</span><span className="block text-[12px] text-ink-2">{x.hint}</span></span>
               </label>
             ))}
           </div>
@@ -252,7 +259,7 @@ export function ReviewModal({ person, week, initial, today, onClose }: { person:
             </div>}
           </div>
         )}
-        {person.review && <p className="text-[12px] text-ink-3">Updating your existing review (version {person.review.version}).</p>}
+        {person.review && <p className="text-[12px] text-ink-3">This updates your earlier review; {name} is notified again.</p>}
       </div>}
     </Modal>
   );

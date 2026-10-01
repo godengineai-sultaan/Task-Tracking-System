@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, LayoutGrid, ShieldCheck, Table2, Users } from 'lucide-react';
+import { Briefcase, ChevronLeft, ChevronRight, Download, FileSpreadsheet, LayoutGrid, ShieldCheck, Table2, Users } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { addDays, hm, pct } from '../../lib/format';
 import { useMe, useRoles } from '../../lib/session';
@@ -24,19 +24,31 @@ export default function TeamReview() {
   const set = (o: Record<string, string | null>) => { const n = new URLSearchParams(sp); for (const [k, v] of Object.entries(o)) v ? n.set(k, v) : n.delete(k); setSp(n, { replace: true }); };
   const tab = r.canReview && sp.get('tab') !== 'mine' ? 'team' : 'mine';
   const thisWeek = mondayOf(me.today), lastWeek = addDays(thisWeek, -7);
-  // A hand-edited or stale ?week= must not crash the page (date helpers throw on invalid dates).
-  const wp = sp.get('week'); const validWeek = !!wp && /^\d{4}-\d{2}-\d{2}$/.test(wp) && !Number.isNaN(Date.parse(`${wp}T12:00:00Z`));
+  // A hand-edited or stale ?week= must not crash the page (date helpers throw on invalid dates); a week that has not started has nothing to review.
+  const wp = sp.get('week'); const validWeek = !!wp && /^\d{4}-\d{2}-\d{2}$/.test(wp) && !Number.isNaN(Date.parse(`${wp}T12:00:00Z`)) && mondayOf(wp) <= me.today;
   const week = mondayOf(validWeek ? wp! : lastWeek);
   const includeMe = sp.get('me') === '1';
-  const exp = (format: 'pdf' | 'csv') => downloadExport(api, { format, report: 'team_weekly', params: { date: week, includeMe: includeMe || undefined } }, toast)
-    .catch((e) => toast({ tone: 'critical', text: e.message }));
+  // One export at a time: repeated clicks would otherwise queue duplicate files.
+  const [exporting, setExporting] = useState<'pdf' | 'csv' | null>(null);
+  const exp = (format: 'pdf' | 'csv') => { setExporting(format); downloadExport(api, { format, report: 'team_weekly', params: { date: week, includeMe: includeMe || undefined } }, toast)
+    .catch((e) => toast({ tone: 'critical', text: e.message })).finally(() => setExporting(null)); };
+
+  if (r.customer) return (
+    <div>
+      <PageHeader title="Weekly reviews" />
+      <Card><Empty icon={<Briefcase className="size-6" />} title="Weekly reviews are for staff accounts"
+        action={<Link to="/portal" className="inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-on-accent">Go to your projects</Link>}>
+        Client accounts see shared project progress in the client portal instead.</Empty></Card>
+    </div>
+  );
 
   return (
     <div>
       {tab === 'team'
         ? <PageHeader eyebrow={r.routineAdmin ? 'Main administrator · company-wide' : 'Team manager · your teams'} title="Weekly team review"
             subtitle="One explainable summary per person for the week, in alphabetical order. Acknowledge, discuss or follow up — people are never ranked."
-            actions={<><Button icon={<Download className="size-4" aria-hidden />} onClick={() => exp('pdf')}>PDF</Button><Button icon={<FileSpreadsheet className="size-4" aria-hidden />} onClick={() => exp('csv')}>CSV</Button></>} />
+            actions={<><Button icon={<Download className="size-4" aria-hidden />} aria-label="Export team week as PDF" loading={exporting === 'pdf'} disabled={!!exporting} onClick={() => exp('pdf')}>PDF</Button>
+              <Button icon={<FileSpreadsheet className="size-4" aria-hidden />} aria-label="Export team week as CSV" loading={exporting === 'csv'} disabled={!!exporting} onClick={() => exp('csv')}>CSV</Button></>} />
         : <PageHeader eyebrow="Your weeks" title="My weekly reviews" subtitle="Notes from your manager or the main administrator about your recorded weeks. You can respond to each one." />}
       {r.canReview && <div className="mb-4"><Segmented label="Show" value={tab} onChange={(v) => set({ tab: v === 'mine' ? 'mine' : null })}
         options={[{ value: 'team', label: 'Team week' }, { value: 'mine', label: 'My weekly reviews' }]} /></div>}
@@ -49,12 +61,14 @@ function TeamWeek({ week, thisWeek, lastWeek, includeMe, set, sp }: { week: stri
   const me = useMe();
   const filter = FILTERS.find((f) => f.key === sp.get('filter')) ?? FILTERS[0];
   const view = sp.get('view') === 'table' ? 'table' : 'cards';
-  const [reviewing, setReviewing] = useState<{ p: any; action: ReviewAction } | null>(null);
+  const [reviewing, setReviewing] = useState<{ id: string; action: ReviewAction } | null>(null);
   const q = useQuery({ queryKey: ['team-review', week, includeMe], queryFn: () => api.get(`/api/team-review${qs({ week, includeMe: includeMe ? 1 : undefined })}`) });
   const d = q.data;
   const shown = d ? d.people.filter(filter.test) : [];
   const t = d?.totals;
   const range = weekRange(week);
+  // The dialog reads the live row, so a refetch after a version conflict hands it the latest review.
+  const reviewingPerson = reviewing ? d?.people.find((p: any) => p.user.id === reviewing.id) ?? null : null;
   return (
     <>
       <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -87,6 +101,15 @@ function TeamWeek({ week, thisWeek, lastWeek, includeMe, set, sp }: { week: stri
           <Stat label="Deadlines met" value={t.deadlines.met} sub={`${t.deadlines.late} late · ${t.deadlines.overdue} overdue`} tone={t.deadlines.overdue ? 'critical' : undefined} />
           <Stat label="Recaps confirmed" value={pct(t.recaps.completion)} sub={`${t.recaps.confirmed}/${t.recaps.required} · ${t.recaps.missing} missing`} tone={t.recaps.missing ? 'warning' : undefined} />
         </section>
+        {/* The tile hints are hover-only; keyboard and touch users read the same definitions here. */}
+        <details className="mb-4 text-[13px]">
+          <summary className="cursor-pointer rounded text-ink-2 hover:text-ink">What these figures mean</summary>
+          <dl className="mt-2 grid gap-x-6 gap-y-2 rounded-lg bg-surface-2 p-3 text-ink-2 md:grid-cols-2">
+            {([['Logging coverage', d.definitions.logging_coverage], ['Unknown time', d.definitions.unknown_time], ['Intended outcomes accepted', d.definitions.planned_commitment_completion],
+              ['Accepted outcomes', d.definitions.accepted_outcome], ['Blocked time', d.definitions.blocker_share], ['Assessment', d.definitions.assessment]] as [string, string][])
+              .filter(([, v]) => v).map(([k, v]) => <div key={k}><dt className="font-medium text-ink">{k}</dt><dd>{v}</dd></div>)}
+          </dl>
+        </details>
 
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <div role="group" aria-label="Filter people" className="flex flex-wrap gap-1.5">
@@ -109,12 +132,12 @@ function TeamWeek({ week, thisWeek, lastWeek, includeMe, set, sp }: { week: stri
           : shown.length === 0
             ? <Card><Empty title="Nobody matches this filter" action={<Button size="sm" onClick={() => set({ filter: null })}>Show everyone</Button>}>Try another filter or week.</Empty></Card>
             : view === 'table'
-              ? <TeamTable people={shown} week={week} range={range} onReview={(p, action) => setReviewing({ p, action })} />
-              : <div className="grid items-start gap-4 xl:grid-cols-2">{shown.map((p: any) => <PersonCard key={p.user.id} p={p} week={week} onReview={(x, action) => setReviewing({ p: x, action })} />)}</div>}
+              ? <TeamTable people={shown} week={week} range={range} onReview={(p, action) => setReviewing({ id: p.user.id, action })} />
+              : <div className="grid items-start gap-4 xl:grid-cols-2">{shown.map((p: any) => <PersonCard key={p.user.id} p={p} week={week} onReview={(x, action) => setReviewing({ id: x.user.id, action })} />)}</div>}
 
         <div className="mt-4"><Callout tone="neutral" icon={<ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden />}>{d.note} Each assessment lists the facts and assumptions it rests on; there is no single productivity score. Records come from plans, recaps, confirmed time, blockers and accepted tasks — never screens, keystrokes or browsing.</Callout></div>
       </>}
-      <ReviewModal person={reviewing?.p ?? null} initial={reviewing?.action ?? 'acknowledge'} week={week} today={me.today} onClose={() => setReviewing(null)} />
+      <ReviewModal key={reviewing ? `${reviewing.id}:${reviewing.action}` : 'closed'} person={reviewingPerson} initial={reviewing?.action ?? 'acknowledge'} week={week} today={me.today} onClose={() => setReviewing(null)} />
     </>
   );
 }
