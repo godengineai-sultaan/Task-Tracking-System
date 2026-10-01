@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router';
 import { AlarmClock, Archive, BellRing, CheckCircle2, CircleDashed, FlaskConical, ListChecks, Pencil, Plus, ShieldCheck, Sparkles, UserCheck, Workflow, XCircle } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { fmtDateTime } from '../../lib/format';
+import { useRoles } from '../../lib/session';
 import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, Modal, PageHeader, Segmented, Select, Skeleton, cx, useToast } from '../../components/ui';
 import { type Draft, RuleBuilder, TRIGGER_SHORT, TestPanel, describeRule, draftFrom, emptyDraft, useLookups } from '../../components/ext/AutomationBuilder';
 import { TaskDrawer } from '../TaskDetail';
@@ -23,12 +25,25 @@ function Switch({ checked, onChange, label, disabled }: { checked: boolean; onCh
     <button type="button" role="switch" aria-checked={checked} aria-label={label} title={disabled ? 'View only' : undefined} disabled={disabled} onClick={() => onChange(!checked)}
       className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60',
         checked ? 'bg-accent' : 'bg-surface-3 ring-1 ring-inset ring-line-strong')}>
-      <span aria-hidden className={cx('inline-block size-4 rounded-full bg-surface shadow-sm transition-transform', checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
+      <span aria-hidden className={cx('inline-block size-4 rounded-full shadow-sm transition-transform', checked ? 'translate-x-[18px] bg-on-accent' : 'translate-x-0.5 bg-ink-3')} />
     </button>
   );
 }
 
 export default function Automations() {
+  // Client accounts only have the project portal; say so instead of showing a "couldn't load" error with a Retry that cannot help.
+  if (useRoles().customer) return (
+    <div>
+      <PageHeader title="Automations" />
+      <Card><Empty icon={<Workflow className="size-6" />} title="Automations are for staff accounts">
+        Your client account shows project progress in <Link to="/portal" className="font-medium text-accent-ink underline underline-offset-2">Projects</Link>.
+      </Empty></Card>
+    </div>
+  );
+  return <AutomationsPage />;
+}
+
+function AutomationsPage() {
   const qc = useQueryClient(); const toast = useToast(); const lookups = useLookups();
   const q = useQuery({ queryKey: ['automations'], queryFn: () => api.get('/api/automations') });
   const [tab, setTab] = useState<'rules' | 'runs'>('rules');
@@ -142,19 +157,23 @@ function RunLog({ rules }: { rules: any[] }) {
   const [status, setStatus] = useState<'all' | 'success' | 'skipped' | 'failed'>('all');
   const [ruleId, setRuleId] = useState('');
   const [taskId, setTaskId] = useState<string | null>(null);
+  const ruleSelectId = useId();
   const q = useQuery({ queryKey: ['automations', 'runs', status, ruleId], queryFn: () => api.get(`/api/automations/runs${qs({ status: status === 'all' ? undefined : status, ruleId: ruleId || undefined, limit: 100 })}`) });
   return (
     <Card title="Run log" subtitle="Every time a rule matched a task: what it did, what it skipped and why." padded={false}
-      actions={<Button size="sm" variant="ghost" onClick={() => q.refetch()}>Refresh</Button>}>
+      actions={<Button size="sm" variant="ghost" loading={q.isFetching && !q.isLoading} onClick={() => q.refetch()}>Refresh</Button>}>
       <div className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
         <Segmented label="Outcome" value={status} onChange={setStatus} options={[{ value: 'all', label: 'All' }, { value: 'success', label: 'Ran' }, { value: 'skipped', label: 'Skipped' }, { value: 'failed', label: 'Failed' }]} />
-        <label className="flex min-w-0 items-center gap-2 text-[13px] text-ink-2">Rule
-          <Select className="w-auto max-w-[14rem]" value={ruleId} onChange={(e) => setRuleId(e.target.value)}><option value="">All rules</option>{rules.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</Select>
-        </label>
+        <div className="flex min-w-0 items-center gap-2 text-[13px] text-ink-2"><label htmlFor={ruleSelectId}>Rule</label>
+          <Select id={ruleSelectId} className="w-auto max-w-[14rem]" value={ruleId} onChange={(e) => setRuleId(e.target.value)}><option value="">All rules</option>{rules.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</Select>
+        </div>
       </div>
       {q.isLoading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
         : q.error ? <div className="p-4"><ErrorState error={q.error} onRetry={() => q.refetch()} /></div>
-        : q.data.length === 0 ? <Empty icon={<Workflow className="size-6" />} title="No runs yet">Runs appear here as soon as a rule matches a task.</Empty>
+        : q.data.length === 0 ? (status !== 'all' || ruleId
+          ? <Empty icon={<Workflow className="size-6" />} title={status === 'all' ? 'No runs for this rule yet' : `No ${RUN_LABEL[status].toLowerCase()} runs${ruleId ? ' for this rule' : ''}`}
+              action={<Button size="sm" onClick={() => { setStatus('all'); setRuleId(''); }}>Show all runs</Button>}>Nothing in the run log matches these filters.</Empty>
+          : <Empty icon={<Workflow className="size-6" />} title="No runs yet">Runs appear here as soon as a rule matches a task.</Empty>)
         : <ul className="divide-y divide-line">
           {q.data.map((r: any) => (
             <li key={r.id} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:gap-4">

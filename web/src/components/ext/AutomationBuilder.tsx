@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, CircleDashed, FlaskConical, Plus, Search, Trash2, XCircle } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { CATEGORY_LABEL, PRIORITY_LABEL, STATUSES, STATUS_LABEL } from '../../lib/format';
@@ -169,6 +169,20 @@ export function RuleBuilder({ open, onClose, initial, permissions }: { open: boo
   const [tagText, setTagText] = useState((initial.conditions.tags ?? []).join(', '));
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  // Closing with unsaved changes (Escape, backdrop, Close, Cancel) asks first instead of silently dropping the draft.
+  const [initialState] = useState(() => JSON.stringify([initial, tagText]));
+  const dirty = JSON.stringify([d, tagText]) !== initialState;
+  const [confirmClose, setConfirmClose] = useState(false);
+  const keepRef = useRef<HTMLButtonElement>(null); const cancelRef = useRef<HTMLButtonElement>(null); const returnFocus = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (confirmClose) keepRef.current?.focus();
+    else if (returnFocus.current) { (returnFocus.current.isConnected ? returnFocus.current : cancelRef.current)?.focus(); returnFocus.current = null; }
+  }, [confirmClose]);
+  const requestClose = () => {
+    if (confirmClose) setConfirmClose(false);
+    else if (dirty && !save.isPending) { returnFocus.current = document.activeElement as HTMLElement | null; setConfirmClose(true); }
+    else onClose();
+  };
   const editing = !!d.id;
   const ruleOwner = d.ownerId ?? me.user.id;
   // A system admin editing another manager's team rule: that team is not known here, so list everyone and let the server check each person.
@@ -204,10 +218,14 @@ export function RuleBuilder({ open, onClose, initial, permissions }: { open: boo
   const t = d.trigger;
 
   return (
-    <Modal open={open} onClose={onClose} width="max-w-3xl" title={editing ? 'Edit automation rule' : 'New automation rule'}
-      footer={<>
+    <Modal open={open} onClose={requestClose} width="max-w-3xl" title={editing ? 'Edit automation rule' : 'New automation rule'}
+      footer={confirmClose ? <>
+        <span role="alert" className="mr-auto self-center text-[13px] font-medium text-ink">Discard your changes?</span>
+        <Button key="keep" ref={keepRef} variant="ghost" onClick={() => setConfirmClose(false)}>Keep editing</Button>
+        <Button key="discard" variant="danger" onClick={onClose}>Discard</Button>
+      </> : <>
         {missing && <span className="mr-auto self-center text-[12px] text-ink-3">{missing}</span>}
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button ref={cancelRef} variant="ghost" onClick={requestClose}>Cancel</Button>
         <Button variant="primary" disabled={!!missing} loading={save.isPending} onClick={() => { setError(null); save.mutate(); }}>{editing ? 'Save rule' : 'Create rule'}</Button>
       </>}>
       <div className="grid gap-4">
@@ -331,25 +349,31 @@ function ActionFields({ a, onChange, people }: { a: Action; onChange: (a: Action
 // ---------- Dry run ----------
 export function TestPanel({ rule, ruleId }: { rule?: unknown; ruleId?: string }) {
   const [term, setTerm] = useState('');
+  const [search, setSearch] = useState('');
+  useEffect(() => { const h = setTimeout(() => setSearch(term.trim()), 250); return () => clearTimeout(h); }, [term]);
   const [taskId, setTaskId] = useState<string | null>(null);
-  const tasks = useQuery({ queryKey: ['automation-task-search', term], queryFn: () => api.get(`/api/tasks${qs({ q: term.trim() || undefined, limit: 8, includeDone: '1' })}`), staleTime: 30_000 });
+  // Debounced, and the previous results stay on screen while typing instead of flashing a spinner on every keystroke.
+  const tasks = useQuery({ queryKey: ['automation-task-search', search], queryFn: () => api.get(`/api/tasks${qs({ q: search || undefined, limit: 8, includeDone: '1' })}`),
+    staleTime: 30_000, placeholderData: keepPreviousData });
   const run = useMutation({ mutationFn: (id: string) => api.post('/api/automations/test', { taskId: id, ...(rule ? { rule } : {}), ...(ruleId ? { ruleId } : {}) }) });
   const pick = (id: string) => { setTaskId(id); run.mutate(id); };
   const r: any = run.data;
   return (
     <div className="grid gap-3">
-      <Field label="Find a task">{(id) => (
+      <Field label="Find a task" hint={taskId ? undefined : 'Pick a task to see what the rule would do with it. Nothing is changed.'}>{(id) => (
         <div className="relative"><Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-ink-3" aria-hidden />
           <Input id={id} className="pl-8" value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search by title" /></div>)}</Field>
       {tasks.isLoading ? <Spinner label="Finding tasks" /> : tasks.error ? <Callout tone="critical">{(tasks.error as any).message}</Callout>
         : (tasks.data ?? []).length === 0 ? <p className="text-[13px] text-ink-3">No tasks match.</p> : (
-        <ul className="grid max-h-56 gap-1 overflow-y-auto" aria-label="Tasks to test against">
-          {(tasks.data ?? []).map((t: any) => (
-            <li key={t.id}><button type="button" aria-pressed={taskId === t.id} onClick={() => pick(t.id)}
-              className={cx('flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px]', taskId === t.id ? 'bg-accent-soft text-accent-ink' : 'hover:bg-surface-2')}>
-              <span className="shrink-0 text-ink-3">#{t.number}</span><span className="min-w-0 flex-1 truncate">{t.title}</span>
-              {t.project_key && <span className="hidden shrink-0 text-[12px] text-ink-3 sm:inline">{t.project_key}</span>}<StatusBadge status={t.status} />
-            </button></li>))}
+        <ul className={cx('grid max-h-56 gap-1 overflow-y-auto', tasks.isPlaceholderData && 'opacity-60')} aria-label="Tasks to test against" aria-busy={tasks.isFetching}>
+          {(tasks.data ?? []).map((t: any) => {
+            const sel = taskId === t.id;
+            return <li key={t.id}><button type="button" aria-pressed={sel} onClick={() => pick(t.id)}
+              className={cx('flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px]', sel ? 'bg-accent-soft text-accent-ink' : 'hover:bg-surface-2')}>
+              <span className={cx('shrink-0', !sel && 'text-ink-3')}>#{t.number}</span><span className="min-w-0 flex-1 truncate">{t.title}</span>
+              {t.project_key && <span className={cx('hidden shrink-0 text-[12px] sm:inline', !sel && 'text-ink-3')}>{t.project_key}</span>}<StatusBadge status={t.status} />
+            </button></li>;
+          })}
         </ul>)}
       {run.isPending && <Spinner label="Running the dry run" />}
       {run.error && <Callout tone="critical">{(run.error as any).message}</Callout>}
