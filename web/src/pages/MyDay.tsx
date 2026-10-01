@@ -1,25 +1,33 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, Navigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarDays, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
+import { CalendarDays, CalendarRange, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate, fmtTime, hm, minutesSince, relDue } from '../lib/format';
-import { useMe } from '../lib/session';
+import { useMe, useRoles } from '../lib/session';
 import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, PageHeader, Select, Skeleton, cx, useToast } from '../components/ui';
 import { StatusControl, ReasonDialog } from '../components/TaskStatus';
 import { AllocationBar, EntryModal, EntryRow, useTicker } from '../components/time';
 import { TaskDrawer } from './TaskDetail';
+import { NudgeSettings, SuggestDayDialog, WeeklySummaryDrawer } from '../components/ext/PlanningAssistant';
 
 export default function MyDay() {
   const me = useMe(); const qc = useQueryClient(); const toast = useToast();
-  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`) });
+  const customer = useRoles().customer; // client stakeholders have no My Day; they land on the portal instead of an access error
+  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`), enabled: !customer });
   const openedAt = useRef(Date.now());
   const [drawer, setDrawer] = useState<string | null>(null);
   const [removing, setRemoving] = useState<any>(null);
   const [entryModal, setEntryModal] = useState<{ entry?: any } | null>(null);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [weeklyOpen, setWeeklyOpen] = useState(false);
   useTicker(30000);
   const plan = useMutation({
-    mutationFn: (body: { taskIds: string[]; reason?: string }) => api.put('/api/my-day/plan', { ...body, elapsedMs: q.data?.intendedOutcomes?.length ? undefined : Date.now() - openedAt.current }),
+    // Planning time is only recorded up to an hour (the API limit); a page left open longer is not a planning-time measurement.
+    mutationFn: (body: { taskIds: string[]; reason?: string }) => {
+      const elapsed = Date.now() - openedAt.current;
+      return api.put('/api/my-day/plan', { ...body, elapsedMs: q.data?.intendedOutcomes?.length || elapsed > 3600000 ? undefined : elapsed });
+    },
     onSuccess: (d) => { qc.setQueryData(['my-day'], d); qc.invalidateQueries({ queryKey: ['tasks'] }); setRemoving(null); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
@@ -32,6 +40,7 @@ export default function MyDay() {
     onSuccess: (_r, v: any) => { qc.invalidateQueries(); toast({ tone: 'good', text: v.decision === 'accept' ? 'Confirmed' : 'Dismissed' }); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
+  if (customer) return <Navigate to="/portal" replace />;
   if (q.isLoading) return <div className="space-y-4"><Skeleton className="h-10 w-72" /><div className="grid gap-4 lg:grid-cols-3"><Skeleton className="h-72 lg:col-span-2" /><Skeleton className="h-72" /></div></div>;
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data;
@@ -53,8 +62,8 @@ export default function MyDay() {
     <div>
       <PageHeader eyebrow={d.isToday ? 'Today' : 'Day'} title={fmtDate(d.date, { weekday: 'long', day: 'numeric', month: 'long' })}
         subtitle={<span className="inline-flex items-center gap-1.5"><CalendarDays className="size-4" aria-hidden />{capLabel}</span>}
-        actions={<Link to="/recap"><Button variant={recapState && recapState !== 'draft' ? 'secondary' : 'primary'} icon={recapState && recapState !== 'draft' ? <CheckCircle2 className="size-4" /> : <ClipboardList className="size-4" />}>
-          {recapState === 'confirmed' || recapState === 'manager_reviewed' ? 'Recap confirmed' : 'End-of-day recap'}</Button></Link>} />
+        actions={<><Button icon={<CalendarRange className="size-4" />} onClick={() => setWeeklyOpen(true)}>Weekly summary</Button><Link to="/recap"><Button variant={recapState && recapState !== 'draft' ? 'secondary' : 'primary'} icon={recapState && recapState !== 'draft' ? <CheckCircle2 className="size-4" /> : <ClipboardList className="size-4" />}>
+          {recapState === 'confirmed' || recapState === 'manager_reviewed' ? 'Recap confirmed' : 'End-of-day recap'}</Button></Link></>} />
 
       {d.pendingClarifications.length > 0 && (
         <div className="mb-4"><Callout tone="warning" icon={<MessageSquareWarning className="mt-0.5 size-4 shrink-0" />}>
@@ -65,14 +74,15 @@ export default function MyDay() {
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
           <Card title={<span className="flex items-center gap-2"><Target className="size-4 text-accent" aria-hidden />Intended outcomes</span>}
-            subtitle="Up to three outcomes that would make today a success." actions={<span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span>} padded={false}>
+            subtitle="Up to three outcomes that would make today a success." padded={false}
+            actions={<><Button size="sm" variant="subtle" icon={<Sparkles className="size-3.5 text-accent" />} aria-label="Suggest my day" onClick={() => setSuggestOpen(true)}><span className="sm:hidden">Suggest</span><span className="hidden sm:inline">Suggest my day</span></Button><span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span></>}>
             <ol className="divide-y divide-line">
               {d.intendedOutcomes.map((t: any, i: number) => (
                 <li key={t.id} className="group flex items-center gap-3 px-4 py-3">
                   <span className="w-4 text-center text-[13px] font-semibold text-ink-3 tabular">{i + 1}</span>
                   <StatusControl task={t} />
                   <button className="min-w-0 flex-1 text-left" onClick={() => setDrawer(t.id)}>
-                    <div className={cx('truncate text-[14px] font-medium', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</div>
+                    <div className={cx('text-[14px] font-medium max-sm:line-clamp-2 sm:truncate', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</div>
                     <TaskMeta t={t} today={d.today} />
                   </button>
                   <TimerButton running={running} taskId={t.id} onToggle={(stop) => timer.mutate(stop ? { stop: true } : { taskId: t.id })} disabled={t.status === 'done'} />
@@ -173,8 +183,11 @@ export default function MyDay() {
               </ul>
             </Card>
           )}
+          <NudgeSettings />
         </div>
       </div>
+      <SuggestDayDialog open={suggestOpen} onClose={() => setSuggestOpen(false)} date={d.date} today={d.today} onApply={(taskIds) => plan.mutateAsync({ taskIds })} />
+      <WeeklySummaryDrawer open={weeklyOpen} onClose={() => setWeeklyOpen(false)} today={d.today} />
       <TaskDrawer id={drawer} onClose={() => setDrawer(null)} />
       <ReasonDialog open={!!removing} title={`Remove "${removing?.title ?? ''}" from today`} label="Why are you replanning? (visible as a scope change)" loading={plan.isPending}
         onClose={() => setRemoving(null)} onSubmit={(reason) => plan.mutate({ taskIds: ids.filter((x) => x !== removing.id), reason })} />
