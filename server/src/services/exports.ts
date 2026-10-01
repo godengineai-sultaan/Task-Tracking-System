@@ -9,6 +9,7 @@ import { type Actor, assertCanViewPerson, has, loadActor } from './access.js';
 import { buildReport } from './analytics.js';
 import { leadershipDelivery, routineTable } from './oversight.js';
 import { drawPdfBrandHeader, loadPdfBrand, type PdfBrand } from './ext/clientbrand-brand.js';
+import { applyProductScope, parseFocus } from './ext/portfolio-scope.js';
 
 /** Extension point: feature areas register additional export report types (authorized + rendered server-side). */
 export interface ExportReportDef {
@@ -21,7 +22,9 @@ export interface ExportReportDef {
 const extraReports = new Map<string, ExportReportDef>();
 export function registerExportReport(name: string, def: ExportReportDef) { extraReports.set(name, def); }
 
-export interface ExportParams { userId?: string; kind?: 'day' | 'week' | 'month' | 'custom'; start?: string; end?: string; date?: string; departmentId?: string; projectId?: string }
+export interface ExportParams { userId?: string; kind?: 'day' | 'week' | 'month' | 'custom'; start?: string; end?: string; date?: string; departmentId?: string; projectId?: string;
+  /** Product focus for the report ('none' = company-wide work only); must be inside the requester's product scope. */
+  productId?: string }
 
 export async function requestExport(db: Db, a: Actor, format: 'pdf' | 'csv', report: string, params: ExportParams & Record<string, any>) {
   await authorizeExport(db, a, report, params);
@@ -34,6 +37,7 @@ export async function requestExport(db: Db, a: Actor, format: 'pdf' | 'csv', rep
 }
 
 async function authorizeExport(db: Db, a: Actor, report: string, p: any) {
+  if (p.productId !== undefined) parseFocus(a, p.productId);
   const ext = extraReports.get(report);
   if (ext) return ext.authorize(db, a, p);
   if (report === 'individual') {
@@ -57,6 +61,8 @@ export async function generateExport(db: Db, exportId: string) {
   try { await authorizeExport(db, a, ex.report, ex.params); } catch {
     await db.query(`update exports set status = 'failed', error = 'Requester is no longer authorized for this report' where id = $1`, [exportId]); return;
   }
+  // Render with the requester's current product scope (and the requested product focus), exactly as their own list views would.
+  await applyProductScope(db, a, ex.params?.productId !== undefined ? parseFocus(a, ex.params.productId) : null);
   const p = ex.params as ExportParams;
   let data: any, name: string;
   const ext = extraReports.get(ex.report);

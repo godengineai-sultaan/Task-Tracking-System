@@ -12,6 +12,10 @@ import pwa from './pwa.js';
 import calendar from './calendar.js';
 import orgdash from './orgdash.js';
 import trends from './trends.js';
+import portfolioCore from './portfolio-core.js';
+import portfolio from './portfolio.js';
+import connectors from './connectors.js';
+import productanalytics from './productanalytics.js';
 
 /** Feature-area route plugins. Each area owns its own file. */
 export async function extRoutes(app: FastifyInstance) {
@@ -28,4 +32,8 @@ export async function extRoutes(app: FastifyInstance) {
   await app.register(calendar);
   await app.register(orgdash);
   await app.register(trends);
+  await app.register(portfolioCore);
+  await app.register(portfolio);
+  await app.register(connectors);
+  await app.register(productanalytics);
 }

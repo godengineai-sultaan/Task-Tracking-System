@@ -7,6 +7,7 @@ import { type Actor, assertContribute, canReassign, has, isStaff, loadActor } fr
 import { notify } from './notify.js';
 import { emitTaskEvent } from './events.js';
 import { userToday } from './calendar.js';
+import { assertProductUsable, assertUsersInProduct, productWorkers } from './ext/portfolio-scope.js';
 
 export const STATUSES = ['backlog', 'planned', 'in_progress', 'blocked', 'in_review', 'done', 'cancelled'] as const;
 export type Status = (typeof STATUSES)[number];
@@ -67,6 +68,8 @@ export function parseQuickCapture(input: string, today: string): ParsedCapture {
 // ---------- Create ----------
 export interface TaskInput {
   title: string; description?: string; ownerId?: string; projectId?: string | null; milestoneId?: string | null;
+  /** Product (null = company-wide). With a project, the task always takes the project's product; a different explicit product is refused. */
+  productId?: string | null;
   status?: Status; priority?: string; category?: string; dueDate?: string | null; estimateMinutes?: number | null;
   tags?: string[]; acceptanceCriteria?: string; requiresReview?: boolean; requiresEvidence?: boolean; reviewerId?: string | null;
   customerVisible?: boolean; sourceType?: string; sourceRef?: object | null; externalKey?: string | null;
@@ -79,7 +82,16 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
   if (!ownerId) throw badRequest('Owner is required');
   const owner = await one(db, `select id, status, roles from users where id = $1`, [ownerId]);
   if (!owner || owner.status !== 'active' || owner.roles.includes('customer')) throw badRequest('Owner must be an active staff member');
-  if (input.projectId) await assertProjectUsable(db, a, input.projectId);
+  let productId = input.productId ?? null;
+  if (input.projectId) {
+    const p = await assertProjectUsable(db, a, input.projectId);
+    if (productId && productId !== p.product_id) throw badRequest('This project belongs to a different product. Choose a project in the same product, or no project.');
+    productId = p.product_id;
+  }
+  if (productId) {
+    await assertProductUsable(db, a, productId);
+    await assertUsersInProduct(db, productId, [ownerId, input.reviewerId, ...(input.collaboratorIds ?? [])]);
+  }
   if (input.milestoneId) await assertMilestoneInProject(db, input.milestoneId, input.projectId ?? null);
   const t = await one(db, `select settings from tenants where id = $1`, [tenantId]);
   const settings = t?.settings ?? {};
@@ -91,14 +103,14 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
   if (!['backlog', 'planned', 'in_progress'].includes(status)) throw badRequest('New tasks start in Backlog, Planned or In Progress');
   const row = await one(db, `insert into tasks (tenant_id, project_id, milestone_id, title, description, owner_id, created_by, status, priority, category,
       due_date, estimate_minutes, tags, acceptance_criteria, requires_review, requires_evidence, reviewer_id, customer_visible, source_type, source_ref,
-      external_key, recurring_template_id, occurrence_date, started_at, sort_order)
+      external_key, recurring_template_id, occurrence_date, started_at, sort_order, product_id)
     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, case when $8 = 'in_progress' then now() end,
-      extract(epoch from now()))
+      extract(epoch from now()), $24)
     on conflict do nothing returning *`,
     [tenantId, input.projectId ?? null, input.milestoneId ?? null, input.title.trim(), input.description ?? '', ownerId, a?.id ?? null, status,
      input.priority ?? 'medium', category, input.dueDate ?? null, input.estimateMinutes ?? null, input.tags ?? [], input.acceptanceCriteria ?? '',
      requiresReview, requiresEvidence, input.reviewerId ?? null, input.customerVisible ?? false, input.sourceType ?? 'manual', input.sourceRef ?? null,
-     input.externalKey ?? null, input.recurringTemplateId ?? null, input.occurrenceDate ?? null]);
+     input.externalKey ?? null, input.recurringTemplateId ?? null, input.occurrenceDate ?? null, productId]);
   if (!row) {
     // Idempotent delivery: same external key / recurring occurrence => return existing task, never a duplicate.
     const existing = input.externalKey
@@ -122,7 +134,7 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
 
 /** A project work can be filed into: exists, not archived, and (when private) the actor is its owner, a member or the main admin. */
 export async function assertProjectUsable(db: Db, a: Actor | null, projectId: string) {
-  const p = await one(db, `select id, status, visibility, owner_id from projects where id = $1`, [projectId]);
+  const p = await one(db, `select id, status, visibility, owner_id, product_id from projects where id = $1`, [projectId]);
   if (!p) throw badRequest('Project not found');
   if (p.status === 'archived') throw badRequest('Project is archived');
   // Private projects: only their owner, members or the main admin may file work into them.
@@ -140,10 +152,22 @@ const EDITABLE: Record<string, string> = {
   title: 'title', description: 'description', priority: 'priority', category: 'category', dueDate: 'due_date', estimateMinutes: 'estimate_minutes',
   tags: 'tags', acceptanceCriteria: 'acceptance_criteria', requiresReview: 'requires_review', requiresEvidence: 'requires_evidence',
   reviewerId: 'reviewer_id', projectId: 'project_id', milestoneId: 'milestone_id', customerVisible: 'customer_visible', sortOrder: 'sort_order',
+  productId: 'product_id',
 };
 export async function updateTask(db: Db, a: Actor, task: any, patch: Record<string, unknown>, version: number, correlationId?: string) {
   await assertContribute(db, a, task);
   if (version !== task.version) throw conflict('This task was changed by someone else. Reload to see the latest version.', { currentVersion: task.version });
+  // Moving work between projects follows the same rules as filing it there; a milestone must belong to the resulting project.
+  const projectId = ('projectId' in patch ? patch.projectId : task.project_id) as string | null;
+  let newProject: any = null;
+  if ('projectId' in patch && patch.projectId && patch.projectId !== task.project_id) newProject = await assertProjectUsable(db, a, patch.projectId as string);
+  // Product: a task in a project always has the project's product (database trigger); without a project it can move between products.
+  const productAfter: string | null = projectId
+    ? (newProject ?? (await one(db, `select product_id from projects where id = $1`, [projectId])))?.product_id ?? null
+    : ('productId' in patch ? (patch.productId as string | null) : task.product_id) ?? null;
+  if (projectId && patch.productId && patch.productId !== productAfter)
+    throw badRequest('This task is in a project of a different product. Move it to another project, or remove the project first.');
+  if (projectId) delete patch.productId;
   const sets: string[] = []; const vals: unknown[] = []; const changed: Record<string, unknown> = {};
   for (const [k, col] of Object.entries(EDITABLE)) {
     if (!(k in patch)) continue;
@@ -151,9 +175,10 @@ export async function updateTask(db: Db, a: Actor, task: any, patch: Record<stri
   }
   if (!sets.length) return task;
   if (patch.reviewerId && patch.reviewerId === task.owner_id) throw badRequest('Reviewer must be someone other than the owner');
-  // Moving work between projects follows the same rules as filing it there; a milestone must belong to the resulting project.
-  const projectId = ('projectId' in patch ? patch.projectId : task.project_id) as string | null;
-  if ('projectId' in patch && patch.projectId && patch.projectId !== task.project_id) await assertProjectUsable(db, a, patch.projectId as string);
+  if (productAfter && productAfter !== task.product_id) {
+    await assertProductUsable(db, a, productAfter);
+    await assertUsersInProduct(db, productAfter, [task.owner_id, ('reviewerId' in patch ? patch.reviewerId : task.reviewer_id) as string | null]);
+  } else if (patch.reviewerId && productAfter) await assertUsersInProduct(db, productAfter, [patch.reviewerId as string]);
   if (patch.milestoneId) await assertMilestoneInProject(db, patch.milestoneId as string, projectId);
   else if (projectId !== task.project_id && task.milestone_id && !('milestoneId' in patch)) { vals.push(null); sets.push(`milestone_id = $${vals.length + 2}`); changed.milestoneId = null; }
   if (patch.reviewerId) {
@@ -282,6 +307,7 @@ export async function reassignTask(db: Db, a: Actor, task: any, newOwnerId: stri
   if (!reason?.trim()) throw badRequest('Reassignment needs a reason');
   const u = await one(db, `select id, name, status, roles from users where id = $1`, [newOwnerId]);
   if (!u || u.status !== 'active' || u.roles.includes('customer')) throw badRequest('New owner must be an active staff member');
+  await assertUsersInProduct(db, task.product_id, [newOwnerId]);
   const row = await one(db, `update tasks set owner_id = $2, version = version + 1, updated_at = now() where id = $1 and version = $3 returning *`, [task.id, newOwnerId, task.version]);
   if (!row) throw conflict('This task was changed by someone else. Reload to see the latest version.');
   await db.query(`insert into comments (tenant_id, task_id, author_id, body, kind) values ($1,$2,$3,$4,'system')`,
@@ -341,13 +367,18 @@ export async function generateRecurring(db: Db, tenantId: string, through: strin
       const checker = (tpl.created_by && await loadActor(db, tenantId, tpl.created_by)) || await loadActor(db, tenantId, tpl.owner_id);
       try { await assertProjectUsable(db, checker, tpl.project_id); } catch { await skip(tpl.id); continue; }
     }
+    // Product work is generated only while the product is not archived and the owner can still see it.
+    if (tpl.product_id) {
+      const prod = await one(db, `select status from products where id = $1`, [tpl.product_id]);
+      if (!prod || prod.status === 'archived' || !(await productWorkers(db, tpl.product_id, [tpl.owner_id]))[0]?.ok) { await skip(tpl.id); continue; }
+    }
     const next = tpl.last_generated_date ? DateTime.fromISO(tpl.last_generated_date).plus({ days: 1 }) : end;
     let d = next < earliest ? earliest : next;
     while (d <= end) {
       const date = d.toISODate()!;
       if (occursOn(tpl, date)) {
         const r = await createTask(db, null, tenantId, {
-          title: tpl.title, description: tpl.description, ownerId: tpl.owner_id, projectId: tpl.project_id, category: tpl.category,
+          title: tpl.title, description: tpl.description, ownerId: tpl.owner_id, projectId: tpl.project_id, productId: tpl.product_id, category: tpl.category,
           priority: tpl.priority, estimateMinutes: tpl.estimate_minutes, dueDate: date, sourceType: 'recurring',
           recurringTemplateId: tpl.id, occurrenceDate: date, checklist: tpl.checklist,
         }, { authority: 'recurring_template' });

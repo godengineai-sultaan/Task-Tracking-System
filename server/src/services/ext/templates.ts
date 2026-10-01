@@ -9,6 +9,7 @@ import { CATEGORIES, PRIORITIES, createTask } from '../tasks.js';
 import { notify } from '../notify.js';
 import { type CalendarData, dayCapacity, loadCalendar, localToday } from '../calendar.js';
 import { STARTERS } from './templates-starters.js';
+import { assertProductUsable, assertUsersInProduct } from './portfolio-scope.js';
 
 export const TEMPLATE_CATEGORIES = ['people', 'finance', 'procurement', 'client', 'team', 'product', 'operations', 'other'] as const;
 
@@ -38,6 +39,8 @@ export const templateSchema = z.object({
   category: z.enum(TEMPLATE_CATEGORIES).default('other'),
   visibility: z.enum(['company', 'private']).default('private'),
   items: z.array(itemSchema).min(1, 'Add at least one step').max(100),
+  /** Product playbook (null = company-wide). Set when the template is created; edits keep it. */
+  productId: uuid.nullable().optional(),
 });
 export type TemplateInput = z.infer<typeof templateSchema>;
 export const updateSchema = templateSchema.extend({ version: z.number().int().min(1), changeNote: z.string().trim().max(500).default('') });
@@ -46,6 +49,8 @@ export const previewSchema = z.object({
   startDate: isoDate,
   projectId: uuid.nullable().optional(),
   milestoneId: uuid.nullable().optional(),
+  /** Product for the created tasks when no project is chosen (a product playbook always uses its own product). */
+  productId: uuid.nullable().optional(),
   defaultOwnerId: uuid.nullable().optional(),
   /** { "<item position>": userId } */
   assignments: z.record(z.string().regex(/^\d{1,3}$/), uuid).default({}),
@@ -114,7 +119,7 @@ export function validateItems(items: ItemInput[]) {
   for (let p = 1; p <= n; p++) visit(p);
 }
 
-async function insertItems(db: Db, tenantId: string, templateId: string, items: ItemInput[]) {
+export async function insertItems(db: Db, tenantId: string, templateId: string, items: ItemInput[]) {
   for (const [i, it] of items.entries()) {
     await db.query(`insert into task_template_items (tenant_id, template_id, position, title, description, category, priority, estimate_minutes,
         due_offset_days, owner_hint, checklist, requires_review, requires_evidence, depends_on)
@@ -124,7 +129,7 @@ async function insertItems(db: Db, tenantId: string, templateId: string, items: 
   }
 }
 
-async function saveVersion(db: Db, t: any, input: TemplateInput, note: string, actorId: string | null) {
+export async function saveVersion(db: Db, t: any, input: TemplateInput, note: string, actorId: string | null) {
   const snapshot = { name: input.name, description: input.description, category: input.category, visibility: input.visibility, items: input.items };
   await db.query(`insert into task_template_versions (tenant_id, template_id, version, snapshot, change_note, created_by) values ($1,$2,$3,$4,$5,$6)`,
     [t.tenant_id, t.id, t.version, JSON.stringify(snapshot), note, actorId]);
@@ -155,8 +160,9 @@ export async function createTemplate(db: Db, a: Actor, input: TemplateInput, det
   if (!isStaff(a)) throw forbidden();
   if (input.visibility === 'company' && !canPublish(a)) throw forbidden('Only managers and system admins publish company templates. Save it as private instead.');
   validateItems(input.items);
-  const t = await one(db, `insert into task_templates (tenant_id, name, description, category, visibility, created_by, updated_by)
-    values ($1,$2,$3,$4,$5,$6,$6) returning *`, [a.tenantId, input.name, input.description, input.category, input.visibility, a.id]);
+  if (input.productId) await assertProductUsable(db, a, input.productId);
+  const t = await one(db, `insert into task_templates (tenant_id, name, description, category, visibility, created_by, updated_by, product_id)
+    values ($1,$2,$3,$4,$5,$6,$6,$7) returning *`, [a.tenantId, input.name, input.description, input.category, input.visibility, a.id, input.productId ?? null]);
   await insertItems(db, a.tenantId, t.id, input.items);
   await saveVersion(db, t, input, 'Created', a.id);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'template.create', resourceType: 'task_template', resourceId: t.id, resourceVersion: 1,
@@ -190,7 +196,7 @@ export async function duplicateTemplate(db: Db, a: Actor, t: any, opts: { name?:
   const items = (await itemsOf(db, t.id)).map(rowToInput);
   return createTemplate(db, a, {
     name: (opts.name ?? `${t.name} (copy)`).slice(0, 120), description: t.description, category: t.category,
-    visibility: opts.visibility ?? 'private', items,
+    visibility: opts.visibility ?? 'private', items, productId: t.product_id ?? null,
   }, { source: 'duplicate', fromTemplateId: t.id, fromVersion: t.version });
 }
 
@@ -246,12 +252,19 @@ export function addWorkingDays(cal: CalendarData, start: string, n: number) {
   return null;
 }
 
-export async function computePlan(db: Db, a: Actor, items: any[], input: PreviewInput) {
+export async function computePlan(db: Db, a: Actor, items: any[], input: PreviewInput, templateProductId: string | null = null) {
   let project: any = null;
   if (input.projectId) {
     project = await loadVisibleProject(db, a, input.projectId);
     if (project.status === 'archived') throw badRequest('That project is archived');
   }
+  // Product of the created tasks: a product playbook stays in its product; otherwise the project's product, or the chosen one.
+  const productId: string | null = project ? project.product_id ?? null : templateProductId ?? input.productId ?? null;
+  if (templateProductId && productId !== templateProductId) {
+    const p = await one(db, `select name from products where id = $1`, [templateProductId]);
+    throw badRequest(`This playbook belongs to ${p?.name ?? 'another product'}. Choose a project in that product, or no project.`);
+  }
+  const product = productId ? await assertProductUsable(db, a, productId) : null;
   if (input.milestoneId) {
     const m = await one(db, `select id, project_id from milestones where id = $1`, [input.milestoneId]);
     if (!m || !project || m.project_id !== project.id) throw badRequest('The milestone must belong to the chosen project');
@@ -270,6 +283,7 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
     if (!allowed.has(id)) throw forbidden(`You can't assign work to ${u.name}. You can assign template steps to yourself, people you manage`
       + `${project?.owner_id === a.id ? ' and members of this project' : ''}.`);
   }
+  await assertUsersInProduct(db, productId, ownerIds);
 
   const warnings: string[] = [];
   const dated = items.filter((i) => i.due_offset_days !== null);
@@ -310,6 +324,7 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
   if (input.startDate < localToday(a.timezone)) warnings.push('The start date is in the past, so some tasks may be overdue as soon as they are created.');
   return {
     startDate: input.startDate, project: project && { id: project.id, key: project.key, name: project.name, ownerId: project.owner_id },
+    productId, product: product && { id: product.id, name: product.name },
     milestoneId: input.milestoneId ?? null, rows, warnings,
     assumptions: leaveHidden.length
       ? [...PLAN_ASSUMPTIONS, `Leave is not counted for ${leaveHidden.join(', ')}: you can see leave only for yourself and people you manage. Their dates skip weekends and company holidays only.`]
@@ -337,7 +352,7 @@ export async function applyTemplate(db: Db, a: Actor, t: any, input: z.infer<typ
   t = await one(db, `select * from task_templates where id = $1 for share`, [t.id]);
   if (t.archived_at) throw badRequest('This template is archived. Restore it before applying it.');
   const items = await itemsOf(db, t.id);
-  const plan = await computePlan(db, a, items, input);
+  const plan = await computePlan(db, a, items, input, t.product_id ?? null);
   const app = await one(db, `insert into task_template_applications (tenant_id, template_id, template_version, apply_key, applied_by, start_date, project_id, milestone_id)
     values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (tenant_id, apply_key) do nothing returning *`,
   [a.tenantId, t.id, t.version, input.applyKey, a.id, input.startDate, plan.project?.id ?? null, plan.milestoneId]);
@@ -347,7 +362,7 @@ export async function applyTemplate(db: Db, a: Actor, t: any, input: z.infer<typ
   for (const row of plan.rows) {
     const it = items.find((i) => i.position === row.position)!;
     const { task } = await createTask(db, a, a.tenantId, {
-      title: it.title, description: it.description, ownerId: row.ownerId, projectId: plan.project?.id ?? null, milestoneId: plan.milestoneId,
+      title: it.title, description: it.description, ownerId: row.ownerId, projectId: plan.project?.id ?? null, milestoneId: plan.milestoneId, productId: plan.productId,
       priority: it.priority, category: it.category, dueDate: row.dueDate, estimateMinutes: it.estimate_minutes, checklist: it.checklist ?? [],
       // A template can add review/evidence requirements; it never switches off the organization's category policy.
       requiresReview: it.requires_review ? true : undefined, requiresEvidence: it.requires_evidence ? true : undefined,

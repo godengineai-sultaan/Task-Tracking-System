@@ -20,7 +20,7 @@ export async function stampClientRequest(db: Db, taskId: string, clientRequestId
   await db.query(`update tasks set client_request_id = $2 where id = $1`, [taskId, clientRequestId]);
 }
 
-export interface OfflineCapture { clientRequestId: string; userId?: string; text: string; capturedAt: string; projectId?: string | null; addToMyDay?: boolean }
+export interface OfflineCapture { clientRequestId: string; userId?: string; text: string; capturedAt: string; projectId?: string | null; productId?: string | null; addToMyDay?: boolean }
 
 /**
  * Create a task from a one-line capture that was queued on the device while offline.
@@ -50,6 +50,8 @@ export async function syncOfflineCapture(db: Db, a: Actor, c: OfflineCapture, co
   const r = await createTask(db, a, a.tenantId, {
     title: p.title, dueDate: p.dueDate, estimateMinutes: p.estimateMinutes, priority: p.priority ?? undefined, category: p.category ?? undefined,
     projectId: project?.id ?? c.projectId ?? null, ownerId: owner?.id ?? undefined,
+    // The product chosen at capture time applies only when no project decides it.
+    productId: project?.id ?? c.projectId ? undefined : c.productId ?? null,
     sourceType: 'quick_capture', sourceRef: { channel: 'offline_outbox', capturedAt: at.toUTC().toISO() },
   }, { correlationId });
   await stampClientRequest(db, r.task.id, c.clientRequestId);

@@ -74,7 +74,7 @@ export async function reportRoutes(app: FastifyInstance) {
   app.post('/api/exports', async (req) => tx(req, async (db, a) => {
     const b = z.object({ format: z.enum(['pdf', 'csv']), report: z.string().regex(/^[a-z_]{2,40}$/),
       params: z.object({ userId: uuid.optional(), kind: z.enum(['day', 'week', 'month', 'custom']).optional(), start: date.optional(), end: date.optional(),
-        date: date.optional(), departmentId: uuid.optional(), projectId: uuid.optional() }).catchall(z.union([z.string().max(200), z.number(), z.boolean()])) }).parse(req.body);
+        date: date.optional(), departmentId: uuid.optional(), projectId: uuid.optional(), productId: z.union([uuid, z.literal('none')]).optional() }).catchall(z.union([z.string().max(200), z.number(), z.boolean()])) }).parse(req.body);
     return requestExport(db, a, b.format, b.report, b.params);
   }));
   app.get('/api/exports', async (req) => tx(req, (db, a) => many(db, `select e.*, f.filename, f.size_bytes from exports e left join stored_files f on f.id = e.file_id

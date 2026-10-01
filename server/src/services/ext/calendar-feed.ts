@@ -4,8 +4,9 @@ import { many, one, withSystem, withTenant } from '../../lib/db.js';
 import { audit } from '../../lib/audit.js';
 import { config } from '../../lib/config.js';
 import { newToken, sha256 } from '../../lib/crypto.js';
-import { type Actor, requireStaff } from '../access.js';
+import { type Actor, loadActor, requireStaff } from '../access.js';
 import { localToday } from '../calendar.js';
+import { applyProductScope } from './portfolio-scope.js';
 
 /**
  * Personal read-only calendar feed: the user's own open task due dates (title + link), today's intended outcomes and their leave.
@@ -51,6 +52,10 @@ export async function serveFeed(file: string): Promise<string | null> {
     const tok = await one(db, `select k.id, k.user_id from calendar_feed_tokens k join users u on u.id = k.user_id
       where k.token_hash = $1 and k.revoked_at is null and u.status = 'active' and not ('customer' = any(u.roles))`, [sha256(m[2])]);
     if (!tok) return null;
+    // The feed shows only work in the person's own product scope.
+    const actor = await loadActor(db, t.id, tok.user_id);
+    if (!actor) return null;
+    await applyProductScope(db, actor);
     await db.query(`update calendar_feed_tokens set last_used_at = now() where id = $1 and (last_used_at is null or last_used_at < now() - interval '5 minutes')`, [tok.id]);
     return buildFeed(db, tok.user_id);
   });

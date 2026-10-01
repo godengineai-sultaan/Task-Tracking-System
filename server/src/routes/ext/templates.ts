@@ -20,7 +20,7 @@ export default async function (app: FastifyInstance) {
     const q = z.object({ q: z.string().trim().max(100).optional(), category: z.enum(TEMPLATE_CATEGORIES).optional(), archived: z.enum(['0', '1']).optional() }).parse(req.query);
     await ensureStarterTemplates(db, a.tenantId, a.id);
     const like = q.q ? `%${q.q.replace(/[\\%_]/g, (m) => `\\${m}`)}%` : null;
-    const rows = await many(db, `select t.id, t.name, t.description, t.category, t.visibility, t.is_starter, t.version, t.created_by, t.archived_at, t.updated_at,
+    const rows = await many(db, `select t.id, t.name, t.description, t.category, t.visibility, t.is_starter, t.version, t.created_by, t.archived_at, t.updated_at, t.product_id,
         u.name created_by_name,
         (select count(*) from task_template_items i where i.template_id = t.id)::int item_count,
         (select coalesce(sum(i.estimate_minutes), 0) from task_template_items i where i.template_id = t.id)::int total_estimate_minutes,
@@ -95,7 +95,7 @@ export default async function (app: FastifyInstance) {
 
   app.post('/api/templates/:id/preview', async (req) => tx(req, async (db, a) => {
     const t = await loadTemplate(db, a, idParam.parse(req.params).id);
-    return computePlan(db, a, await itemsOf(db, t.id), previewSchema.parse(req.body));
+    return computePlan(db, a, await itemsOf(db, t.id), previewSchema.parse(req.body), t.product_id ?? null);
   }));
 
   app.post('/api/templates/:id/apply', async (req) => tx(req, async (db, a) => {

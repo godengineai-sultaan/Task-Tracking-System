@@ -11,6 +11,9 @@ import pwa from './pwa.js';
 import calendar from './calendar.js';
 import orgdash from './orgdash.js';
 import trends from './trends.js';
+import portfolio from './portfolio.js';
+import connectors from './connectors.js';
+import productanalytics from './productanalytics.js';
 
 /** Feature-area job registrations (registerJob / registerTenantTick / onTaskEvent listeners). */
 export function registerExtJobs() {
@@ -27,4 +30,7 @@ export function registerExtJobs() {
   calendar();
   orgdash();
   trends();
+  portfolio();
+  connectors();
+  productanalytics();
 }

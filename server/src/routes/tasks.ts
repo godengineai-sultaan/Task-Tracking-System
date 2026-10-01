@@ -11,12 +11,14 @@ import { setPlan } from '../services/myday.js';
 import { localToday } from '../services/calendar.js';
 import { notify } from '../services/notify.js';
 import { findClientRequest, stampClientRequest } from '../services/ext/pwa.js';
+import { assertProductUsable, assertUsersInProduct } from '../services/ext/portfolio-scope.js';
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const createSchema = z.object({
   title: z.string().trim().min(1).max(300), description: z.string().max(20000).optional(), ownerId: uuid.optional(),
   projectId: uuid.nullable().optional(), milestoneId: uuid.nullable().optional(), status: z.enum(['backlog', 'planned', 'in_progress']).optional(),
+  productId: uuid.nullable().optional(),
   priority: z.enum(PRIORITIES).optional(), category: z.enum(CATEGORIES).optional(), dueDate: date.nullable().optional(),
   estimateMinutes: z.number().int().min(1).max(100000).nullable().optional(), tags: z.array(z.string().max(40)).max(20).optional(),
   acceptanceCriteria: z.string().max(5000).optional(), requiresReview: z.boolean().optional(), requiresEvidence: z.boolean().optional(),
@@ -85,7 +87,7 @@ export async function taskRoutes(app: FastifyInstance) {
     vals.push(q.limit);
     return many(db, `select t.id, t.number, t.title, t.status, t.priority, t.category, t.due_date, t.estimate_minutes, t.tags, t.version, t.sort_order,
         t.owner_id, u.name owner_name, t.project_id, p.name project_name, p.key project_key, t.milestone_id, t.requires_review, t.requires_evidence,
-        t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at, t.customer_visible,
+        t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at, t.customer_visible, t.product_id,
         (select count(*) from checklist_items c where c.task_id = t.id)::int checklist_total,
         (select count(*) from checklist_items c where c.task_id = t.id and c.done)::int checklist_done,
         (select count(*) from task_dependencies d join tasks dt on dt.id = d.depends_on_task_id where d.task_id = t.id and dt.status not in ('done','cancelled'))::int open_dependencies,
@@ -300,6 +302,7 @@ export async function taskRoutes(app: FastifyInstance) {
     const t = await loadVisibleTask(db, a, (req.params as any).id); await assertContribute(db, a, t);
     const { userId } = z.object({ userId: uuid }).parse(req.body);
     if (userId === t.owner_id) throw badRequest('The owner is already accountable for this task');
+    await assertUsersInProduct(db, t.product_id, [userId]);
     await db.query(`insert into task_collaborators (tenant_id, task_id, user_id) values ($1,$2,$3) on conflict do nothing`, [a.tenantId, t.id, userId]);
     await notify(db, a.tenantId, userId, 'collaborator', `Added as collaborator: ${t.title}`, `By ${a.name}`, `/tasks/${t.id}`);
     return { ok: true };
@@ -341,6 +344,7 @@ export async function taskRoutes(app: FastifyInstance) {
   }));
   const recurringSchema = z.object({
     title: z.string().min(1).max(300), description: z.string().max(5000).default(''), projectId: uuid.nullable().optional(), ownerId: uuid.optional(),
+    productId: uuid.nullable().optional(),
     category: z.enum(CATEGORIES).default('admin'), priority: z.enum(PRIORITIES).default('medium'), estimateMinutes: z.number().int().min(1).max(10000).nullable().optional(),
     checklist: z.array(z.string().max(300)).max(30).default([]), rule: z.enum(['daily', 'weekdays', 'weekly', 'monthly']),
     weekday: z.number().int().min(1).max(7).nullable().optional(), monthDay: z.number().int().min(1).max(28).nullable().optional(), active: z.boolean().default(true),
@@ -350,10 +354,16 @@ export async function taskRoutes(app: FastifyInstance) {
     const b = recurringSchema.parse(req.body);
     const owner = b.ownerId ?? a.id;
     if (owner !== a.id && !a.managedUserIds.includes(owner) && !has(a, 'routine_admin')) throw forbidden('You can create recurring work for yourself or your team');
-    if (b.projectId) await assertProjectUsable(db, a, b.projectId);
-    const r = await one(db, `insert into recurring_templates (tenant_id, title, description, project_id, owner_id, category, priority, estimate_minutes, checklist, rule, weekday, month_day, active, created_by, last_generated_date)
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, $15::date - 1) returning *`,
-      [a.tenantId, b.title, b.description, b.projectId ?? null, owner, b.category, b.priority, b.estimateMinutes ?? null, JSON.stringify(b.checklist), b.rule, b.weekday ?? null, b.monthDay ?? null, b.active, a.id, localToday(a.timezone)]);
+    let productId = b.productId ?? null;
+    if (b.projectId) {
+      const p = await assertProjectUsable(db, a, b.projectId);
+      if (productId && productId !== p.product_id) throw badRequest('This project belongs to a different product');
+      productId = p.product_id;
+    }
+    if (productId) { await assertProductUsable(db, a, productId); await assertUsersInProduct(db, productId, [owner]); }
+    const r = await one(db, `insert into recurring_templates (tenant_id, title, description, project_id, owner_id, category, priority, estimate_minutes, checklist, rule, weekday, month_day, active, created_by, last_generated_date, product_id)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, $15::date - 1, $16) returning *`,
+      [a.tenantId, b.title, b.description, b.projectId ?? null, owner, b.category, b.priority, b.estimateMinutes ?? null, JSON.stringify(b.checklist), b.rule, b.weekday ?? null, b.monthDay ?? null, b.active, a.id, localToday(a.timezone), productId]);
     const { enqueue } = await import('../lib/jobs.js');
     await enqueue(db, { tenantId: a.tenantId, kind: 'recurring.generate', payload: {} });
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'recurring.create', resourceType: 'recurring_template', resourceId: r.id });
@@ -366,13 +376,17 @@ export async function taskRoutes(app: FastifyInstance) {
     // No defaults on edit: fields that are not sent stay as they are (a title edit must not resume a paused template).
     const b = z.object({ title: z.string().min(1).max(300), description: z.string().max(5000), category: z.enum(CATEGORIES), priority: z.enum(PRIORITIES),
       estimateMinutes: z.number().int().min(1).max(10000).nullable(), rule: z.enum(['daily', 'weekdays', 'weekly', 'monthly']),
-      weekday: z.number().int().min(1).max(7).nullable(), monthDay: z.number().int().min(1).max(28).nullable(), active: z.boolean() }).partial().parse(req.body);
+      weekday: z.number().int().min(1).max(7).nullable(), monthDay: z.number().int().min(1).max(28).nullable(), active: z.boolean(), productId: uuid.nullable() }).partial().parse(req.body);
+    if ('productId' in b && (b.productId ?? null) !== cur.product_id) {
+      if (cur.project_id) throw badRequest('Recurring work in a project follows the project\'s product');
+      if (b.productId) { await assertProductUsable(db, a, b.productId); await assertUsersInProduct(db, b.productId, [cur.owner_id]); }
+    }
     // Resuming a paused template starts from today: occurrences missed while it was paused are not backfilled.
     return one(db, `update recurring_templates set title = coalesce($2,title), description = coalesce($3,description), rule = coalesce($4,rule),
       weekday = coalesce($5,weekday), month_day = coalesce($6,month_day), active = coalesce($7,active), estimate_minutes = coalesce($8, estimate_minutes),
-      priority = coalesce($9, priority), category = coalesce($10, category),
+      priority = coalesce($9, priority), category = coalesce($10, category), product_id = case when $12::boolean and project_id is null then $13::uuid else product_id end,
       last_generated_date = case when $7::boolean and not active then greatest(last_generated_date, $11::date - 1) else last_generated_date end where id = $1 returning *`,
       [cur.id, b.title ?? null, b.description ?? null, b.rule ?? null, b.weekday ?? null, b.monthDay ?? null, b.active ?? null, b.estimateMinutes ?? null, b.priority ?? null, b.category ?? null,
-       localToday(a.timezone)]);
+       localToday(a.timezone), 'productId' in b, b.productId ?? null]);
   }));
 }

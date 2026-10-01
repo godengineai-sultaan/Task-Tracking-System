@@ -12,6 +12,7 @@ import { aiStatus } from '../services/ai.js';
 import { localToday } from '../services/calendar.js';
 import { isStaff } from '../services/access.js';
 import { loadBranding } from '../services/ext/clientbrand-brand.js';
+import { tenantHasProducts } from '../services/ext/portfolio-scope.js';
 
 const password = z.string().min(10, 'Use at least 10 characters').max(200);
 const MFA_SESSION_ATTEMPTS = 5, MFA_ACCOUNT_ATTEMPTS = 10;
@@ -115,8 +116,11 @@ export async function authRoutes(app: FastifyInstance) {
       from projects where owner_id = $1 and status <> 'archived' and $2::boolean`, [a.id, isStaff(a)]);
     // Accent and logo come with the session so the brand applies on first paint (the full branding query follows).
     const b = await loadBranding(db, a.tenantId);
+    // Portfolio: whether the organization tracks products, and which products this person leads (opens the Portfolio views).
+    const portfolio = { enabled: await tenantHasProducts(db), allProducts: a.productScope === 'all',
+      leadOf: Object.entries(a.productRoles).filter(([, r]) => r === 'lead').map(([id]) => id) };
     return { user: { ...u, managedUserIds: a.managedUserIds, effectiveTimezone: a.timezone, ownsProjects: !!owns.any_project, ownsClientProjects: owns.client_project },
-      tenant: t, unreadNotifications: unread.n, today: localToday(a.timezone), ai: aiStatus(a),
+      tenant: t, unreadNotifications: unread.n, today: localToday(a.timezone), ai: aiStatus(a), portfolio,
       branding: { accent: b.accent, logoUrl: b.logoFileId ? `/api/branding/logo?v=${b.logoFileId}` : null } };
   }));
 

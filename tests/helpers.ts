@@ -55,17 +55,24 @@ export async function login(org: Org, key: string) {
   return client(`${SESSION_COOKIE}=${c.value}`);
 }
 
-export function client(cookie: string) {
+export function client(cookie: string, extra: Record<string, string> = {}): Client {
   const call = async (method: string, url: string, payload?: unknown) => {
     const a = await getApp();
-    const r = await a.inject({ method: method as any, url, headers: { cookie, 'x-requested-with': 'fetch', ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) },
+    const r = await a.inject({ method: method as any, url, headers: { cookie, 'x-requested-with': 'fetch', ...extra, ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) },
       payload: payload as any });
     let body: any = r.body;
     try { body = JSON.parse(r.body); } catch { /* binary */ }
     return { status: r.statusCode, body, raw: r.rawPayload, headers: r.headers };
   };
   return { get: (u: string) => call('GET', u), post: (u: string, b: unknown = {}) => call('POST', u, b), put: (u: string, b: unknown = {}) => call('PUT', u, b),
-    patch: (u: string, b: unknown = {}) => call('PATCH', u, b), del: (u: string, b: unknown = {}) => call('DELETE', u, b) };
+    patch: (u: string, b: unknown = {}) => call('PATCH', u, b), del: (u: string, b: unknown = {}) => call('DELETE', u, b),
+    /** The same session sending the product focus header ('none' or a product id) with every request. */
+    focus: (productFocus: string) => client(cookie, { ...extra, 'x-product-focus': productFocus }) };
+}
+type Res = { status: number; body: any; raw: Buffer; headers: Record<string, any> };
+export interface Client {
+  get(u: string): Promise<Res>; post(u: string, b?: unknown): Promise<Res>; put(u: string, b?: unknown): Promise<Res>;
+  patch(u: string, b?: unknown): Promise<Res>; del(u: string, b?: unknown): Promise<Res>; focus(productFocus: string): Client;
 }
 
 /** A recent weekday (local) strictly before today, `n` working days back. */

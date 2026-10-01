@@ -37,12 +37,17 @@ function serialized(client: pg.PoolClient): pg.PoolClient {
   return client;
 }
 
-/** Run fn in a transaction with row-level security bound to one tenant. */
-export async function withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
+/** Product partition settings for one transaction (see migrations/018_portfolio.sql). Omitted = every product (system work). */
+export interface ProductScope { scope: string; focus?: string | null }
+
+/** Run fn in a transaction with row-level security bound to one tenant (and, for a signed-in actor, their product scope). */
+export async function withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>, product?: ProductScope): Promise<T> {
   const client = serialized(await pools().app.connect());
   try {
     await client.query('begin');
-    await client.query("select set_config('app.tenant_id', $1, true)", [tenantId]);
+    if (product) await client.query("select set_config('app.tenant_id', $1, true), set_config('app.product_scope', $2, true), set_config('app.product_focus', $3, true)",
+      [tenantId, product.scope, product.focus ?? '']);
+    else await client.query("select set_config('app.tenant_id', $1, true)", [tenantId]);
     const out = await fn(client);
     await client.query('commit');
     return out;

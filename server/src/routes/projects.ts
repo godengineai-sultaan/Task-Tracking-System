@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { tx } from '../app.js';
 import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
-import { conflict, forbidden, notFound } from '../lib/errors.js';
-import { has, requireStaff } from '../services/access.js';
+import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
+import { type Actor, has, requireStaff } from '../services/access.js';
 import { customerView } from '../services/oversight.js';
+import { assertProductUsable, assertUsersInProduct, tenantHasProducts } from '../services/ext/portfolio-scope.js';
+import type { Db } from '../lib/db.js';
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -28,15 +30,29 @@ export async function projectRoutes(app: FastifyInstance) {
     description: z.string().max(5000).default(''), departmentId: uuid.nullable().optional(), customerId: uuid.nullable().optional(),
     visibility: z.enum(['company', 'private']).default('company'), status: z.enum(['active', 'on_hold', 'completed', 'archived']).default('active'),
     ownerId: uuid.nullable().optional(), businessOutcome: z.string().max(1000).default(''), startDate: date.nullable().optional(), targetDate: date.nullable().optional(),
+    /** Product the project belongs to. When the organization has products, a project needs one unless companyWide is chosen explicitly. */
+    productId: uuid.nullable().optional(), companyWide: z.boolean().optional(),
   });
+  /** Validate a project's product choice; returns the product id (null = company-wide). */
+  async function projectProduct(db: Db, a: Actor, productId: string | null | undefined, companyWide: boolean | undefined, ownerId: string) {
+    if (productId) {
+      if (companyWide) throw badRequest('Choose a product or company-wide work, not both');
+      await assertProductUsable(db, a, productId);
+      await assertUsersInProduct(db, productId, [ownerId]);
+      return productId;
+    }
+    if (companyWide !== true && (await tenantHasProducts(db))) throw badRequest('Choose the product this project belongs to, or mark it as company-wide work');
+    return null;
+  }
   app.post('/api/projects', async (req) => tx(req, async (db, a) => {
     if (!has(a, 'system_admin') && !has(a, 'leadership') && !has(a, 'manager')) throw forbidden('Managers, leadership or admins create projects');
     const b = projectSchema.parse(req.body);
-    const p = await one(db, `insert into projects (tenant_id, key, name, description, department_id, customer_id, visibility, status, owner_id, business_outcome, start_date, target_date)
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning *`,
-      [a.tenantId, b.key, b.name, b.description, b.departmentId ?? null, b.customerId ?? null, b.visibility, b.status, b.ownerId ?? a.id, b.businessOutcome, b.startDate ?? null, b.targetDate ?? null]);
+    const productId = await projectProduct(db, a, b.productId, b.companyWide, b.ownerId ?? a.id);
+    const p = await one(db, `insert into projects (tenant_id, key, name, description, department_id, customer_id, visibility, status, owner_id, business_outcome, start_date, target_date, product_id)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *`,
+      [a.tenantId, b.key, b.name, b.description, b.departmentId ?? null, b.customerId ?? null, b.visibility, b.status, b.ownerId ?? a.id, b.businessOutcome, b.startDate ?? null, b.targetDate ?? null, productId]);
     await db.query(`insert into project_members (tenant_id, project_id, user_id) values ($1,$2,$3) on conflict do nothing`, [a.tenantId, p.id, b.ownerId ?? a.id]);
-    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'project.create', resourceType: 'project', resourceId: p.id });
+    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'project.create', resourceType: 'project', resourceId: p.id, details: { productId } });
     return p;
   }));
   async function loadEditable(db: any, a: any, id: string) {
@@ -48,12 +64,17 @@ export async function projectRoutes(app: FastifyInstance) {
   app.patch('/api/projects/:id', async (req) => tx(req, async (db, a) => {
     const p = await loadEditable(db, a, (req.params as any).id);
     const b = projectSchema.partial().parse(req.body);
+    const productChange = 'productId' in b && (b.productId ?? null) !== p.product_id;
+    if (productChange) await projectProduct(db, a, b.productId, b.companyWide, b.ownerId ?? p.owner_id);
+    else if (b.ownerId && p.product_id) await assertUsersInProduct(db, p.product_id, [b.ownerId]);
     const r = await one(db, `update projects set name = coalesce($2,name), description = coalesce($3,description), visibility = coalesce($4,visibility), status = coalesce($5,status),
         owner_id = coalesce($6,owner_id), business_outcome = coalesce($7,business_outcome), target_date = case when $9 then $8 else target_date end,
-        customer_id = case when $11 then $10 else customer_id end, department_id = case when $13 then $12 else department_id end where id = $1 returning *`,
+        customer_id = case when $11 then $10 else customer_id end, department_id = case when $13 then $12 else department_id end,
+        product_id = case when $15::boolean then $14::uuid else product_id end where id = $1 returning *`,
       [p.id, b.name ?? null, b.description ?? null, b.visibility ?? null, b.status ?? null, b.ownerId ?? null, b.businessOutcome ?? null,
-       b.targetDate ?? null, 'targetDate' in b, b.customerId ?? null, 'customerId' in b, b.departmentId ?? null, 'departmentId' in b]);
-    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'project.update', resourceType: 'project', resourceId: p.id, details: { fields: Object.keys(b) } });
+       b.targetDate ?? null, 'targetDate' in b, b.customerId ?? null, 'customerId' in b, b.departmentId ?? null, 'departmentId' in b, b.productId ?? null, productChange]);
+    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'project.update', resourceType: 'project', resourceId: p.id,
+      details: { fields: Object.keys(b), ...(productChange ? { productFrom: p.product_id, productTo: b.productId ?? null } : {}) } });
     return r;
   }));
   app.get('/api/projects/:id', async (req) => tx(req, async (db, a) => {

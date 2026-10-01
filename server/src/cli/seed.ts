@@ -12,6 +12,7 @@ import { hashPassword, newToken, encrypt } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { migrate } from './migrate.js';
 import { seedExtensions } from './seed-ext/index.js';
+import { seedLord } from './seed-lord.js';
 
 const TZ = 'Asia/Kolkata';
 let seed = 20261001;
@@ -327,5 +328,8 @@ async function main() {
     ...people.map((p) => `${p.email}\t${p.title}\troles: ${p.roles.join(',')}`), 'lena@globex.example\tClient (customer portal)', '',
   ].join('\n'), { mode: 0o600 });
   console.log('Demo tenant "demo" seeded with fictional fixtures. Credentials written to .data/demo-credentials.txt');
+  // The LORD portfolio demo organization (slug `lord`), in its own transaction.
+  await seedLord({ password });
+  console.log('Demo tenant "lord" seeded with fictional fixtures. Credentials written to .data/lord-credentials.txt');
 }
 main().catch((e) => { console.error(e); process.exit(1); });

@@ -20,6 +20,7 @@ import { adminRoutes } from './routes/admin.js';
 import { integrationRoutes } from './routes/integrations.js';
 import { projectRoutes } from './routes/projects.js';
 import { extRoutes } from './routes/ext/index.js';
+import { FOCUS_HEADER, actorScope, requestFocus } from './services/ext/portfolio-scope.js';
 
 declare module 'fastify' {
   interface FastifyRequest { actor?: Actor; rawBody?: string }
@@ -32,10 +33,14 @@ export function actorOf(req: FastifyRequest): Actor {
   if (!req.actor) throw unauthorized();
   return req.actor;
 }
-/** Run a handler in a tenant-scoped RLS transaction as the signed-in actor. */
-export function tx<T>(req: FastifyRequest, fn: (db: Db, a: Actor) => Promise<T>) {
+/**
+ * Run a handler in a tenant-scoped RLS transaction as the signed-in actor. The actor's product scope always applies;
+ * the product focus header applies only to GET requests on the list endpoints in FOCUS_PATHS (services/ext/portfolio-scope.ts).
+ */
+export async function tx<T>(req: FastifyRequest, fn: (db: Db, a: Actor) => Promise<T>) {
   const a = actorOf(req);
-  return withTenant(a.tenantId, (db) => fn(db, a));
+  const focus = requestFocus(a, req.method, req.url, req.headers[FOCUS_HEADER]);
+  return withTenant(a.tenantId, (db) => fn(db, a), actorScope(a, focus));
 }
 
 export async function buildApp() {

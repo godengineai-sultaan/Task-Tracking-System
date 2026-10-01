@@ -10,6 +10,7 @@ const captureSchema = z.object({
   text: z.string().trim().min(1).max(500),
   capturedAt: z.string().datetime({ offset: true }),
   projectId: z.string().uuid().nullable().optional(),
+  productId: z.string().uuid().nullable().optional(),
   addToMyDay: z.boolean().optional(),
 });
 

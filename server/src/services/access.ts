@@ -18,7 +18,15 @@ export interface Actor {
   /** Users in teams this actor manages (excludes self). */
   managedUserIds: string[];
   tenantSettings: TenantSettings;
+  /** Products whose work this actor may see: 'all' (system/routine admins, leadership) or product ids (memberships + company-visible products;
+   *  customers: the products of their own client projects). Enforced in the database through app.product_scope. */
+  productScope: 'all' | string[];
+  /** Explicit product memberships (lead / member / viewer), whatever the scope. */
+  productRoles: Record<string, ProductRole>;
 }
+export type ProductRole = 'lead' | 'member' | 'viewer';
+/** Roles that see every product of the organization. */
+export const ALL_PRODUCT_ROLES: Role[] = ['system_admin', 'routine_admin', 'leadership'];
 
 export interface TenantSettings {
   founders_visible_to_routine_admin?: boolean;
@@ -42,11 +50,34 @@ export async function loadActor(db: Db, tenantId: string, userId: string): Promi
   const managed = await many<{ user_id: string }>(db,
     `select distinct tm.user_id from teams t join team_members tm on tm.team_id = t.id join users mu on mu.id = tm.user_id
      where t.manager_id = $1 and tm.user_id <> $1 and not ('customer' = any(mu.roles))`, [userId]);
+  const roles = new Set<Role>(u.roles);
+  // Product scope is computed here (no product scope applies while loading the actor) and enforced by row-level security per request.
+  const memberships = await many<{ id: string; visibility: string; role: ProductRole | null }>(db,
+    `select p.id, p.visibility, m.role from products p left join product_members m on m.product_id = p.id and m.user_id = $1
+     where m.user_id is not null or p.visibility = 'company'`, [userId]);
+  const productRoles: Record<string, ProductRole> = {};
+  for (const m of memberships) if (m.role) productRoles[m.id] = m.role;
+  let productScope: 'all' | string[];
+  if (roles.has('customer')) {
+    productScope = (await many(db, `select distinct product_id from projects where customer_id = $1 and product_id is not null`,
+      [u.customer_id ?? '00000000-0000-0000-0000-000000000000'])).map((r) => r.product_id);
+  } else if (ALL_PRODUCT_ROLES.some((r) => roles.has(r))) productScope = 'all';
+  else productScope = memberships.map((m) => m.id);
   return {
-    id: u.id, tenantId, name: u.name, email: u.email, roles: new Set(u.roles), isFounder: u.is_founder,
+    id: u.id, tenantId, name: u.name, email: u.email, roles, isFounder: u.is_founder,
     customerId: u.customer_id, departmentId: u.department_id, timezone: u.timezone || u.tenant_tz,
     managedUserIds: managed.map((m) => m.user_id), tenantSettings: u.tenant_settings || {},
+    productScope, productRoles: roles.has('customer') ? {} : productRoles,
   };
+}
+
+/** Value for the app.product_scope setting: 'all', a comma-separated id list, or 'none' (company-wide rows only). */
+export function productScopeSetting(a: Actor) {
+  return a.productScope === 'all' ? 'all' : a.productScope.length ? a.productScope.join(',') : 'none';
+}
+/** Is this product (null = company-wide work) inside the actor's product scope? */
+export function inProductScope(a: Actor, productId: string | null | undefined) {
+  return !productId || a.productScope === 'all' || a.productScope.includes(productId);
 }
 
 export function require(a: Actor, ...anyOf: Role[]) {

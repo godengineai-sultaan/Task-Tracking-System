@@ -8,6 +8,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { has, requireStaff, taskVisibility, type Actor } from '../../services/access.js';
 import { notify } from '../../services/notify.js';
 import { OKR_RULES, computeObjectives } from '../../services/ext/objectives.js';
+import { assertProductUsable } from '../../services/ext/portfolio-scope.js';
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -102,14 +103,15 @@ export default async function (app: FastifyInstance) {
   app.post('/api/objectives/create', async (req) => tx(req, async (db, a) => {
     if (!canEdit(a)) throw forbidden('Only leadership or a system admin can create objectives');
     const b = z.object({ title: z.string().trim().min(1).max(300), description: z.string().max(5000).default(''), ownerId: uuid.nullable().optional(),
-      periodStart: date.nullable().optional(), periodEnd: date.nullable().optional() }).parse(req.body);
+      periodStart: date.nullable().optional(), periodEnd: date.nullable().optional(), productId: uuid.nullable().optional() }).parse(req.body);
     checkPeriod(b.periodStart, b.periodEnd);
     const ownerId = b.ownerId ?? a.id;
     await assertStaffUser(db, ownerId);
-    const o = await one(db, `insert into objectives (tenant_id, title, description, owner_id, period_start, period_end) values ($1,$2,$3,$4,$5,$6) returning *`,
-      [a.tenantId, b.title, b.description, ownerId, b.periodStart ?? null, b.periodEnd ?? null]);
+    if (b.productId) await assertProductUsable(db, a, b.productId);
+    const o = await one(db, `insert into objectives (tenant_id, title, description, owner_id, period_start, period_end, product_id) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
+      [a.tenantId, b.title, b.description, ownerId, b.periodStart ?? null, b.periodEnd ?? null, b.productId ?? null]);
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.created', resourceType: 'objective', resourceId: o.id, resourceVersion: o.version,
-      details: { title: o.title, ownerId, periodStart: o.period_start, periodEnd: o.period_end } });
+      details: { title: o.title, ownerId, periodStart: o.period_start, periodEnd: o.period_end, productId: o.product_id } });
     if (ownerId !== a.id) await notify(db, a.tenantId, ownerId, 'objective_assigned', `You own the objective: ${o.title}`, `Set by ${a.name}.`, `/objectives/${o.id}`);
     return o;
   }));
@@ -165,16 +167,18 @@ export default async function (app: FastifyInstance) {
     const o = await loadObjective(db, (req.params as any).id);
     const b = z.object({ version: z.number().int(), title: z.string().trim().min(1).max(300).optional(), description: z.string().max(5000).optional(),
       ownerId: uuid.nullable().optional(), periodStart: date.nullable().optional(), periodEnd: date.nullable().optional(), status: z.enum(LIFECYCLE).optional(),
-      reason: z.string().max(500).optional() }).parse(req.body);
+      reason: z.string().max(500).optional(), productId: uuid.nullable().optional() }).parse(req.body);
     const next = {
       title: b.title ?? o.title, description: b.description ?? o.description, owner_id: 'ownerId' in b ? b.ownerId ?? null : o.owner_id,
       period_start: 'periodStart' in b ? b.periodStart ?? null : o.period_start, period_end: 'periodEnd' in b ? b.periodEnd ?? null : o.period_end, status: b.status ?? o.status,
+      product_id: 'productId' in b ? b.productId ?? null : o.product_id,
     };
+    if (next.product_id && next.product_id !== o.product_id) await assertProductUsable(db, a, next.product_id);
     checkPeriod(next.period_start, next.period_end);
     if (next.owner_id && next.owner_id !== o.owner_id) await assertStaffUser(db, next.owner_id);
     const r = await one(db, `update objectives set title = $3, description = $4, owner_id = $5, period_start = $6, period_end = $7, status = $8,
-        version = version + 1, updated_at = now() where id = $1 and version = $2 returning *`,
-      [o.id, b.version, next.title, next.description, next.owner_id, next.period_start, next.period_end, next.status]);
+        product_id = $9, version = version + 1, updated_at = now() where id = $1 and version = $2 returning *`,
+      [o.id, b.version, next.title, next.description, next.owner_id, next.period_start, next.period_end, next.status, next.product_id]);
     if (!r) throw conflict('This objective was changed by someone else. Reload and try again.', { current: o });
     const changed = Object.fromEntries(Object.keys(next).filter((k) => (o as any)[k] !== (next as any)[k]).map((k) => [k, { from: (o as any)[k], to: (next as any)[k] }]));
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.updated', resourceType: 'objective', resourceId: o.id, resourceVersion: r.version,

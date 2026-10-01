@@ -11,6 +11,7 @@ import { notify } from '../notify.js';
 import { CATEGORIES, PRIORITIES, STATUSES, createTask, label } from '../tasks.js';
 import { asAutomation, emitTaskEvent, type TaskEvent } from '../events.js';
 import { userToday } from '../calendar.js';
+import { productWorkers } from './portfolio-scope.js';
 
 /**
  * No-code automation rules: trigger -> conditions -> actions.
@@ -301,11 +302,13 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
       const owner = people[0];
       const hidden = await hiddenFrom(db, rule, act.owner, owner, task);
       if (hidden) return { summary: `Create follow-up for ${owner.name}`, skip: hidden };
+      if (task.product_id && !(await productWorkers(db, task.product_id, [owner.id]))[0]?.ok)
+        return { summary: `Create follow-up for ${owner.name}`, skip: `${owner.name} is not a member of this task's product` };
       const title = renderTemplate(act.title, task).slice(0, 300);
       const dueDate = act.dueInDays === null || act.dueInDays === undefined ? null : DateTime.fromISO(ctx.today).plus({ days: act.dueInDays }).toISODate();
       return { summary: `Create follow-up "${title}" for ${owner.name}${dueDate ? `, due ${dueDate}` : ''}`, apply: async () => {
         const r = await createTask(db, null, tenantId, {
-          title, ownerId: owner.id, projectId: task.project_id && task.project_status !== 'archived' ? task.project_id : null, category: task.category,
+          title, ownerId: owner.id, projectId: task.project_id && task.project_status !== 'archived' ? task.project_id : null, productId: task.product_id ?? null, category: task.category,
           priority: act.priority ?? task.priority, dueDate, sourceType: 'automation', sourceRef: { ruleId: rule.id, taskId: task.id },
           description: `Follow-up created by automation rule "${rule.name}" from #${task.number}.`,
           externalKey: ctx.dedupeKey ? `automation:${ctx.dedupeKey}:${title}` : null,
@@ -365,6 +368,7 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
       if (['done', 'cancelled'].includes(task.status)) return { summary: `Assign to ${u.name}`, skip: 'The task is closed' };
       if (task.owner_id === u.id) return { summary: `Assign to ${u.name}`, skip: `${u.name} already owns it` };
       if (task.reviewer_id === u.id) return { summary: `Assign to ${u.name}`, skip: `${u.name} is the reviewer; the owner must be someone else` };
+      if (task.product_id && !(await productWorkers(db, task.product_id, [u.id]))[0]?.ok) return { summary: `Assign to ${u.name}`, skip: `${u.name} is not a member of this task's product` };
       return { summary: `Assign to ${u.name}`, apply: async () => {
         const row = await one(db, `update tasks set owner_id = $2, version = version + 1, updated_at = now() where id = $1 returning *`, [task.id, u.id]);
         await db.query(`insert into comments (tenant_id, task_id, author_id, body, kind) values ($1,$2,null,$3,'system')`,

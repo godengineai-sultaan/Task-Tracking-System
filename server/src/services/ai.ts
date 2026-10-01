@@ -8,6 +8,7 @@ import { audit } from '../lib/audit.js';
 import { AppError, badRequest, forbidden } from '../lib/errors.js';
 import { type Actor, isStaff } from './access.js';
 import { buildReport } from './analytics.js';
+import { actorScope } from './ext/portfolio-scope.js';
 
 /**
  * Optional AI drafting. Drafts are proposals only: nothing is created, completed or submitted until the
@@ -110,7 +111,7 @@ export async function draftRecap(a: Actor, date: string) {
   const st = aiStatus(a);
   if (!st.available) throw new AppError(503, 'ai_unavailable', st.note);
   // Facts are read in a short transaction of their own; the model call below runs with none open.
-  const r = await withTenant(a.tenantId, (db) => buildReport(db, a.id, 'day', date, date));
+  const r = await withTenant(a.tenantId, (db) => buildReport(db, a.id, 'day', date, date), actorScope(a));
   const d: any = r.days[0];
   const facts = {
     date, availableMinutes: d.capacity.availableMinutes, confirmedMinutes: d.time.explainedMinutes, unknownMinutes: d.time.unknownMinutes, byCategory: d.time.byCategory,
