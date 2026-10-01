@@ -49,40 +49,73 @@ export type LogoMime = 'image/png' | 'image/jpeg' | 'image/svg+xml';
 const SVG_ELEMENTS = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'textpath', 'defs',
   'lineargradient', 'radialgradient', 'stop', 'clippath', 'mask', 'title', 'desc', 'use', 'symbol', 'pattern', 'style', 'metadata', 'filter',
   'fegaussianblur', 'feoffset', 'feblend', 'fecolormatrix', 'feflood', 'fecomposite', 'femerge', 'femergenode', 'fedropshadow']);
-// Inert editor metadata namespaces (Inkscape, RDF licence blocks).
+// Inert editor metadata namespaces (Inkscape, RDF licence blocks). A prefix is only inert while it is bound to its real namespace:
+// xmlns:dc="http://www.w3.org/2000/svg" would turn <dc:script> into a live SVG script element.
 const SVG_META_PREFIXES = new Set(['sodipodi', 'inkscape', 'rdf', 'cc', 'dc']);
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const NS_BINDINGS: Record<string, string[]> = {
+  sodipodi: ['http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd'], inkscape: ['http://www.inkscape.org/namespaces/inkscape'],
+  rdf: ['http://www.w3.org/1999/02/22-rdf-syntax-ns#'], cc: ['http://creativecommons.org/ns#', 'http://web.resource.org/cc/'], dc: ['http://purl.org/dc/elements/1.1/'],
+  svg: [SVG_NS], xlink: ['http://www.w3.org/1999/xlink'],
+};
 const decodeEntities = (s: string) => s
   .replace(/&#x([0-9a-f]+);?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) % 0x110000))
   .replace(/&#(\d+);?/g, (_, d) => String.fromCodePoint(Number(d) % 0x110000));
+/** Checked after XML entity and CSS escape decoding (u\72l( is url(), with whitespace removed (stricter than CSS itself). */
 const unsafeCss = (css: string) => {
-  const c = decodeEntities(css).replace(/\\/g, '').replace(/\s+/g, '').toLowerCase();
-  return /@import|expression\(|javascript:|behavior:|-moz-binding/.test(c) || /url\((?!['"]?#)/.test(c);
+  const c = decodeEntities(css)
+    .replace(/\\([0-9a-f]{1,6})[ \t\r\n\f]?/gi, (_, h) => String.fromCodePoint(parseInt(h, 16) % 0x110000))
+    .replace(/\\([\s\S])/g, '$1').replace(/\s+/g, '').toLowerCase();
+  return /@import|expression\(|javascript:|behavior:|-moz-binding|image-set\(/.test(c) || /url\((?!['"]?#)/.test(c);
 };
+
+// One left-to-right pass, as an XML parser reads it: comment, CDATA, processing instruction, declaration, tag, or a stray "<" (malformed).
+const TOKEN = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<\?[\s\S]*?\?>|<!|<(\/?)([A-Za-z_][\w:.-]*)((?:[^<>"']|"[^"<]*"|'[^'<]*')*)>|</g;
+const ATTR = /([^\s=/>"']+)\s*=\s*(?:"([^"<]*)"|'([^'<]*)')/g;
+const NOT_SVG = 'The file is not a valid SVG.';
+const NO_ROOT = 'The file is not a valid SVG (it must start with an <svg> element).';
+const BAD_CSS = 'SVG styles may not import or reference external resources.';
 
 /** Returns a reason when the SVG is unsafe to serve; null when it only contains inert drawing markup. */
 export function svgProblem(text: string): string | null {
-  if (text.includes('\u0000')) return 'The file is not a valid SVG.';
-  if (/<!doctype|<!entity/i.test(text)) return 'SVG files with DOCTYPE or ENTITY declarations are not accepted.';
-  const body = text.replace(/^﻿/, '').replace(/<!--[\s\S]*?-->/g, '');
-  const pis = body.match(/<\?[\s\S]*?\?>/g) ?? [];
-  if (pis.some((p, i) => i > 0 || !/^<\?xml\s/i.test(p))) return 'SVG processing instructions (such as stylesheets) are not accepted.';
-  const tags = [...body.matchAll(/<\s*([A-Za-z][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)];
-  if (!tags.length || tags[0][1].toLowerCase() !== 'svg') return 'The file is not a valid SVG (it must start with an <svg> element).';
-  for (const [, rawName, attrs] of tags) {
+  if (text.includes('\u0000')) return NOT_SVG;
+  const enc = /^\uFEFF?\s*<\?xml\s[^?]*?encoding\s*=\s*["']([^"']*)["']/i.exec(text);
+  if (enc && !/^utf-?8$/i.test(enc[1])) return 'SVG files must be UTF-8 encoded.';
+  let root = false, inStyle = false, css = '', last = 0;
+  for (const m of text.matchAll(TOKEN)) {
+    const [tok, cdata, close, rawName, attrs] = m;
+    if (inStyle) css += text.slice(last, m.index);
+    last = m.index! + tok.length;
+    if (tok.startsWith('<!--')) continue;
+    if (cdata !== undefined) { if (inStyle) css += cdata; continue; }
+    if (tok.startsWith('<?')) {
+      if (!/^<\?xml\s/i.test(tok) || text.slice(0, m.index).replace(/^\uFEFF/, '').trim()) return 'SVG processing instructions (such as stylesheets) are not accepted.';
+      continue;
+    }
+    if (tok === '<!') return 'SVG files with DOCTYPE or ENTITY declarations are not accepted.';
+    if (rawName === undefined) return NOT_SVG;
     const name = rawName.toLowerCase();
+    if (close) { if (attrs.trim()) return NOT_SVG; if (name === 'style') inStyle = false; continue; }
+    if (!root && name !== 'svg') return NO_ROOT;
+    root = true;
     const prefix = name.includes(':') ? name.split(':')[0] : null;
     if (prefix ? !SVG_META_PREFIXES.has(prefix) : !SVG_ELEMENTS.has(name)) return `SVG element <${rawName}> is not allowed in a logo (scripts, embedded content and links are rejected).`;
-    for (const [, an, dq, sq, bare] of attrs.matchAll(/([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
-      const attr = an.toLowerCase(), value = dq ?? sq ?? bare ?? '';
+    if (!['', '/'].includes(attrs.replace(ATTR, '').trim())) return NOT_SVG;
+    for (const [, an, dq, sq] of attrs.matchAll(ATTR)) {
+      const attr = an.toLowerCase(), value = dq ?? sq ?? '';
       const v = decodeEntities(value).replace(/[\s\u0000-\u001f]/g, '').toLowerCase();
+      const bound = attr === 'xmlns' ? [SVG_NS] : attr.startsWith('xmlns:') ? NS_BINDINGS[attr.slice(6)] : undefined;
+      if (bound && !bound.includes(value.trim())) return 'SVG namespace declarations may only use the SVG namespace and inert editor metadata.';
       if (attr.startsWith('on')) return 'SVG event handler attributes (scripts) are not allowed.';
       if (/(^|:)href$/.test(attr) && !v.startsWith('#')) return 'SVG links to other files or URLs are not allowed in a logo.';
       if (/javascript:|vbscript:|data:/.test(v)) return 'SVG attributes may not contain script or data URLs.';
-      if (unsafeCss(value)) return 'SVG styles may not import or reference external resources.';
+      if (unsafeCss(value)) return BAD_CSS;
     }
+    if (name === 'style' && !attrs.trimEnd().endsWith('/')) inStyle = true;
   }
-  for (const m of body.matchAll(/<style[^>]*>([\s\S]*?)<\/style\s*>/gi)) if (unsafeCss(m[1].replace(/<!\[CDATA\[|\]\]>/g, ''))) return 'SVG styles may not import or reference external resources.';
-  return null;
+  if (!root) return NO_ROOT;
+  if (inStyle) css += text.slice(last);
+  return unsafeCss(css) ? BAD_CSS : null;
 }
 
 /** Identify the logo by content (never trust the declared type) and validate it. */

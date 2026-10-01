@@ -64,7 +64,8 @@ export async function buildHighlights(db: Db, tenantId: string, projectId: strin
   const milestones = await many(db, `select m.id, m.name, m.due_date, m.status,
       count(*) filter (where t.status = 'done')::int done, count(*) filter (where t.status <> 'cancelled')::int total
     from milestones m join tasks t on t.milestone_id = m.id and t.project_id = m.project_id and t.customer_visible
-    where m.project_id = $1 and m.status <> 'cancelled' group by m.id order by m.due_date nulls last, m.name`, [projectId]);
+    where m.project_id = $1 and m.status <> 'cancelled' group by m.id
+    having count(*) filter (where t.status <> 'cancelled') > 0 order by m.due_date nulls last, m.name`, [projectId]);
   const completed = await many(db, `select t.id, t.title, m.name milestone, (coalesce(t.accepted_at, t.done_at) at time zone $4)::date::text completed_on
     from tasks t left join milestones m on m.id = t.milestone_id
     where t.project_id = $1 and t.customer_visible and t.status = 'done' and (coalesce(t.accepted_at, t.done_at) at time zone $4)::date between $2 and $3
@@ -84,12 +85,20 @@ export async function buildHighlights(db: Db, tenantId: string, projectId: strin
   };
 }
 
-/** Defence in depth: drop anything that is no longer shared with the client (sharing can be withdrawn after a draft is built). */
-async function pruneToVisible(db: Db, projectId: string, h: Highlights): Promise<Highlights> {
-  const vis = new Set((await many(db, `select id from tasks where project_id = $1 and customer_visible`, [projectId])).map((r) => r.id));
-  const ms = new Set((await many(db, `select distinct milestone_id id from tasks where project_id = $1 and customer_visible and milestone_id is not null`, [projectId])).map((r) => r.id));
-  return { ...h, milestones: (h.milestones ?? []).filter((m) => ms.has(m.id)), completed: (h.completed ?? []).filter((t) => vis.has(t.id)), upcoming: (h.upcoming ?? []).filter((t) => vis.has(t.id)) };
+/** What is currently shared with the client, per project (one query for any number of projects). */
+type Visible = { tasks: Set<string>; milestones: Set<string> };
+async function loadVisibility(db: Db, projectIds: string[]) {
+  const out = new Map<string, Visible>(projectIds.map((id) => [id, { tasks: new Set<string>(), milestones: new Set<string>() }]));
+  for (const r of await many(db, `select id, project_id, milestone_id from tasks where project_id = any($1::uuid[]) and customer_visible`, [projectIds])) {
+    const v = out.get(r.project_id)!; v.tasks.add(r.id); if (r.milestone_id) v.milestones.add(r.milestone_id);
+  }
+  return out;
 }
+/** Defence in depth: drop anything that is no longer shared with the client (sharing can be withdrawn after a draft is built). */
+function pruneWith(h: Highlights, v: Visible): Highlights {
+  return { ...h, milestones: (h.milestones ?? []).filter((m) => v.milestones.has(m.id)), completed: (h.completed ?? []).filter((t) => v.tasks.has(t.id)), upcoming: (h.upcoming ?? []).filter((t) => v.tasks.has(t.id)) };
+}
+async function pruneToVisible(db: Db, projectId: string, h: Highlights) { return pruneWith(h, (await loadVisibility(db, [projectId])).get(projectId)!); }
 
 /** Monday..Sunday of the week containing `now` (tenant local). */
 export function weekPeriod(now: DateTime) {
@@ -102,8 +111,8 @@ export async function createDraft(db: Db, a: Actor | null, tenantId: string, pro
   if (end < start) throw badRequest('The period must end on or after its start');
   if (DateTime.fromISO(end).diff(DateTime.fromISO(start), 'days').days > 92) throw badRequest('A client update can cover at most 92 days');
   const highlights = await buildHighlights(db, tenantId, projectId, start, end);
-  const row = await one(db, `insert into client_updates (tenant_id, project_id, period_start, period_end, highlights, source, created_by, updated_by)
-    values ($1,$2,$3,$4,$5,$6,$7,$7) on conflict (tenant_id, project_id, period_start, period_end) do nothing returning *`,
+  const row = await one(db, `insert into client_updates (tenant_id, project_id, customer_id, period_start, period_end, highlights, source, created_by, updated_by)
+    values ($1,$2,(select customer_id from projects where id = $2),$3,$4,$5,$6,$7,$7) on conflict (tenant_id, project_id, period_start, period_end) do nothing returning *`,
     [tenantId, projectId, start, end, highlights, source, a?.id ?? null]);
   if (!row) return { update: await one(db, `select * from client_updates where project_id = $1 and period_start = $2 and period_end = $3`, [projectId, start, end]), created: false };
   await audit(db, { tenantId, actorId: a?.id ?? null, action: 'client_update.create', resourceType: 'client_update', resourceId: row.id, resourceVersion: row.version,
@@ -119,6 +128,8 @@ export async function createWeeklyDrafts(db: Db, tenantId: string, now?: DateTim
   const local = (now ?? DateTime.now()).setZone(await tenantTz(db, tenantId));
   if (local.weekday !== 5 || local.hour < 12) return 0;
   const { start, end } = weekPeriod(local);
+  // Once per tenant per week (atomic claim, rolled back with the job on failure): a draft someone discarded is not re-created next hour.
+  if (!(await one(db, `update tenant_branding set weekly_last_period = $2 where tenant_id = $1 and weekly_last_period is distinct from $2::date returning 1 ok`, [tenantId, start]))) return 0;
   const projects = await many(db, `select p.id, p.name, p.owner_id from projects p where p.customer_id is not null and p.status in ('active','on_hold')
     and exists (select 1 from tasks t where t.project_id = p.id and t.customer_visible)`);
   let n = 0;
@@ -133,48 +144,54 @@ export async function createWeeklyDrafts(db: Db, tenantId: string, now?: DateTim
 }
 
 // ---------- Reading ----------
-const SELECT = `select cu.*, p.name project_name, p.key project_key, p.customer_id, p.owner_id project_owner_id, p.status project_status, c.name customer_name,
+const SELECT = `select cu.*, p.name project_name, p.key project_key, p.customer_id project_customer_id, p.owner_id project_owner_id, p.status project_status, c.name customer_name,
     pb.name published_by_name, ub.name updated_by_name, cb.name created_by_name
   from client_updates cu join projects p on p.id = cu.project_id left join customers c on c.id = p.customer_id
   left join users pb on pb.id = cu.published_by left join users ub on ub.id = cu.updated_by left join users cb on cb.id = cu.created_by`;
 
 /** Exactly what the client sees. Used for the customer portal, the staff preview and the PDF. */
-async function clientView(db: Db, r: any) {
+function clientView(r: any, v: Visible) {
   return {
     id: r.id, projectId: r.project_id, projectName: r.project_name, projectKey: r.project_key, customerName: r.customer_name,
     periodStart: r.period_start, periodEnd: r.period_end, summary: r.summary, publishedAt: r.published_at, publishedByName: r.published_by_name,
-    highlights: await pruneToVisible(db, r.project_id, r.highlights),
+    highlights: pruneWith(r.highlights, v),
   };
 }
-async function staffView(db: Db, a: Actor, r: any) {
-  return { ...(await clientView(db, r)), status: r.status, version: r.version, source: r.source, createdAt: r.created_at, updatedAt: r.updated_at,
+function staffView(a: Actor, r: any, v: Visible) {
+  return { ...clientView(r, v), status: r.status, version: r.version, source: r.source, createdAt: r.created_at, updatedAt: r.updated_at,
     createdByName: r.created_by_name, updatedByName: r.updated_by_name, canEdit: canManage(a, { owner_id: r.project_owner_id }) };
 }
 
 export async function listUpdates(db: Db, a: Actor, f: { projectId?: string; status?: 'draft' | 'published' }) {
   if (has(a, 'customer')) {
     if (!a.customerId) return [];
-    const rows = await many(db, `${SELECT} where p.customer_id = $1 and p.status <> 'archived' and cu.status = 'published' and ($2::uuid is null or cu.project_id = $2)
+    const rows = await many(db, `${SELECT} where p.customer_id = $1 and cu.customer_id = $1 and p.status <> 'archived' and cu.status = 'published' and ($2::uuid is null or cu.project_id = $2)
       order by cu.period_end desc, cu.published_at desc limit 100`, [a.customerId, f.projectId ?? null]);
-    return Promise.all(rows.map((r) => clientView(db, r)));
+    const vis = await loadVisibility(db, [...new Set(rows.map((r) => r.project_id as string))]);
+    return rows.map((r) => clientView(r, vis.get(r.project_id)!));
   }
   const all = has(a, 'leadership') || has(a, 'system_admin');
   const rows = await many(db, `${SELECT} where p.customer_id is not null and ($1::boolean or p.owner_id = $2) and ($3::uuid is null or cu.project_id = $3)
     and ($4::text is null or cu.status = $4) order by cu.period_end desc, cu.updated_at desc limit 200`, [all, a.id, f.projectId ?? null, f.status ?? null]);
-  return Promise.all(rows.map((r) => staffView(db, a, r)));
+  const vis = await loadVisibility(db, [...new Set(rows.map((r) => r.project_id as string))]);
+  return rows.map((r) => staffView(a, r, vis.get(r.project_id)!));
 }
 
 async function loadRow(db: Db, id: string) { return one(db, `${SELECT} where cu.id = $1`, [id]); }
 
-/** Customers: only published updates of their own (non-archived) projects. Staff: only projects they can manage. Anything else is "not found". */
+/**
+ * Customers: only published updates addressed to them, of their own (non-archived) projects. Staff: only projects they can manage.
+ * Anything else is "not found".
+ */
 export async function getUpdate(db: Db, a: Actor, id: string) {
   const r = await loadRow(db, id);
   if (has(a, 'customer')) {
-    if (!r || r.status !== 'published' || !a.customerId || r.customer_id !== a.customerId || r.project_status === 'archived') throw notFound('Update not found');
-    return clientView(db, r);
+    if (!r || r.status !== 'published' || !a.customerId || r.customer_id !== a.customerId || r.project_customer_id !== a.customerId
+      || r.project_status === 'archived') throw notFound('Update not found');
+    return clientView(r, (await loadVisibility(db, [r.project_id])).get(r.project_id)!);
   }
   if (!r || !canManage(a, { owner_id: r.project_owner_id })) throw notFound('Update not found');
-  return staffView(db, a, r);
+  return staffView(a, r, (await loadVisibility(db, [r.project_id])).get(r.project_id)!);
 }
 
 async function loadEditable(db: Db, a: Actor, id: string) {
@@ -216,10 +233,12 @@ export async function publishUpdate(db: Db, a: Actor, id: string, version: numbe
   if (r.status !== 'draft') throw conflict('This update is already published.');
   if (!r.summary.trim()) throw badRequest('Write a summary for the client before publishing.');
   const highlights = await pruneToVisible(db, r.project_id, r.highlights);
-  const u = await bump(db, id, version, `status = 'published', highlights = $3, published_by = $4, published_at = now(), updated_by = $4`, [highlights, a.id], 'draft');
+  // Addressed to the project's current client: the one named in the publish confirmation.
+  const u = await bump(db, id, version, `status = 'published', highlights = $3, published_by = $4, published_at = now(), updated_by = $4, customer_id = $5`,
+    [highlights, a.id, r.project_customer_id], 'draft');
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'client_update.publish', resourceType: 'client_update', resourceId: id, resourceVersion: u.version,
-    authority: 'explicit publish by staff', details: { projectId: r.project_id, customerId: r.customer_id, periodStart: r.period_start, periodEnd: r.period_end } });
-  const clients = await many(db, `select id from users where customer_id = $1 and status = 'active' and 'customer' = any(roles)`, [r.customer_id]);
+    authority: 'explicit publish by staff', details: { projectId: r.project_id, customerId: r.project_customer_id, periodStart: r.period_start, periodEnd: r.period_end } });
+  const clients = await many(db, `select id from users where customer_id = $1 and status = 'active' and 'customer' = any(roles)`, [r.project_customer_id]);
   for (const c of clients) await notify(db, a.tenantId, c.id, 'client_update', `New update: ${r.project_name}`, `Update for ${r.period_start} to ${r.period_end}`, `/portal?update=${id}`);
   return getUpdate(db, a, id);
 }
@@ -247,7 +266,7 @@ const fmtDay = (d: string | null) => (d ? DateTime.fromISO(d).toFormat('d LLL yy
 const STATUS: Record<string, string> = { backlog: 'Not started', planned: 'Planned', in_progress: 'In progress', blocked: 'Waiting', in_review: 'In review', done: 'Done', cancelled: 'Cancelled' };
 
 /** Branded PDF of the client view. Helvetica only (no arrows or check marks). */
-export function renderUpdatePdf(v: Awaited<ReturnType<typeof clientView>> & { status?: string }, brand: PdfBrand): Promise<Buffer> {
+export function renderUpdatePdf(v: ReturnType<typeof clientView> & { status?: string }, brand: PdfBrand): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 48, info: { Title: `${v.projectName} update ${v.periodStart} to ${v.periodEnd}`, Author: brand.name } });
     const chunks: Buffer[] = [];

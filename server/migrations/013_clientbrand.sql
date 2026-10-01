@@ -8,6 +8,8 @@ create table tenant_branding (
   logo_file_id uuid references stored_files(id) on delete set null,
   -- Optional weekly tick that prepares drafts (never publishes).
   weekly_drafts boolean not null default false,
+  -- Monday of the last week the scheduled tick prepared drafts for: drafts are prepared once per week, so a discarded one is not re-created.
+  weekly_last_period date,
   version int not null default 1,
   updated_by uuid references users(id) on delete set null,
   updated_at timestamptz not null default now()
@@ -17,6 +19,9 @@ create table client_updates (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references tenants(id) on delete cascade,
   project_id uuid not null references projects(id) on delete cascade,
+  -- The client the update is addressed to (set when drafted and again when published). Clients only see updates addressed to them,
+  -- so moving a project to another client never hands the new client what was written for the previous one.
+  customer_id uuid references customers(id) on delete set null,
   period_start date not null,
   period_end date not null,
   status text not null default 'draft' check (status in ('draft','published')),

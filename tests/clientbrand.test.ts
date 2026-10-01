@@ -59,6 +59,9 @@ beforeAll(async () => {
     ids.doneInternal = await task('Salary benchmark SECRETDONE', { visible: false, status: 'done', doneAgoDays: 0, ms: ids.msInternal });
     ids.openInternal = await task('Refactor auth SECRETOPEN', { visible: false, status: 'planned', dueIn: 3, ms: ids.msShared });
     await task('Beta shared item', { visible: true, status: 'done', doneAgoDays: 0, project: ids.projB });
+    // A shared milestone whose only shared task was cancelled: progress is not applicable, so it must not show as "0 of 0 (0%)".
+    ids.msDropped = (await q1(`insert into milestones (tenant_id, project_id, name) values ($1,$2,'Dropped scope DROPPEDMS') returning id`, [T, ids.projA])).id;
+    await task('Dropped deliverable', { visible: true, status: 'cancelled', ms: ids.msDropped });
     await db.query(`insert into comments (tenant_id, task_id, author_id, body) values ($1,$2,$3,'internal note SECRETNOTE')`, [T, ids.doneShared, org.users.manager]);
     await db.query(`insert into time_entries (tenant_id, user_id, task_id, category, started_at, ended_at, source, note) values ($1,$2,$3,'task',now() - interval '2 hours', now() - interval '1 hour', 'manual', 'SECRETTIME')`,
       [T, org.users.emp, ids.doneShared]);
@@ -119,7 +122,29 @@ describe('branding: logo validation and authorization', () => {
       '<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(https://x.example/p)"/></svg>',
       '<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x "y">]><svg xmlns="http://www.w3.org/2000/svg"/>',
       '<?xml version="1.0"?><?xml-stylesheet href="https://x.example/a.css"?><svg xmlns="http://www.w3.org/2000/svg"/>',
+      // An "editor metadata" prefix rebound to the SVG namespace turns <dc:script> into a real SVG script element.
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:dc="http://www.w3.org/2000/svg"><dc:script>alert(1)</dc:script></svg>',
+      // CDATA that looks like a comment opener must not hide the markup that follows it.
+      '<svg xmlns="http://www.w3.org/2000/svg"><style><![CDATA[<!--]]></style><script>alert(1)</script><style><![CDATA[-->]]></style></svg>',
+      // CSS escapes spell url( / @import.
+      '<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:u\\72l(https://x.example/p)"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>@\\69mport "https://x.example/a.css";</style></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>rect{fill:image-set("https://x.example/a.png" 1x)}</style></svg>',
+      // A non-UTF-8 declared encoding is decoded differently by the browser than by the validator.
+      '<?xml version="1.0" encoding="ISO-2022-JP"?><svg xmlns="http://www.w3.org/2000/svg"/>',
+      // Switching the default namespace to XHTML.
+      '<svg xmlns="http://www.w3.org/2000/svg"><g xmlns="http://www.w3.org/1999/xhtml"/></svg>',
+      // Malformed markup the validator cannot tokenise.
+      '<svg xmlns="http://www.w3.org/2000/svg"><rect x="1<2"/>< script>alert(1)</script></svg>',
     ];
+    // Typical editor output stays accepted.
+    const inkscape = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<!-- Created with Inkscape -->\n<svg xmlns:dc="http://purl.org/dc/elements/1.1/" '
+      + 'xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg" '
+      + 'xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">'
+      + '<metadata><rdf:RDF><cc:Work rdf:about=""><dc:format>image/svg+xml</dc:format></cc:Work></rdf:RDF></metadata>'
+      + '<sodipodi:namedview inkscape:zoom="1" /><style type="text/css"><![CDATA[ .a { fill: #0f766e; } ]]></style><rect class="a" width="10" height="10"/>'
+      + '<text x="1" y="9">A &amp; B &lt; C</text></svg>';
+    expect(validateLogo(Buffer.from(inkscape))).toEqual({ mime: 'image/svg+xml' });
     for (const s of bad) expect(validateLogo(Buffer.from(s)), s).toHaveProperty('error');
     expect(validateLogo(Buffer.from('hello world'))).toHaveProperty('error');
     expect(validateLogo(Buffer.concat([PNG, Buffer.alloc(201 * 1024)]))).toEqual({ error: 'Logo must be 200 KB or smaller.' });
@@ -279,6 +304,15 @@ describe('client updates: draft content', () => {
       expect((await otherAdmin.get(`/api/client-updates/${draft.id}`)).status).toBe(404);
       expect((await otherAdmin.get('/api/client-updates')).body).toEqual([]);
     });
+    it('moving a project to another client does not hand that client the updates written for the previous one', async () => {
+      expect((await admin.patch(`/api/projects/${ids.projA}`, { customerId: ids.custB })).status).toBe(200);
+      expect((await clientB.get('/api/client-updates')).body.map((x: any) => x.id)).not.toContain(draft.id);
+      expect((await clientB.get(`/api/client-updates/${draft.id}`)).status).toBe(404);
+      expect((await clientB.get(`/api/client-updates/${draft.id}/pdf`)).status).toBe(404);
+      expect((await clientA.get(`/api/client-updates/${draft.id}`)).status).toBe(404);
+      expect((await admin.patch(`/api/projects/${ids.projA}`, { customerId: ids.custA })).status).toBe(200);
+      expect((await clientA.get(`/api/client-updates/${draft.id}`)).status).toBe(200);
+    });
     it('archived projects disappear from the portal', async () => {
       await withOwner((db) => db.query(`update projects set status = 'archived' where id = $1`, [ids.projA]));
       expect((await clientA.get('/api/client-updates')).body).toEqual([]);
@@ -303,6 +337,20 @@ describe('weekly drafts tick', () => {
     const note = (await mgr.get('/api/client-updates?status=draft')).body.filter((x: any) => x.source === 'scheduled');
     expect(note).toHaveLength(2);
     expect((await clientA.get('/api/client-updates')).body.every((x: any) => x.periodStart !== '2026-09-21')).toBe(true);
+  });
+  it('does not re-create (or re-notify about) a scheduled draft that a person discarded later the same Friday', async () => {
+    const drafts = (await mgr.get('/api/client-updates?status=draft')).body.filter((x: any) => x.source === 'scheduled' && x.periodStart === '2026-09-21');
+    expect(drafts).toHaveLength(2);
+    expect((await mgr.del(`/api/client-updates/${drafts[0].id}`, { version: drafts[0].version })).status).toBe(200);
+    const notesBefore = await withOwner(async (db) => (await db.query(`select count(*)::int n from notifications where user_id = $1 and kind = 'client_update_draft'`, [org.users.manager])).rows[0].n);
+    const friday = DateTime.fromISO('2026-09-25T13:00', { zone: org.tz });
+    expect(await withTenant(org.tenantId, (db) => createWeeklyDrafts(db, org.tenantId, friday.plus({ hours: 3 })))).toBe(0);
+    const rows = await withOwner(async (db) => (await db.query(`select id from client_updates where tenant_id = $1 and period_start = '2026-09-21'`, [org.tenantId])).rows);
+    expect(rows).toHaveLength(1);
+    const notesAfter = await withOwner(async (db) => (await db.query(`select count(*)::int n from notifications where user_id = $1 and kind = 'client_update_draft'`, [org.users.manager])).rows[0].n);
+    expect(notesAfter).toBe(notesBefore);
+    // A different week is prepared normally.
+    expect(await withTenant(org.tenantId, (db) => createWeeklyDrafts(db, org.tenantId, friday.minus({ days: 7 })))).toBe(2);
   });
   it('runs as a registered tenant job', async () => {
     await withOwner((db) => db.query(`insert into jobs (tenant_id, kind, payload) values ($1, 'clientbrand.weekly', '{}')`, [org.tenantId]));

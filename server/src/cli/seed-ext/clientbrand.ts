@@ -63,7 +63,7 @@ export default async function seed(ctx: SeedCtx) {
   const last = weekPeriod(today.minus({ weeks: 1 }));
   const publishedAt = today.minus({ weeks: 1 }).startOf('week').plus({ days: 4, hours: 16 });
   await ins('client_updates', {
-    project_id: P.WEB.id, period_start: last.start, period_end: last.end, status: 'published', source: 'manual',
+    project_id: P.WEB.id, customer_id: P.WEB.customer_id, period_start: last.start, period_end: last.end, status: 'published', source: 'manual',
     summary: 'Good progress on the order tracking beta this week. The completed items are listed below. Next week we focus on the remaining tracking '
       + 'features and on preparing the UAT plan with your team. Please send any feedback on the tracking page to Priya.',
     highlights: await buildHighlights(db, T, P.WEB.id, last.start, last.end),
@@ -72,7 +72,7 @@ export default async function seed(ctx: SeedCtx) {
   });
   const week = weekPeriod(today);
   await ins('client_updates', {
-    project_id: P.WEB.id, period_start: week.start, period_end: week.end, status: 'draft', source: 'scheduled', summary: '',
+    project_id: P.WEB.id, customer_id: P.WEB.customer_id, period_start: week.start, period_end: week.end, status: 'draft', source: 'scheduled', summary: '',
     highlights: await buildHighlights(db, T, P.WEB.id, week.start, week.end),
   });
 }
