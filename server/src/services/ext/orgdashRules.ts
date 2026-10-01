@@ -202,7 +202,7 @@ export function insightsCsv(d: any) {
     ...d.cycleTime.byCategory.map((c: any) => [c.category, c.accepted, c.n, n(c.medianHours), n(c.p75Hours)]));
   rows.push([], ['Cycle time distribution'], ['bucket', 'count'], ...d.cycleTime.distribution.map((b: any) => [b.label, b.count]));
   rows.push([], ['Departments (alphabetical)'], ['department', 'people', 'recap_adoption', 'logging_coverage', 'planned_completion', 'accepted_outcomes', 'deadline_reliability', 'meeting_share', 'rework_rate'],
-    ...d.groups.map((g: any) => (g.suppressed ? [g.name, g.people, 'withheld (small group)'] : [g.name, g.people, rc(g.metrics.recapAdoption), rc(g.metrics.loggingCoverage),
+    ...d.groups.map((g: any) => (g.suppressed ? [g.name, g.people, 'withheld (small group protection)'] : [g.name, g.people, rc(g.metrics.recapAdoption), rc(g.metrics.loggingCoverage),
       rc(g.metrics.plannedCompletion), g.metrics.acceptedOutcomes, rc(g.metrics.deadlineReliability), rc(g.metrics.meetingShare), rc(g.metrics.reworkRate)])));
   rows.push([], [`Workload: next ${d.workload.horizonWorkingDays} working days. ${d.workload.note}`]);
   if (d.workload.rows) {
@@ -210,7 +210,7 @@ export function insightsCsv(d: any) {
       ...d.workload.rows.map((r: any) => [r.name, r.department ?? '', r.openTasks, r.estimatedTasks, r.estimatedMinutes, r.availableMinutes, rc(r.load), r.inProgress, r.blocked, r.inReview, r.overdue]));
   } else {
     rows.push(['department', 'people', 'open_tasks', 'estimated_min', 'available_min', 'load'],
-      ...d.workload.byGroup.map((g: any) => (g.suppressed ? [g.name, g.people, 'withheld (small group)'] : [g.name, g.people, g.openTasks, g.estimatedMinutes, g.availableMinutes, rc(g.load)])));
+      ...d.workload.byGroup.map((g: any) => (g.suppressed ? [g.name, g.people, 'withheld (small group protection)'] : [g.name, g.people, g.openTasks, g.estimatedMinutes, g.availableMinutes, rc(g.load)])));
   }
   rows.push([], ['Observations (rule-based)'], ['severity', 'observation', 'facts', 'assumptions'],
     ...d.observations.map((o: Observation) => [o.severity, o.title, o.facts.join(' | '), o.assumptions.join(' | ')]));

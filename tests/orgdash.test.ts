@@ -251,6 +251,51 @@ describe('scope enforcement', () => {
   });
 });
 
+describe('review fixes', () => {
+  // 5 active people: Eng = manager, emp, outsider (3); Ops = admin, founder (2); emp2 deactivated.
+  let o3: Org; let D3: Record<string, string>;
+  beforeAll(async () => {
+    o3 = await makeOrg();
+    D3 = {};
+    await withOwner(async (db) => {
+      D3.eng = (await db.query(`insert into departments (tenant_id, name) values ($1, 'Eng') returning id`, [o3.tenantId])).rows[0].id;
+      D3.ops = (await db.query(`insert into departments (tenant_id, name) values ($1, 'Ops') returning id`, [o3.tenantId])).rows[0].id;
+      await db.query(`update users set department_id = $1 where id = any($2::uuid[])`, [D3.eng, [o3.users.manager, o3.users.emp, o3.users.outsider]]);
+      await db.query(`update users set department_id = $1 where id = any($2::uuid[])`, [D3.ops, [o3.users.admin, o3.users.founder]]);
+      await db.query(`update users set status = 'deactivated' where id = $1`, [o3.users.emp2]);
+    });
+  });
+  it('leadership-only: a withheld small group cannot be worked out as total minus visible groups', async () => {
+    const f3 = await login(o3, 'founder');
+    const r = (await f3.get(`/api/insights?${P}`)).body;
+    expect(r.scope).toMatchObject({ perPerson: false, people: 5 });
+    expect(r.totals).not.toBeNull();
+    // Ops (2) alone would be withheld, but company (5) minus Eng (3) would reveal it: Eng must be withheld too.
+    expect(r.groups.map((g: any) => [g.name, g.suppressed, g.metrics === null])).toEqual([['Eng', true, true], ['Ops', true, true]]);
+    expect(r.workload.byGroup.every((g: any) => g.suppressed)).toBe(true);
+    // A department filter whose complement is 1-2 people is withheld too.
+    const eng = (await f3.get(`/api/insights?${P}&departmentId=${D3.eng}`)).body;
+    expect(eng.suppressed).toBeTruthy();
+    expect(eng.totals).toBeNull();
+    // The main admin still sees both departments.
+    const a3 = await login(o3, 'admin');
+    expect((await a3.get(`/api/insights?${P}`)).body.groups.map((g: any) => g.suppressed)).toEqual([false, false]);
+  });
+  it('team scope covers active staff only, like company scope', async () => {
+    const m3 = await login(o3, 'manager');
+    const r = (await m3.get(`/api/insights?${P}`)).body;
+    expect(r.scope).toMatchObject({ mode: 'team', people: 1 });
+    expect(r.workload.rows.map((x: any) => x.name)).toEqual(['Emp']);
+  });
+  it('rejects impossible calendar dates with 400, not a server error', async () => {
+    expect((await admin.get('/api/insights?start=2025-02-30&end=2025-03-10')).status).toBe(400);
+    expect((await admin.get('/api/insights?start=2025-03-01&end=2025-13-01')).status).toBe(400);
+  });
+  it('an export with an invalid period is refused when requested, not left to fail in the worker', async () => {
+    expect((await admin.post('/api/exports', { format: 'csv', report: 'insights', params: { start: '2025-03-10', end: '2025-03-01' } })).status).toBe(400);
+  });
+});
+
 describe('no ranking', () => {
   it('has no rank or score fields and orders people alphabetically, not by load', async () => {
     const r = (await admin.get(`/api/insights?${P}`)).body;

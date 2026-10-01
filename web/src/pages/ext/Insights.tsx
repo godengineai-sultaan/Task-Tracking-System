@@ -243,13 +243,13 @@ function Groups({ d }: { d: any }) {
   if (d.groups.length < 2) return null;
   const th = 'px-3 py-2 text-right font-medium';
   return (
-    <Card title="By department" subtitle={`Alphabetical. ${d.scope.perPerson ? '' : `Departments with fewer than ${d.scope.minGroup} people are withheld.`}`} padded={false}>
+    <Card title="By department" subtitle={`Alphabetical. ${d.scope.perPerson ? '' : `Departments with fewer than ${d.scope.minGroup} people, and any that would let them be worked out from the total, are withheld.`}`} padded={false}>
       <ScrollX label="Departments table"><table className="w-full min-w-[760px] text-[13px] tabular">
         <thead className="border-b border-line text-[12px] text-ink-3"><tr><th className="px-4 py-2 text-left font-medium">Department</th><th className={th}>People</th><th className={th}>Recap adoption</th>
           <th className={th}>Logging coverage</th><th className={th}>Planned completion</th><th className={th}>Accepted</th><th className={th}>Deadline reliability</th><th className={th}>Meeting load</th><th className={th}>Focus time</th></tr></thead>
         <tbody className="divide-y divide-line">{d.groups.map((g: any) => (
           <tr key={g.id ?? 'none'}><th scope="row" className="px-4 py-2 text-left font-medium">{g.name}</th><td className="px-3 text-right">{g.people}</td>
-            {g.suppressed ? <td colSpan={7} className="px-3 text-ink-3">Withheld: fewer than {d.scope.minGroup} people</td> : <>
+            {g.suppressed ? <td colSpan={7} className="px-3 text-ink-3">{g.people < d.scope.minGroup ? `Withheld: fewer than ${d.scope.minGroup} people` : 'Withheld so smaller departments cannot be worked out from the total'}</td> : <>
               <td className="px-3 text-right">{fr(g.metrics.recapAdoption)}</td><td className="px-3 text-right">{fr(g.metrics.loggingCoverage)}</td><td className="px-3 text-right">{fr(g.metrics.plannedCompletion)}</td>
               <td className="px-3 text-right">{g.metrics.acceptedOutcomes}</td><td className="px-3 text-right">{fr(g.metrics.deadlineReliability)}</td><td className="px-3 text-right">{fr(g.metrics.meetingShare)}</td>
               <td className="px-3 text-right">{fr(g.metrics.focusShare)}</td></>}
@@ -295,7 +295,7 @@ function Workload({ d }: { d: any }) {
           <tr key={r.userId ?? r.id ?? 'none'}>
             <th scope="row" className="px-4 py-2 text-left font-medium">{r.name}</th>
             {people ? <td className="px-3 text-ink-2">{r.department ?? '—'}</td> : <td className="px-3 text-right">{r.people}</td>}
-            {r.suppressed ? <td colSpan={7} className="px-3 text-ink-3">Withheld: fewer than {d.scope.minGroup} people</td> : <>
+            {r.suppressed ? <td colSpan={7} className="px-3 text-ink-3">{r.people < d.scope.minGroup ? `Withheld: fewer than ${d.scope.minGroup} people` : 'Withheld so smaller departments cannot be worked out from the total'}</td> : <>
               <td className="px-3 text-right">{r.openTasks}</td><td className="px-3 text-right">{r.estimatedTasks} of {r.openTasks}</td>
               <td className="px-3 text-right">{hm(r.estimatedMinutes)}</td><td className="px-3 text-right">{hm(r.availableMinutes)}</td>
               <td className="px-3"><LoadCell r={r.load} /></td>

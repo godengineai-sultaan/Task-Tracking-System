@@ -24,7 +24,7 @@ export const CATS = ['task', 'meeting', 'admin', 'learning', 'other'] as const;
 type Cat = (typeof CATS)[number];
 
 const uuid = z.string().uuid();
-const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => DateTime.fromISO(s).isValid, 'Not a valid calendar date');
 export const insightsQuery = z.object({
   weeks: z.coerce.number().int().refine((n) => [4, 8, 12].includes(n), 'weeks must be 4, 8 or 12').default(4),
   start: date.optional(), end: date.optional(),
@@ -92,38 +92,46 @@ export async function resolveScope(db: Db, a: Actor, q: Partial<InsightsQuery>):
   else mode = admin || !manager ? 'company' : 'team';
 
   const hideFounders = mode === 'company' && a.tenantSettings.founders_visible_to_routine_admin === false && !a.isFounder;
-  let ids: string[];
-  if (mode === 'team') ids = [...a.managedUserIds];
-  else ids = (await many(db, `select id from users where status = 'active' and not ('customer' = any(roles))
-    and ($1::boolean = false or is_founder = false or id = $2)`, [hideFounders, a.id])).map((r) => r.id);
+  // Active staff only in both modes (managedUserIds also lists deactivated or invited team members).
+  const base: string[] = (await many(db, `select id from users where status = 'active' and not ('customer' = any(roles))
+    and ($3::boolean = false or id = any($4::uuid[])) and ($1::boolean = false or is_founder = false or id = $2)`,
+    [hideFounders, a.id, mode === 'team', a.managedUserIds])).map((r) => r.id);
   const perPerson = mode === 'team' || admin;
   const notes: string[] = ['Built from recorded work evidence only. Nothing here ranks people or produces a productivity score.'];
   if (hideFounders) notes.push('Founders are excluded under your organization\'s founder-visibility policy.');
   if (!perPerson) notes.push(`Aggregates only: individual rows are not shown, and groups smaller than ${MIN_GROUP} people are withheld.`);
 
+  const filters: Set<string>[] = [];
   if (q.departmentId) {
     if (!(await one(db, `select 1 from departments where id = $1`, [q.departmentId]))) throw notFound('Department not found');
-    const r = await many(db, `select id from users where id = any($1::uuid[]) and department_id = $2`, [ids, q.departmentId]);
-    ids = r.map((x) => x.id);
+    const r = await many(db, `select id from users where id = any($1::uuid[]) and department_id = $2`, [base, q.departmentId]);
+    filters.push(new Set(r.map((x) => x.id)));
   }
   if (q.teamId) {
     const team = await one(db, `select id, manager_id from teams where id = $1`, [q.teamId]);
     if (!team) throw notFound('Team not found');
     if (mode === 'team' && team.manager_id !== a.id) throw forbidden('You can only view teams you manage');
-    const members = new Set((await many(db, `select user_id from team_members where team_id = $1`, [q.teamId])).map((x) => x.user_id));
-    ids = ids.filter((id) => members.has(id));
+    filters.push(new Set((await many(db, `select user_id from team_members where team_id = $1`, [q.teamId])).map((x) => x.user_id)));
   }
   if (q.projectId) {
     const p = await one(db, `select p.id from projects p where p.id = $1 and ($3::boolean or p.visibility = 'company' or p.owner_id = $2
       or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = $2))`, [q.projectId, a.id, admin || leader]);
     if (!p) throw notFound('Project not found');
-    const involved = new Set((await many(db, `select owner_id uid from tasks where project_id = $1 union select user_id from project_members where project_id = $1
-      union select owner_id from projects where id = $1 and owner_id is not null`, [q.projectId])).map((x) => x.uid));
-    ids = ids.filter((id) => involved.has(id));
+    filters.push(new Set((await many(db, `select owner_id uid from tasks where project_id = $1 union select user_id from project_members where project_id = $1
+      union select owner_id from projects where id = $1 and owner_id is not null`, [q.projectId])).map((x) => x.uid)));
     notes.push('Project filter: task metrics count only this project\'s tasks; time and recap metrics cover the people working on it (owner, members and task owners).');
   }
-  const suppressed = !perPerson && ids.length > 0 && ids.length < MIN_GROUP
-    ? `This selection covers fewer than ${MIN_GROUP} people. Aggregates for very small groups are withheld from leadership-only access so individuals cannot be identified.` : null;
+  /** People matching the filters whose bit is set in mask (mask 0 = the unfiltered scope). */
+  const pick = (mask: number) => base.filter((id) => filters.every((f, i) => !((mask >> i) & 1) || f.has(id)));
+  const full = (1 << filters.length) - 1;
+  const ids = pick(full);
+  let suppressed: string | null = null;
+  if (!perPerson && ids.length > 0) {
+    if (ids.length < MIN_GROUP) suppressed = `This selection covers fewer than ${MIN_GROUP} people. Aggregates for very small groups are withheld from leadership-only access so individuals cannot be identified.`;
+    // Differencing guard: a wider selection (dropping any filter) must not differ by only 1-2 people, or subtracting the two would reveal them.
+    else if (Array.from({ length: full }, (_, m) => pick(m).length - ids.length).some((d) => d > 0 && d < MIN_GROUP))
+      suppressed = `Fewer than ${MIN_GROUP} people in the wider view fall outside this selection, so comparing the two would identify them. Aggregates are withheld from leadership-only access.`;
+  }
   return { mode, perPerson, userIds: ids, foundersExcluded: hideFounders, canCompany, canTeam: manager, suppressed, notes };
 }
 
@@ -424,8 +432,17 @@ export async function computeInsights(db: Db, a: Actor, q: InsightsQuery) {
     if (!groupMap.has(k)) groupMap.set(k, { id: u.department_id, name: u.department ?? 'No department', ids: new Set() });
     groupMap.get(k)!.ids.add(u.id);
   }
-  const groups = [...groupMap.values()].sort((x, y) => x.name.localeCompare(y.name)).map((g) => {
-    const hidden = !scope.perPerson && g.ids.size < MIN_GROUP;
+  const sortedGroups = [...groupMap.values()].sort((x, y) => x.name.localeCompare(y.name));
+  const withheld = new Set(scope.perPerson ? [] : sortedGroups.filter((g) => g.ids.size < MIN_GROUP));
+  // Complementary suppression: if the withheld groups add up to 1-2 people, total minus visible groups would reveal them,
+  // so also withhold the smallest visible groups until the withheld total reaches MIN_GROUP.
+  let withheldPeople = [...withheld].reduce((s, g) => s + g.ids.size, 0);
+  for (const g of [...sortedGroups].sort((x, y) => x.ids.size - y.ids.size)) {
+    if (withheldPeople === 0 || withheldPeople >= MIN_GROUP) break;
+    if (!withheld.has(g)) { withheld.add(g); withheldPeople += g.ids.size; }
+  }
+  const groups = sortedGroups.map((g) => {
+    const hidden = withheld.has(g);
     return { id: g.id, name: g.name, people: g.ids.size, suppressed: hidden,
       metrics: hidden ? null : aggregate(raw, cur, g.ids), weekly: hidden ? null : weekBuckets.map((w) => aggregate(raw, w, g.ids)) };
   });
@@ -484,7 +501,12 @@ export async function computeInsights(db: Db, a: Actor, q: InsightsQuery) {
 
 export function registerInsightsExport() {
   registerExportReport('insights', {
-    async authorize(db, a, params) { await resolveScope(db, a, insightsQuery.parse(params)); },
+    async authorize(db, a, params) {
+      const q = insightsQuery.parse(params);
+      await resolveScope(db, a, q);
+      const t = await one(db, `select timezone from tenants where id = $1`, [a.tenantId]);
+      resolvePeriod(q, localToday(t.timezone)); // refuse an invalid period now, not in the worker
+    },
     async build(db, a, params) {
       const data = await computeInsights(db, a, insightsQuery.parse(params));
       return { data, name: `insights-${data.period.start}-to-${data.period.end}` };
