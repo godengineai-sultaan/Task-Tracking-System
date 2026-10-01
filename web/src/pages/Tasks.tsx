@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { DndContext, KeyboardSensor, PointerSensor, closestCorners, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { DndContext, KeyboardSensor, PointerSensor, closestCorners, rectIntersection, useDraggable, type CollisionDetection, useDroppable, useSensor, useSensors, type DragEndEvent, type KeyboardCoordinateGetter } from '@dnd-kit/core';
 import { Bookmark, Columns3, List, Plus, Trash2 } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { CATEGORY_LABEL, PRIORITY_LABEL, STATUS_LABEL, fmtDate, hm, relDue } from '../lib/format';
@@ -12,6 +12,20 @@ import { TaskDrawer } from './TaskDetail';
 import { QuickCapture } from '../components/QuickCapture';
 
 const BOARD = ['backlog', 'planned', 'in_progress', 'blocked', 'in_review', 'done'];
+
+const collide: CollisionDetection = (args) => { const r = rectIntersection(args); return r.length ? r : closestCorners(args); };
+
+/** Arrow keys move a picked-up card one whole column left/right (default sensor only nudges 25px). */
+const columnKeyboard: KeyboardCoordinateGetter = (event, { context: { droppableRects, collisionRect } }) => {
+  const dir = event.code === 'ArrowRight' ? 1 : event.code === 'ArrowLeft' ? -1 : 0;
+  if (!dir || !collisionRect) return undefined;
+  event.preventDefault();
+  const cols = BOARD.map((id) => droppableRects.get(id)).filter(Boolean) as { left: number; right: number; top: number }[];
+  const cx = collisionRect.left + collisionRect.width / 2;
+  const idx = cols.findIndex((r) => cx >= r.left && cx <= r.right);
+  const next = cols[(idx < 0 ? 0 : idx) + dir];
+  return next ? { x: next.left + 8, y: collisionRect.top } : undefined;
+};
 
 export default function Tasks() {
   const me = useMe(); const qc = useQueryClient(); const toast = useToast();
@@ -37,13 +51,13 @@ export default function Tasks() {
         </>} />
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Input aria-label="Search tasks" className="h-8 w-56" placeholder="Search…" value={filters.q} onChange={(e) => set('q', e.target.value)} />
-        <Select aria-label="Owner" className="h-8 w-40" value={filters.mine ? 'me' : filters.ownerId} onChange={(e) => { const v = e.target.value; const n = new URLSearchParams(sp); n.delete('mine'); n.delete('ownerId'); if (v === 'me') n.set('mine', '1'); else if (v) n.set('ownerId', v); setSp(n, { replace: true }); }}>
+        <Select aria-label="Owner" className="h-8 w-52" value={filters.mine ? 'me' : filters.ownerId} onChange={(e) => { const v = e.target.value; const n = new URLSearchParams(sp); n.delete('mine'); n.delete('ownerId'); if (v === 'me') n.set('mine', '1'); else if (v) n.set('ownerId', v); setSp(n, { replace: true }); }}>
           <option value="">Anyone</option><option value="me">Me (owner or collaborator)</option>{(users.data ?? []).map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}</Select>
         <Select aria-label="Project" className="h-8 w-44" value={filters.projectId} onChange={(e) => set('projectId', e.target.value)}>
           <option value="">All projects</option>{(projects.data ?? []).map((p: any) => <option key={p.id} value={p.id}>{p.key} · {p.name}</option>)}</Select>
         <Select aria-label="Due" className="h-8 w-36" value={filters.due} onChange={(e) => set('due', e.target.value)}>
           <option value="">Any due date</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="week">Next 7 days</option><option value="none">No due date</option></Select>
-        <Select aria-label="Priority" className="h-8 w-32" value={filters.priority} onChange={(e) => set('priority', e.target.value)}>
+        <Select aria-label="Priority" className="h-8 w-36" value={filters.priority} onChange={(e) => set('priority', e.target.value)}>
           <option value="">Any priority</option>{Object.entries(PRIORITY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
         {view === 'list' && <Select aria-label="Status" className="h-8 w-36" value={filters.status} onChange={(e) => set('status', e.target.value)}>
           <option value="">Open + recent</option>{Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>}
@@ -96,7 +110,7 @@ export function TaskTable({ tasks, onOpen, today }: { tasks: any[]; onOpen: (id:
 
 function Board({ tasks, onOpen, today }: { tasks: any[]; onOpen: (id: string) => void; today: string }) {
   const qc = useQueryClient(); const toast = useToast(); const me = useMe();
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor));
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: columnKeyboard }));
   const [pending, setPending] = useState<null | { task: any; to: string }>(null);
   const cols = useMemo(() => Object.fromEntries(BOARD.map((s) => [s, tasks.filter((t) => t.status === s)])), [tasks]);
   const move = useMutation({
@@ -118,7 +132,7 @@ function Board({ tasks, onOpen, today }: { tasks: any[]; onOpen: (id: string) =>
     move.mutate({ task, to });
   };
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={onDragEnd}
+    <DndContext sensors={sensors} collisionDetection={collide} onDragEnd={onDragEnd}
       accessibility={{ screenReaderInstructions: { draggable: 'Press space to pick up a task, use arrow keys to move between columns, space to drop.' } }}>
       <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-4 sm:mx-0 sm:px-0">
         {BOARD.map((s) => <Column key={s} status={s} tasks={cols[s]} onOpen={onOpen} today={today} />)}

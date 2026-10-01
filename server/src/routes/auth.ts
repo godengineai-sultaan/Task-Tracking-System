@@ -21,7 +21,7 @@ async function startSession(reply: FastifyReply, tenantId: string, userId: strin
 }
 
 export async function authRoutes(app: FastifyInstance) {
-  app.post('/api/auth/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.post('/api/auth/login', { config: { rateLimit: { max: Number(process.env.LOGIN_RATE_LIMIT || 10), timeWindow: '1 minute' } } }, async (req, reply) => {
     const b = z.object({ organization: z.string().min(2), email: z.string().email(), password: z.string().min(1) }).parse(req.body);
     const tenant = await withSystem((db) => one(db, `select id, status from tenants where slug = $1`, [b.organization.trim().toLowerCase()]));
     const fail = () => { throw unauthorized('Organization, email or password is incorrect'); };

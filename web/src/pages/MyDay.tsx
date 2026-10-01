@@ -86,7 +86,7 @@ export default function MyDay() {
                       <p className="mb-2 text-[12px] font-medium text-ink-3">{ids.length === 0 ? 'Pick your outcomes — suggestions from your due and in-progress work:' : 'Add another outcome:'}</p>
                       <div className="flex flex-wrap gap-2">
                         {d.suggestedOutcomes.slice(0, 5).map((t: any) => (
-                          <button key={t.id} onClick={() => plan.mutate({ taskIds: [...ids, t.id] })} disabled={plan.isPending}
+                          <button key={t.id} aria-label={`Add "${t.title}" to today`} onClick={() => plan.mutate({ taskIds: [...ids, t.id] })} disabled={plan.isPending}
                             className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-surface-2 px-2.5 py-1.5 text-left text-[13px] ring-1 ring-inset ring-line hover:ring-accent">
                             <Plus className="size-3.5 shrink-0 text-accent" aria-hidden /><span className="truncate">{t.title}</span>
                             {relDue(t.due_date, d.today) && <span className="shrink-0 text-[11px] text-ink-3">· {relDue(t.due_date, d.today)!.text}</span>}

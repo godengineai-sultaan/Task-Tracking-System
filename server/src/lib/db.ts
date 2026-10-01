@@ -26,9 +26,20 @@ export async function closePools() {
   appPool = ownerPool = null;
 }
 
+/** A transaction client runs one query at a time; queue concurrent callers (e.g. Promise.all) instead of overlapping them. */
+function serialized(client: pg.PoolClient): pg.PoolClient {
+  const c = client as any;
+  if (c.__serialized) return client;
+  const raw = client.query.bind(client);
+  let chain: Promise<unknown> = Promise.resolve();
+  c.query = (...args: any[]) => { const p = chain.then(() => raw(...(args as [any]))); chain = p.catch(() => {}); return p; };
+  c.__serialized = true;
+  return client;
+}
+
 /** Run fn in a transaction with row-level security bound to one tenant. */
 export async function withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
-  const client = await pools().app.connect();
+  const client = serialized(await pools().app.connect());
   try {
     await client.query('begin');
     await client.query("select set_config('app.tenant_id', $1, true)", [tenantId]);
@@ -45,7 +56,7 @@ export async function withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>
 
 /** Unscoped app-role transaction (only tenants/sessions/jobs are reachable: everything else is RLS-filtered to nothing). */
 export async function withSystem<T>(fn: (db: Db) => Promise<T>): Promise<T> {
-  const client = await pools().app.connect();
+  const client = serialized(await pools().app.connect());
   try {
     await client.query('begin');
     const out = await fn(client);
@@ -61,7 +72,7 @@ export async function withSystem<T>(fn: (db: Db) => Promise<T>): Promise<T> {
 
 /** Owner role (bypasses RLS). Only for migrations, seed, bootstrap and maintenance CLIs. */
 export async function withOwner<T>(fn: (db: Db) => Promise<T>): Promise<T> {
-  const client = await pools().owner.connect();
+  const client = serialized(await pools().owner.connect());
   try {
     await client.query('begin');
     const out = await fn(client);

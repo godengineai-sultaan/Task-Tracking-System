@@ -29,13 +29,13 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTM
 ));
 
 // ---------- Form controls ----------
-const control = 'w-full rounded-lg bg-surface text-ink ring-1 ring-inset ring-line-strong placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60';
+const control = 'rounded-lg bg-surface text-ink ring-1 ring-inset ring-line-strong placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60';
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(({ className, ...p }, ref) =>
-  <input ref={ref} className={cx(control, 'h-9 px-3 text-sm', className)} {...p} />);
+  <input ref={ref} className={cx(control, 'h-9 px-3 text-sm', !/\bw-/.test(className ?? '') && 'w-full', className)} {...p} />);
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(({ className, ...p }, ref) =>
-  <textarea ref={ref} className={cx(control, 'px-3 py-2 text-sm leading-relaxed', className)} {...p} />);
+  <textarea ref={ref} className={cx(control, 'w-full px-3 py-2 text-sm leading-relaxed', className)} {...p} />);
 export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSelectElement>>(({ className, children, ...p }, ref) =>
-  <select ref={ref} className={cx(control, 'h-9 pl-2.5 pr-8 text-sm', className)} {...p}>{children}</select>);
+  <select ref={ref} className={cx(control, 'h-9 pl-2.5 pr-8 text-sm', !/\bw-/.test(className ?? '') && 'w-full', className)} {...p}>{children}</select>);
 
 export function Field({ label, hint, error, children, className }: { label: string; hint?: ReactNode; error?: string | null; children: (id: string) => ReactNode; className?: string }) {
   const id = useId();
@@ -112,7 +112,7 @@ export function AssessmentBadge({ label, size = 'sm' }: { label: string; size?: 
 export function Avatar({ name, size = 24 }: { name: string; size?: number }) {
   const hue = [...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0);
   return <span aria-hidden className="inline-flex shrink-0 items-center justify-center rounded-full font-semibold text-white"
-    style={{ width: size, height: size, fontSize: size * 0.4, background: `oklch(0.55 0.12 ${hue})` }}>{initials(name)}</span>;
+    style={{ width: size, height: size, fontSize: size * 0.4, background: `oklch(0.46 0.11 ${hue})` }}>{initials(name)}</span>;
 }
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-line-strong bg-surface-2 px-1 py-px font-sans text-[11px] text-ink-2">{children}</kbd>;

@@ -13,7 +13,7 @@
   --line: #e1e0d9;
   --line-strong: #c3c2b7;
   --ring: rgba(11, 11, 11, 0.10);
-  --accent: #2a78d6;
+  --accent: #256abf;            /* ramp step 500: 5.3:1 with white text */
   --accent-ink: #1c5cab;
   --accent-soft: #e6f0fc;
   --on-accent: #ffffff;
@@ -33,7 +33,7 @@
     color-scheme: dark;
     --bg: #0d0d0d; --surface: #1a1a19; --surface-2: #232321; --surface-3: #2c2c2a;
     --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #a3a29a; --line: #2c2c2a; --line-strong: #383835; --ring: rgba(255,255,255,.10);
-    --accent: #3987e5; --accent-ink: #86b6ef; --accent-soft: #16263b; --on-accent: #ffffff;
+    --accent: #256abf; --accent-ink: #86b6ef; --accent-soft: #16263b; --on-accent: #ffffff;
     --c-task: #3987e5; --c-meeting: #d95926; --c-admin: #199e70; --c-learning: #c98500; --c-other: #d55181; --c-unknown: #3a3a37;
     --good-ink: #5fd35f; --good-soft: #13281a; --warning-ink: #fab219; --warning-soft: #2e2510; --serious-ink: #f2a07f; --serious-soft: #2f1c14;
     --critical-ink: #f08a8a; --critical-soft: #331616; --neutral-soft: #262624; --neutral-ink: #c3c2b7;
@@ -44,7 +44,7 @@
   color-scheme: dark;
   --bg: #0d0d0d; --surface: #1a1a19; --surface-2: #232321; --surface-3: #2c2c2a;
   --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #a3a29a; --line: #2c2c2a; --line-strong: #383835; --ring: rgba(255,255,255,.10);
-  --accent: #3987e5; --accent-ink: #86b6ef; --accent-soft: #16263b; --on-accent: #ffffff;
+  --accent: #256abf; --accent-ink: #86b6ef; --accent-soft: #16263b; --on-accent: #ffffff;
   --c-task: #3987e5; --c-meeting: #d95926; --c-admin: #199e70; --c-learning: #c98500; --c-other: #d55181; --c-unknown: #3a3a37;
   --good-ink: #5fd35f; --good-soft: #13281a; --warning-ink: #fab219; --warning-soft: #2e2510; --serious-ink: #f2a07f; --serious-soft: #2f1c14;
   --critical-ink: #f08a8a; --critical-soft: #331616; --neutral-soft: #262624; --neutral-ink: #c3c2b7;
@@ -73,3 +73,4 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font-sans); 
 @media (forced-colors: active) { .hatch { background: Canvas; border: 1px solid CanvasText; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 ::selection { background: var(--accent-soft); }
+.grid > * { min-width: 0; }
