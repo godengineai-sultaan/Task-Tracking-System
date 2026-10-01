@@ -1,10 +1,13 @@
 import { useState } from 'react';
+import { Navigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarDays, Copy, KeyRound, Plug, RefreshCw, Upload } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
 import { useRoles } from '../lib/session';
 import { Badge, Button, Callout, Card, ErrorState, Field, Input, Modal, PageHeader, Select, Skeleton, useToast } from '../components/ui';
+import { CalendarSubscription } from '../components/ext/CalendarSubscription';
+import { CalendarFeedCard } from '../components/ext/CalendarFeed';
 
 const KIND: Record<string, string> = { ics_calendar: 'Calendar (ICS file)', issues: 'Issue tracker', helpdesk: 'Helpdesk', code: 'Code host' };
 
@@ -13,28 +16,33 @@ export default function Integrations() {
   const q = useQuery({ queryKey: ['integrations'], queryFn: () => api.get('/api/integrations') });
   const [created, setCreated] = useState<any>(null); const [newOpen, setNewOpen] = useState(false); const [events, setEvents] = useState<any>(null);
   const create = useMutation({ mutationFn: (b: any) => api.post('/api/integrations', b), onSuccess: (c: any) => { qc.invalidateQueries({ queryKey: ['integrations'] }); if (c.secret) setCreated(c); setNewOpen(false); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
-  const status = useMutation({ mutationFn: ({ id, status }: any) => api.patch(`/api/integrations/${id}`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['integrations'] }) });
+  const status = useMutation({ mutationFn: ({ id, status }: any) => api.patch(`/api/integrations/${id}`, { status }), onSuccess: () => { qc.invalidateQueries({ queryKey: ['integrations'] }); qc.invalidateQueries({ queryKey: ['calendar-subscription'] }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   const upload = useMutation({ mutationFn: ({ id, ics }: any) => api.post(`/api/integrations/${id}/ics`, { ics }),
     onSuccess: (r: any) => { qc.invalidateQueries(); toast({ tone: 'good', text: `${r.received} events read (${r.duplicates} already imported). Past meetings appear as suggestions in My Day.` }); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
+  if (r.customer) return <Navigate to="/portal" replace />;
   if (q.isLoading) return <Skeleton className="h-64" />;
   if (q.error) return <ErrorState error={q.error} />;
   const mine = q.data.connections.filter((c: any) => c.user_id); const org = q.data.connections.filter((c: any) => !c.user_id);
   const cal = mine.find((c: any) => c.kind === 'ics_calendar');
+  // One step: the first upload also creates the personal calendar connection.
+  const uploadFile = async (f: File) => {
+    try { upload.mutate({ id: cal?.id ?? (await create.mutateAsync({ kind: 'ics_calendar', name: 'My work calendar (ICS)' })).id, ics: await f.text() }); } catch { /* create's onError already showed a toast */ }
+  };
   return (
     <div>
       <PageHeader title="Integrations" subtitle="Opt-in and scope-limited. Events become suggestions you confirm — they are never treated as proof of time or accepted work." />
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title={<span className="flex items-center gap-2"><CalendarDays className="size-4" aria-hidden />My work calendar</span>} subtitle="Import an .ics export. Only titles and times are kept — no descriptions, attendees or locations. Private events show as “Private event”.">
-          {!cal ? <Button variant="primary" onClick={() => create.mutate({ kind: 'ics_calendar', name: 'My work calendar (ICS)' })} loading={create.isPending}>Connect calendar file</Button> : <>
-            <p className="text-[13px] text-ink-2">Last import: {cal.last_sync_at ? fmtDateTime(cal.last_sync_at) : 'never'} · {cal.events} events {cal.last_error && <span className="text-critical-ink">· {cal.last_error}</span>}</p>
-            <label className="mt-3 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[13px] font-medium ring-1 ring-line hover:ring-accent">
-              <Upload className="size-4" aria-hidden />Upload .ics file<input type="file" accept=".ics,text/calendar" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (f) upload.mutate({ id: cal.id, ics: await f.text() }); e.target.value = ''; }} /></label>
-            <div className="mt-3 flex gap-2"><Button size="sm" variant="ghost" onClick={() => setEvents(cal)}>View sync log</Button>
-              <Button size="sm" variant="ghost" onClick={() => status.mutate({ id: cal.id, status: cal.status === 'active' ? 'paused' : 'active' })}>{cal.status === 'active' ? 'Pause' : 'Resume'}</Button></div>
-            <p className="mt-3 text-[12px] text-ink-3">Live Google/Microsoft calendar sync requires OAuth credentials from your organization (not configured in this build).</p></>}
+        <Card title={<span className="flex items-center gap-2"><CalendarDays className="size-4" aria-hidden />My work calendar</span>} subtitle="Upload an .ics export or subscribe by its secret address. Only titles and times are kept — no descriptions, attendees or locations. Private events show as “Private event”.">
+          {cal && <p className="mb-3 text-[13px] text-ink-2">Last import: {cal.last_sync_at ? fmtDateTime(cal.last_sync_at) : 'never'} · {cal.events} event{cal.events === 1 ? '' : 's'} {cal.last_error && <span className="text-critical-ink">· {cal.last_error}</span>}</p>}
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[13px] font-medium ring-1 ring-line hover:ring-accent focus-within:ring-2 focus-within:ring-accent">
+            <Upload className="size-4" aria-hidden />{upload.isPending || create.isPending ? 'Reading file…' : 'Upload .ics file'}<input type="file" accept=".ics,text/calendar" className="sr-only" disabled={upload.isPending || create.isPending} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadFile(f); }} /></label>
+          {cal && <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => setEvents(cal)}>View sync log</Button>
+            <Button size="sm" variant="ghost" loading={status.isPending} onClick={() => status.mutate({ id: cal.id, status: cal.status === 'active' ? 'paused' : 'active' })}>{cal.status === 'active' ? 'Pause calendar' : 'Resume calendar'}</Button></div>}
+          {!r.customer && <CalendarSubscription />}
         </Card>
-        <Card title="Shared contract" subtitle={`Schema ${q.data.schemaVersion}. Machine-to-machine deliveries are signed per connection.`}>
-          <pre className="overflow-x-auto rounded-lg bg-surface-2 p-3 text-[11.5px] leading-relaxed">{`POST {inboundUrl}
+        {!r.customer && <CalendarFeedCard />}
+        {r.sysAdmin && <Card title="Shared contract" subtitle={`Schema ${q.data.schemaVersion}. Machine-to-machine deliveries are signed per connection.`}>
+          <pre tabIndex={0} role="region" aria-label="Example signed delivery" className="overflow-x-auto rounded-lg bg-surface-2 p-3 text-[11.5px] leading-relaxed">{`POST {inboundUrl}
 X-Timestamp: <unix seconds>
 X-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
 
@@ -45,7 +53,7 @@ X-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
   "payload": { "title": "...", "issue_ref": "ISS-42",
                "assignee_email": "...", "url": "..." } }`}</pre>
           <p className="mt-2 text-[12px] text-ink-3">Repeated deliveries are de-duplicated; related events (e.g. many commits on one issue) are grouped into one suggestion. Payloads containing password/token/secret fields are rejected and not stored.</p>
-        </Card>
+        </Card>}
         {r.sysAdmin && <Card className="lg:col-span-2" title={<span className="flex items-center gap-2"><Plug className="size-4" aria-hidden />Organization connections</span>} actions={<Button size="sm" variant="primary" onClick={() => setNewOpen(true)}>Add connection</Button>} padded={false}>
           <ul className="divide-y divide-line">{org.length === 0 && <li className="px-4 py-4 text-[13px] text-ink-3">No organization connections.</li>}{org.map((c: any) => (
             <li key={c.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
