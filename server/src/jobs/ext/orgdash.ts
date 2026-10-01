@@ -1,4 +1,6 @@
-/** Background jobs, tenant ticks and task-event listeners for the 'orgdash' feature area. */
+import { registerInsightsExport } from '../../services/ext/orgdash.js';
+
+/** Background jobs for the 'orgdash' feature area: the worker renders 'insights' CSV exports (re-authorized at generation time). */
 export default function register() {
-  // registerJob(...) from lib/jobs, registerTenantTick(...) from jobs/index, onTaskEvent(...) from services/events
+  registerInsightsExport();
 }
