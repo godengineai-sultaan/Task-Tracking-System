@@ -5,6 +5,7 @@ import { api, qs } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useMe, useRoles } from '../lib/session';
 import { Badge, Button, Card, Checkbox, ErrorState, Field, IconButton, Input, PageHeader, Select, Skeleton, useToast } from '../components/ui';
+import { HolidayImport, RecentHolidayImports } from '../components/ext/CalendarHolidayImport';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const toHm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
@@ -91,11 +92,14 @@ function Holidays({ canEdit }: { canEdit: boolean }) {
   const add = useMutation({ mutationFn: () => api.post('/api/calendar/holidays', f), onSuccess: () => { setF({ date: '', name: '' }); qc.invalidateQueries(); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   const del = useMutation({ mutationFn: (id: string) => api.del(`/api/calendar/holidays/${id}`), onSuccess: () => qc.invalidateQueries() });
   return (
-    <Card title="Holidays" subtitle="Organization-wide non-working days.">
+    <Card title="Holidays" subtitle="Organization-wide non-working days." actions={canEdit && <HolidayImport />}>
+      {q.isLoading ? <Skeleton className="h-24" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
+        : (q.data ?? []).length === 0 && <p className="py-2 text-[13px] text-ink-3">No holidays yet.{canEdit && ' Add one below or import a calendar file.'}</p>}
       <ul className="divide-y divide-line">{(q.data ?? []).map((h: any) => <li key={h.id} className="flex items-center py-2 text-[13px]"><span className="w-32 tabular text-ink-2">{fmtDate(h.date, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span><span className="flex-1">{h.name}</span>
         {canEdit && <IconButton label="Delete holiday" onClick={() => del.mutate(h.id)}><Trash2 className="size-3.5" /></IconButton>}</li>)}</ul>
       {canEdit && <form className="mt-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}><Input aria-label="Holiday date" type="date" className="h-8 w-40" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
         <Input aria-label="Holiday name" className="h-8" placeholder="Name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /><Button size="sm" type="submit" disabled={!f.date || !f.name}>Add</Button></form>}
+      {canEdit && <RecentHolidayImports />}
     </Card>
   );
 }

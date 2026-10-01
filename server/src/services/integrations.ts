@@ -139,34 +139,44 @@ export async function processEvent(db: Db, eventId: string) {
 export async function importIcs(db: Db, a: Actor, connectionId: string, icsText: string) {
   const conn = await one(db, `select * from integration_connections where id = $1 and user_id = $2 and kind = 'ics_calendar'`, [connectionId, a.id]);
   if (!conn) throw notFound('Calendar connection not found');
+  const { received, duplicates } = await ingestIcs(db, a.tenantId, connectionId, icsText);
+  await db.query(`update integration_connections set last_sync_at = now(), last_error = null, status = 'active' where id = $1`, [connectionId]);
+  await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'integration.ics_import', resourceType: 'integration_connection', resourceId: connectionId, details: { received, duplicates } });
+  return { received, duplicates };
+}
+
+/**
+ * Reusable ICS ingestion for an ics_calendar connection (file upload or URL subscription): title/time only, private events masked,
+ * de-duplicated per connection on uid+start, each new event queued for a confirm-first suggestion. `endedBy` skips events still running.
+ */
+export async function ingestIcs(db: Db, tenantId: string, connectionId: string, icsText: string,
+  window: { from: Date; to: Date; endedBy?: Date } = { from: new Date(Date.now() - 31 * 86400000), to: new Date(Date.now() + 1 * 86400000) }) {
   if (icsText.length > 5_000_000) throw badRequest('Calendar file is too large');
   let parsed: any;
   try { parsed = ical.sync.parseICS(icsText); } catch (e: any) {
     await db.query(`update integration_connections set last_error = $2, status = 'error' where id = $1`, [connectionId, `Parse error: ${e.message}`]);
     throw badRequest(`Could not read calendar file: ${e.message}`);
   }
-  const from = new Date(Date.now() - 31 * 86400000), to = new Date(Date.now() + 1 * 86400000);
+  const { from, to } = window;
   let received = 0, duplicates = 0;
   for (const ev of Object.values(parsed) as any[]) {
     if (ev.type !== 'VEVENT' || !ev.start) continue;
     const instances = ev.rrule ? ical.expandRecurringEvent(ev, { from, to }) : [{ start: ev.start, end: ev.end ?? ev.start, summary: ev.summary, isFullDay: ev.datetype === 'date' }];
     for (const inst of instances as any[]) {
       const start = new Date(inst.start), end = new Date(inst.end ?? inst.start);
-      if (start < from || start > to || !(end > start)) continue;
+      if (start < from || start > to || !(end > start) || (window.endedBy && end > window.endedBy)) continue;
       const priv = ['PRIVATE', 'CONFIDENTIAL'].includes(String(ev.class ?? '').toUpperCase());
       const summary = priv ? 'Private event' : String(typeof inst.summary === 'object' ? inst.summary?.val ?? '' : inst.summary ?? ev.summary ?? '').slice(0, 200);
       const eventId = `${ev.uid}:${start.toISOString()}`;
       const row = await one(db, `insert into integration_events (tenant_id, connection_id, event_id, event_type, schema_version, resource_id, occurred_at, payload)
         values ($1,$2,$3,'calendar.event',$4,$5,$6,$7) on conflict (connection_id, event_id) do nothing returning id`,
-        [a.tenantId, connectionId, eventId, SCHEMA_VERSION, ev.uid, start.toISOString(),
+        [tenantId, connectionId, eventId, SCHEMA_VERSION, ev.uid, start.toISOString(),
          { summary, start: start.toISOString(), end: end.toISOString(), all_day: !!inst.isFullDay }]);
       if (!row) { duplicates++; continue; }
       received++;
-      await enqueue(db, { tenantId: a.tenantId, kind: 'integration.process', payload: { eventId: row.id }, idempotencyKey: `integration.process:${row.id}` });
+      await enqueue(db, { tenantId, kind: 'integration.process', payload: { eventId: row.id }, idempotencyKey: `integration.process:${row.id}` });
     }
   }
-  await db.query(`update integration_connections set last_sync_at = now(), last_error = null, status = 'active' where id = $1`, [connectionId]);
-  await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'integration.ics_import', resourceType: 'integration_connection', resourceId: connectionId, details: { received, duplicates } });
   return { received, duplicates };
 }
 

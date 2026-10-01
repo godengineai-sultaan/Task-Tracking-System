@@ -5,6 +5,8 @@ import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
 import { useRoles } from '../lib/session';
 import { Badge, Button, Callout, Card, ErrorState, Field, Input, Modal, PageHeader, Select, Skeleton, useToast } from '../components/ui';
+import { CalendarSubscription } from '../components/ext/CalendarSubscription';
+import { CalendarFeedCard } from '../components/ext/CalendarFeed';
 
 const KIND: Record<string, string> = { ics_calendar: 'Calendar (ICS file)', issues: 'Issue tracker', helpdesk: 'Helpdesk', code: 'Code host' };
 
@@ -24,15 +26,17 @@ export default function Integrations() {
     <div>
       <PageHeader title="Integrations" subtitle="Opt-in and scope-limited. Events become suggestions you confirm — they are never treated as proof of time or accepted work." />
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title={<span className="flex items-center gap-2"><CalendarDays className="size-4" aria-hidden />My work calendar</span>} subtitle="Import an .ics export. Only titles and times are kept — no descriptions, attendees or locations. Private events show as “Private event”.">
+        <Card title={<span className="flex items-center gap-2"><CalendarDays className="size-4" aria-hidden />My work calendar</span>} subtitle="Upload an .ics export or subscribe by its secret address. Only titles and times are kept — no descriptions, attendees or locations. Private events show as “Private event”.">
           {!cal ? <Button variant="primary" onClick={() => create.mutate({ kind: 'ics_calendar', name: 'My work calendar (ICS)' })} loading={create.isPending}>Connect calendar file</Button> : <>
             <p className="text-[13px] text-ink-2">Last import: {cal.last_sync_at ? fmtDateTime(cal.last_sync_at) : 'never'} · {cal.events} events {cal.last_error && <span className="text-critical-ink">· {cal.last_error}</span>}</p>
             <label className="mt-3 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-[13px] font-medium ring-1 ring-line hover:ring-accent">
               <Upload className="size-4" aria-hidden />Upload .ics file<input type="file" accept=".ics,text/calendar" className="sr-only" onChange={async (e) => { const f = e.target.files?.[0]; if (f) upload.mutate({ id: cal.id, ics: await f.text() }); e.target.value = ''; }} /></label>
             <div className="mt-3 flex gap-2"><Button size="sm" variant="ghost" onClick={() => setEvents(cal)}>View sync log</Button>
               <Button size="sm" variant="ghost" onClick={() => status.mutate({ id: cal.id, status: cal.status === 'active' ? 'paused' : 'active' })}>{cal.status === 'active' ? 'Pause' : 'Resume'}</Button></div>
-            <p className="mt-3 text-[12px] text-ink-3">Live Google/Microsoft calendar sync requires OAuth credentials from your organization (not configured in this build).</p></>}
+            </>}
+          {!r.customer && <CalendarSubscription />}
         </Card>
+        {!r.customer && <CalendarFeedCard />}
         <Card title="Shared contract" subtitle={`Schema ${q.data.schemaVersion}. Machine-to-machine deliveries are signed per connection.`}>
           <pre className="overflow-x-auto rounded-lg bg-surface-2 p-3 text-[11.5px] leading-relaxed">{`POST {inboundUrl}
 X-Timestamp: <unix seconds>
