@@ -1,4 +1,5 @@
 import { DateTime } from 'luxon';
+import { z } from 'zod';
 import type { Db } from '../../lib/db.js';
 import { many, one } from '../../lib/db.js';
 import { badRequest, notFound } from '../../lib/errors.js';
@@ -15,7 +16,7 @@ import { csvCell, registerExportReport } from '../exports.js';
  */
 export const TRENDS_DEFINITIONS = {
   version: 'trends-v1',
-  comparable_working_days: 'Completed scheduled working days in the week (today is excluded until it is over), after holidays and full-day leave. A week with none is Not Applicable: its ratios are left empty, never averaged as zero.',
+  comparable_working_days: 'Completed scheduled working days in the week (today is excluded until it is over), after holidays and full-day leave. Days before the person\'s records begin (account creation or the first plan, recap or time entry, whichever is earlier) are not counted. A week with none is Not Applicable: its ratios are left empty, never averaged as zero.',
   planned_commitment_completion: METRIC_DEFINITIONS.planned_commitment_completion,
   accepted_outcomes: 'Tasks you own that reached Done (accepted) during the week, by acceptance date.',
   logging_coverage: `${METRIC_DEFINITIONS.logging_coverage} Coverage is about record completeness, not productivity.`,
@@ -31,6 +32,10 @@ export const TRENDS_DEFINITIONS = {
 
 export const TREND_THRESHOLDS = { focusMinMinutes: 60, focusGapMinutes: 5, meetingHeavyShare: 0.5, estimateMinTasks: 3, overrunRatio: 1.4, underrunRatio: 0.7,
   switchesPerDay: 8, carryoverRate: 0.5, blockedShare: 0.2, recapRate: 0.6, shiftPoints: 0.1 };
+
+/** Query/export parameters. `end` must be a real calendar date (the week containing it is the last week shown). */
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => DateTime.fromISO(v).isValid, 'must be a real calendar date');
+export const trendsParams = z.object({ userId: z.string().uuid().optional(), weeks: z.coerce.number().int().min(4).max(26).default(12), end: isoDate.optional() });
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const PRECEDENCE: Record<string, number> = { manual: 0, timer: 1, integration: 2, calendar: 3 };
@@ -92,10 +97,16 @@ function mergedMinutes(ivs: [number, number][]) {
 }
 
 export async function buildPersonalTrends(db: Db, userId: string, weeks = 12, endDate?: string) {
-  const u = await one(db, `select u.id, u.name, u.title, coalesce(u.timezone, t.timezone) tz, t.settings, rp.coverage_target
+  const u = await one(db, `select u.id, u.name, u.title, u.created_at, coalesce(u.timezone, t.timezone) tz, t.settings, rp.coverage_target,
+      (select min(started_at) from time_entries where user_id = u.id and deleted_at is null) first_entry,
+      (select min(date) from daily_plans where user_id = u.id) first_plan, (select min(date) from daily_reviews where user_id = u.id) first_review
     from users u join tenants t on t.id = u.tenant_id left join role_profiles rp on rp.id = u.role_profile_id where u.id = $1`, [userId]);
   if (!u) throw notFound('Person not found');
+  if (endDate !== undefined && !isoDate.safeParse(endDate).success) throw badRequest('end must be a real calendar date (YYYY-MM-DD)');
   const tz: string = u.tz || 'UTC';
+  const localDate = (v: string | Date) => DateTime.fromJSDate(new Date(v)).setZone(tz).toISODate()!;
+  // Weeks before the person had any records here are not "unknown time": they are simply not comparable.
+  const recordsStart: string = [localDate(u.created_at), u.first_entry && localDate(u.first_entry), u.first_plan, u.first_review].filter(Boolean).sort()[0];
   const coverageThreshold: number = u.coverage_target ?? u.settings?.coverage_threshold ?? 0.5;
   const today = localToday(tz);
   const anchor = endDate && endDate < today ? endDate : today;
@@ -136,8 +147,9 @@ export async function buildPersonalTrends(db: Db, userId: string, weeks = 12, en
   const days = eachDate(rangeStart, rangeEnd).map((date) => {
     const cap = dayCapacity(cal, date);
     const future = date >= today; // not yet completed
-    const working = cap.availableMinutes > 0 && date < today; // today is still in progress: excluded so unfinished hours never look unknown or carried over
-    const base = { date, weekday: DateTime.fromISO(date).weekday, status: cap.status, future, working, available: working ? cap.availableMinutes : 0,
+    const beforeRecords = date < recordsStart;
+    const working = cap.availableMinutes > 0 && date < today && !beforeRecords; // today is still in progress: excluded so unfinished hours never look unknown or carried over
+    const base = { date, weekday: DateTime.fromISO(date).weekday, status: cap.status, future, beforeRecords, working, available: working ? cap.availableMinutes : 0,
       explained: 0, unknown: 0, meeting: 0, focus: 0, focusBlocks: 0, switches: 0, logged: false, blocked: 0,
       intended: 0, acceptedPlanned: 0, carryovers: 0, recapExpected: false, recapConfirmed: false };
     if (!working) return base;
@@ -203,7 +215,9 @@ export async function buildPersonalTrends(db: Db, userId: string, weeks = 12, en
     const applicable = work.length > 0;
     const sched = wd.filter((d) => !d.future && d.status !== 'non_working');
     const holidays = sched.filter((d) => d.status === 'holiday').length, leave = sched.filter((d) => d.status === 'leave').length;
+    const pre = sched.filter((d) => d.beforeRecords).length;
     const naReason = applicable ? null
+      : pre ? `Records for this person begin on ${dayS(recordsStart)}; ${pre} scheduled day(s) this week came before that${sched.length > pre ? ' and the rest were holidays or leave' : ''}, so ratios are not applicable.`
       : sched.length ? `All ${sched.length} scheduled day(s) were holidays or leave (${holidays} holiday, ${leave} leave) — zero available capacity, so ratios are not applicable.`
       : ws <= today && we >= today ? 'Week in progress: no completed working days yet.' : 'No scheduled working days this week.';
     const r = (a: number, b: number) => (applicable ? ratio(a, b) : null);
@@ -250,7 +264,7 @@ export async function buildPersonalTrends(db: Db, userId: string, weeks = 12, en
 
   return {
     definitions: TRENDS_DEFINITIONS, thresholds: { ...TREND_THRESHOLDS, coverage: coverageThreshold },
-    subject: { id: u.id, name: u.name, title: u.title }, timezone: tz, today,
+    subject: { id: u.id, name: u.name, title: u.title }, timezone: tz, today, recordsStart,
     range: { start: rangeStart, end: rangeEnd, weeks }, generatedAt: new Date().toISOString(),
     summary, weeks: series, weekdays, estimateAccuracy,
     patterns: findPatterns({ series, workingDays, estimateAccuracy, coverageThreshold }),
@@ -287,13 +301,14 @@ export function findPatterns({ series, workingDays, estimateAccuracy, coverageTh
       if (g.measured < T.estimateMinTasks || g.ratio === null) continue;
       const over = g.ratio >= T.overrunRatio, under = g.ratio <= T.underrunRatio;
       if (!over && !under) continue;
-      const where = dim === 'category' ? `Tasks in ${g.label}` : `Tasks in project ${g.label}`;
+      const noProject = dim === 'project' && g.key === 'none';
+      const where = dim === 'category' ? `Tasks in ${g.label}` : noProject ? 'Tasks without a project' : `Tasks in project ${g.label}`;
       out.push({ id: `estimate-${dim}-${g.key}`, tone: over ? 'attention' : 'info',
         title: over ? `${where} run ${xS(g.ratio)} their estimates on average (${g.measured} tasks)` : `${where} take about ${xS(g.ratio)} of their estimates on average (${g.measured} tasks)`,
         facts: [`${hmS(g.actualMinutes)} logged against ${hmS(g.estimateMinutes)} estimated across ${g.measured} accepted task(s)`,
           `Coverage: ${g.measured} of ${g.accepted} accepted task(s) had both an estimate and logged time`,
           ...g.tasks.slice(0, 3).map((t: any) => `"${t.title}": ${hmS(t.actual)} vs ${hmS(t.estimate)} estimated (${xS(t.ratio)})`)],
-        suggestion: over ? `When sizing new ${dim === 'category' ? g.label.toLowerCase() : g.label} work, consider allowing roughly ${xS(g.ratio)} the first estimate or splitting it into smaller tasks.`
+        suggestion: over ? `When sizing new ${dim === 'category' ? g.label.toLowerCase() : noProject ? 'unassigned' : g.label} work, consider allowing roughly ${xS(g.ratio)} the first estimate or splitting it into smaller tasks.`
           : 'Estimates here look generous; tighter estimates make capacity planning more accurate.',
         assumptions: ['Actual = the owner\'s confirmed time linked to each task; unlogged time and collaborators\' time is not included (so ratios may be understated).',
           `Ratio = total logged / total estimated for accepted tasks with both; needs at least ${T.estimateMinTasks} tasks.`] });
@@ -415,12 +430,13 @@ export function registerTrendsExport() {
   exportRegistered = true;
   registerExportReport('personal_trends', {
     async authorize(db, a, p) {
-      if (!p?.userId || typeof p.userId !== 'string') throw badRequest('userId is required');
-      if (p.weeks !== undefined && !(Number.isInteger(p.weeks) && p.weeks >= 4 && p.weeks <= 26)) throw badRequest('weeks must be 4 to 26');
-      await authorizeTrends(db, a, p.userId);
+      const q = trendsParams.safeParse(p ?? {});
+      if (!q.success || !q.data.userId) throw badRequest(q.success ? 'userId is required' : `Invalid trends export: ${q.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+      await authorizeTrends(db, a, q.data.userId);
     },
     async build(db, _a, p) {
-      const data = await buildPersonalTrends(db, p.userId, p.weeks ?? 12, p.end);
+      const q = trendsParams.parse(p);
+      const data = await buildPersonalTrends(db, q.userId!, q.weeks, q.end);
       return { data, name: `trends-${data.subject.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${data.range.start}-to-${data.range.end}` };
     },
     csv: trendsCsv,

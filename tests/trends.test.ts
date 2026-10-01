@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { drainJobs, localIso, login, makeOrg, withOwner, type Org } from './helpers.js';
-import { focusBlocks, primarySegments, taskSwitches } from '../server/src/services/ext/trends.js';
+import { DateTime } from 'luxon';
+import { findPatterns, focusBlocks, primarySegments, taskSwitches } from '../server/src/services/ext/trends.js';
 
 /*
  * Fixed fixture (Asia/Kolkata, Mon–Fri 09:00–17:00 with a 60 min break = 420 available minutes per working day).
@@ -197,5 +198,62 @@ describe('personal trends: access rules (same as individual reports)', () => {
     expect(text).toMatch(/Week start/);
     expect(text).toMatch(/2026-05-11,not applicable,0/);
     expect(text).toMatch(/Tasks in Research run 1\.8x/);
+  });
+});
+
+describe('personal trends: review regressions', () => {
+  let org2: Org; let e2: any; let a2: any; let r: any;
+  const today = () => DateTime.now().setZone(org2.tz);
+  beforeAll(async () => {
+    org2 = await makeOrg({ settings: { founders_visible_to_routine_admin: false } });
+    [e2, a2] = await Promise.all([login(org2, 'emp'), login(org2, 'admin')]);
+    await withOwner(async (db) => {
+      const entry = (from: string, to: string) => db.query(`insert into time_entries (tenant_id, user_id, category, started_at, ended_at, source, created_at) values ($1,$2,'task',$3,$4,'timer',$3)`,
+        [org2.tenantId, org2.users.emp, from, to]);
+      // The account was created today; imported history begins on Wed 20 May 2026.
+      await entry(localIso(org2.tz, '2026-05-20', '09:00'), localIso(org2.tz, '2026-05-20', '11:00'));
+      // Work logged today: today is still in progress and must not count yet.
+      const d = today().toISODate()!;
+      await entry(localIso(org2.tz, d, '00:10'), localIso(org2.tz, d, '00:50'));
+    });
+    r = (await e2.get('/api/trends/personal?weeks=4&end=2026-05-31')).body;
+  });
+
+  it('rejects impossible calendar dates instead of returning a garbage series (route and export)', async () => {
+    expect((await e2.get('/api/trends/personal?weeks=4&end=2026-02-30')).status).toBe(400);
+    expect((await e2.post('/api/exports', { format: 'csv', report: 'personal_trends', params: { userId: org2.users.emp, end: '2026-13-01' } })).status).toBe(400);
+  });
+
+  it('weeks before the person\'s records begin are Not Applicable, not unknown time or missed recaps', () => {
+    expect(r.recordsStart).toBe('2026-05-20');
+    expect(r.weeks.map((w: any) => w.status)).toEqual(['not_applicable', 'not_applicable', 'applicable', 'applicable']);
+    expect(r.weeks[0].naReason).toMatch(/Records for this person begin on Wed 20 May; 5 scheduled day\(s\)/);
+    expect(r.weeks[0]).toMatchObject({ workingDays: 0, availableMinutes: 0, unknownMinutes: 0, recaps: { expected: 0, confirmed: 0, rate: null }, loggingCoverage: null });
+    expect(r.weeks[2]).toMatchObject({ workingDays: 3, availableMinutes: 3 * 420, explainedMinutes: 120, recaps: { expected: 3 } });
+    expect(r.summary).toMatchObject({ applicableWeeks: 2, notApplicableWeeks: 2, comparableWorkingDays: 8 });
+  });
+
+  it('today is not counted until it is over', async () => {
+    const res = await e2.get('/api/trends/personal?weeks=4');
+    expect(res.status).toBe(200);
+    const cur = res.body.weeks[3];
+    expect(cur.partial).toBe(true);
+    expect(cur.explainedMinutes).toBe(0);
+    expect(cur.recaps.expected).toBe(Math.min(today().weekday - 1, 5));
+    if (cur.status === 'not_applicable') expect(cur.naReason).toMatch(/Week in progress/);
+  });
+
+  it('founder policy and tenant isolation apply to trends and their export', async () => {
+    expect((await a2.get(`/api/trends/personal?userId=${org2.users.founder}&weeks=4`)).status).toBe(403);
+    expect((await a2.post('/api/exports', { format: 'csv', report: 'personal_trends', params: { userId: org2.users.founder } })).status).toBe(403);
+    expect((await a2.get(`/api/trends/personal?userId=${org.users.emp}&weeks=4`)).status).toBe(403);
+    expect((await a2.get(`/api/trends/personal?userId=${org2.users.emp}&weeks=4`)).status).toBe(200);
+  });
+
+  it('estimate pattern wording for tasks without a project', () => {
+    const g = { key: 'none', label: 'No project', accepted: 4, measured: 3, ratio: 2, actualMinutes: 360, estimateMinutes: 180, tasks: [] };
+    const [p] = findPatterns({ series: [], workingDays: [], estimateAccuracy: { byCategory: [], byProject: [g] }, coverageThreshold: 0.5 });
+    expect(p.title).toBe('Tasks without a project run 2.0x their estimates on average (3 tasks)');
+    expect(p.suggestion).toMatch(/new unassigned work/);
   });
 });

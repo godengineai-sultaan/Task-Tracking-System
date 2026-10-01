@@ -13,7 +13,8 @@ test('employee opens personal Trends: small multiples, keyboard tooltips, table,
   await expect(page).toHaveURL(/view=trends/);
   await expect(page.getByRole('heading', { name: 'Weekly trends' })).toBeVisible();
   await expect(page.locator('figure[data-metric]')).toHaveCount(11);
-  await expect(page.getByText(/1 Not Applicable/)).toBeVisible(); // the leave week is explicit, not zero
+  // The leave week is explicit, not zero (on a Monday the week in progress has no completed day yet, so it is N/A too).
+  await expect(page.getByText(/\b[12] Not Applicable/)).toBeVisible();
 
   // Pattern review: explainable, with facts and a suggestion
   const meetings = page.locator('[data-pattern="meetings-weekday-3"]');
