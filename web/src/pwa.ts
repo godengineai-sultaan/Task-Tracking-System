@@ -8,6 +8,8 @@ import { useSyncExternalStore } from 'react';
 
 export interface OutboxItem {
   clientRequestId: string; userId: string; text: string; projectId: string | null; addToMyDay: boolean;
+  /** Product chosen at capture time (applies when no project decides it). */
+  productId?: string | null;
   capturedAt: string; status: 'pending' | 'failed'; error?: string; attempts?: number;
 }
 export interface SyncedCapture { task: { id: string; title: string }; replayed: boolean; warnings: string[]; addedToMyDay: boolean; planFull: boolean }
@@ -94,7 +96,7 @@ export function syncOutbox(): Promise<void> {
         let res: Response;
         try {
           res = await fetch('/api/pwa/captures', { method: 'POST', credentials: 'same-origin', headers: { 'x-requested-with': 'fetch', 'content-type': 'application/json' },
-            body: JSON.stringify({ clientRequestId: i.clientRequestId, userId: i.userId, text: i.text, capturedAt: i.capturedAt, projectId: i.projectId, addToMyDay: i.addToMyDay }) });
+            body: JSON.stringify({ clientRequestId: i.clientRequestId, userId: i.userId, text: i.text, capturedAt: i.capturedAt, projectId: i.projectId, productId: i.productId ?? null, addToMyDay: i.addToMyDay }) });
         } catch { break; } // still unreachable: keep everything for the next attempt
         if (res.ok) { done.push(await res.json()); await delItem(i.clientRequestId); continue; }
         if (res.status === 401 || res.status === 408 || res.status === 429 || res.status >= 502) break; // sign in again / server unreachable or busy: retry later

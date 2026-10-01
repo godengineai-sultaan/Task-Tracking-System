@@ -11,6 +11,8 @@ export interface Me {
   ai: { available: boolean; configured: boolean; enabledByTenant: boolean; note: string; model: string };
   /** Applied on first paint; the full branding query (/api/branding) refreshes it. */
   branding: { accent: string | null; logoUrl: string | null };
+  /** The organization tracks products (portfolio); allProducts = this person sees every product; leadOf = products they lead. */
+  portfolio: { enabled: boolean; allProducts: boolean; leadOf: string[] };
 }
 const Ctx = createContext<Me | null>(null);
 export function useMeQuery() { return useQuery({ queryKey: ['me'], queryFn: () => api.get<Me>('/api/me'), retry: false, staleTime: 60_000 }); }

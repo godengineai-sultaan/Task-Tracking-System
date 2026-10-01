@@ -5,7 +5,9 @@ import { api } from '../lib/api';
 import { newClientRequestId, queueCapture, usePwa } from '../pwa';
 import { CATEGORY_LABEL, PRIORITY_LABEL, fmtDate, hm } from '../lib/format';
 import { useMe } from '../lib/session';
-import { Badge, Button, Callout, Checkbox, IconButton, Kbd, Modal, Textarea, cx, useToast } from './ui';
+import { Badge, Button, Callout, Checkbox, Field, IconButton, Kbd, Modal, Textarea, cx, useToast } from './ui';
+import { useDefaultProduct, usePortfolio } from '../lib/portfolio';
+import { ProductSelect, productParam } from './ext/ProductParts';
 
 /**
  * One-line capture: "Prepare laptop PO draft today — 30 minutes #OPS !high @dev".
@@ -20,13 +22,18 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
   // One id per capture: a retry (or the offline outbox) re-sends it and the server returns the same task.
   const requestId = useRef('');
   const offline = !usePwa().online;
-  useEffect(() => { if (open) { openedAt.current = Date.now(); requestId.current = newClientRequestId(); setText(''); setAiDraft(null); setAddToMyDay(!!defaults?.addToMyDay); } }, [open]);
+  // Product: defaults to the current product focus; a project (from #KEY or the page) decides it instead.
+  const pf = usePortfolio(); const defaultProduct = useDefaultProduct();
+  const [product, setProduct] = useState(defaultProduct || 'none');
+  useEffect(() => { if (open) { openedAt.current = Date.now(); requestId.current = newClientRequestId(); setText(''); setAiDraft(null); setAddToMyDay(!!defaults?.addToMyDay); setProduct(defaultProduct || 'none'); } }, [open]);
   useEffect(() => { const t = setTimeout(() => setDebounced(text), 150); return () => clearTimeout(t); }, [text]);
   const parse = useQuery({ queryKey: ['parse', debounced], queryFn: () => api.post('/api/tasks/parse', { text: debounced }), enabled: open && !offline && debounced.trim().length > 0 });
   const p = offline ? undefined : parse.data;
+  const projectDecides = !!(p?.project?.id ?? defaults?.projectId);
   const saveOffline = async () => {
     try {
-      await queueCapture({ clientRequestId: requestId.current, text: text.trim(), projectId: defaults?.projectId ?? null, addToMyDay, capturedAt: new Date().toISOString() });
+      await queueCapture({ clientRequestId: requestId.current, text: text.trim(), projectId: defaults?.projectId ?? null, productId: defaults?.projectId ? null : productParam(product),
+        addToMyDay, capturedAt: new Date().toISOString() });
       toast({ tone: 'good', text: 'Saved on this device. It will be created when you are back online.' }); onClose();
     } catch { toast({ tone: 'critical', text: 'This browser could not store the capture offline. Copy it and try again when you are online.' }); }
   };
@@ -34,6 +41,7 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
     mutationFn: () => api.post('/api/tasks', { clientRequestId: requestId.current,
       title: aiDraft?.title ?? p?.title ?? text, dueDate: aiDraft?.due_date ?? p?.dueDate ?? null, estimateMinutes: aiDraft?.estimate_minutes ?? p?.estimateMinutes ?? null,
       priority: aiDraft?.priority ?? p?.priority ?? undefined, projectId: p?.project?.id ?? defaults?.projectId ?? null, ownerId: p?.owner?.id ?? undefined,
+      productId: projectDecides ? undefined : productParam(product),
       category: p?.category ?? undefined, description: aiDraft?.description, checklist: aiDraft?.checklist, addToMyDay,
       sourceType: aiDraft ? 'ai_draft' : 'quick_capture', captureMs: Date.now() - openedAt.current,
     }),
@@ -101,6 +109,8 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
           {p?.warnings?.length > 0 && <div className="mt-2 space-y-1">{p.warnings.map((w: string) => <p key={w} className="text-[12px] text-warning-ink">⚠ {w}</p>)}</div>}
         </div>
       )}
+      {pf.enabled && <Field className="mt-3" label="Product" hint={projectDecides ? 'The project decides the product.' : undefined}>{(id) =>
+        <ProductSelect id={id} value={projectDecides ? '' : product} onChange={setProduct} disabled={projectDecides} placeholder="From the project" />}</Field>}
       <div className="mt-3"><Checkbox checked={addToMyDay} onChange={setAddToMyDay} label="Add to today's intended outcomes" /></div>
       <details className="mt-4 rounded-lg ring-1 ring-line">
         <summary className="cursor-pointer select-none px-3 py-2 text-[13px] font-medium text-ink-2"><Sparkles className="mr-1 inline size-3.5" aria-hidden />Draft from a longer note (optional AI)</summary>

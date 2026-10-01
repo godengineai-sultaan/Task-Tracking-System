@@ -10,6 +10,7 @@ import { Avatar, Badge, Button, Card, Empty, ErrorState, Field, Input, Modal, Pa
 import { BlockDialog, ReasonDialog, StatusControl, useProjects, useUsers } from '../components/TaskStatus';
 import { TaskDrawer } from './TaskDetail';
 import { QuickCapture } from '../components/QuickCapture';
+import { ProductBadge } from '../components/ext/ProductParts';
 
 const BOARD = ['backlog', 'planned', 'in_progress', 'blocked', 'in_review', 'done'];
 
@@ -107,7 +108,8 @@ export function TaskTable({ tasks, onOpen, today }: { tasks: any[]; onOpen: (id:
             <tr key={t.id} className="hover:bg-surface-2/60">
               <td className="px-3 py-1.5"><StatusControl task={t} readOnly={t.can_edit === false} /></td>
               <td className="max-w-[420px] px-3 py-1.5"><button className="block w-full text-left" onClick={() => onOpen(t.id)}>
-                <span className={cx('block truncate font-medium', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</span>
+                <span className="flex min-w-0 items-center gap-1.5"><span className={cx('min-w-0 truncate font-medium', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</span>
+                  <ProductBadge productId={t.product_id} className="shrink-0" /></span>
                 <span className="block truncate text-[12px] text-ink-3">{[t.project_key, t.checklist_total ? `☑ ${t.checklist_done}/${t.checklist_total}` : null, t.open_dependencies ? `waits on ${t.open_dependencies}` : null,
                   t.status === 'blocked' && t.blocker_reason ? `Blocked: ${t.blocker_reason}` : null, t.reopen_count ? `reworked ${t.reopen_count}×` : null].filter(Boolean).join(' · ')}</span></button></td>
               <td className="px-3 py-1.5"><span className="flex items-center gap-1.5 whitespace-nowrap">{t.owner_name && <Avatar name={t.owner_name} size={20} />}{t.owner_name}</span></td>
@@ -182,6 +184,7 @@ function Cardlet({ t, onOpen, today }: { t: any; onOpen: (id: string) => void; t
       {t.status === 'blocked' && t.blocker_reason && <p className="mt-1 line-clamp-2 text-[12px] text-critical-ink">{t.blocker_reason}</p>}
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-3">
         {t.owner_name && <Avatar name={t.owner_name} size={18} />}
+        <ProductBadge productId={t.product_id} />
         {t.project_key && <span>{t.project_key}</span>}
         {due && <span className={cx(due.tone === 'critical' && 'font-medium text-critical-ink', due.tone === 'warning' && 'text-warning-ink')}>{due.text}</span>}
         {t.priority === 'urgent' && <Badge tone="critical">Urgent</Badge>}{t.priority === 'high' && <Badge tone="warning">High</Badge>}

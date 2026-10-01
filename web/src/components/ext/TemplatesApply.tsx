@@ -8,15 +8,20 @@ import { useMe } from '../../lib/session';
 import { Badge, Button, Callout, ErrorState, Field, Input, Modal, Select, Skeleton, cx } from '../ui';
 import { useProjects } from '../TaskStatus';
 import { newApplyKey, offsetLabel, plural } from './TemplatesShared';
+import { ProductSelect, productParam } from './ProductParts';
+import { useDefaultProduct, usePortfolio } from '../../lib/portfolio';
 
 const STEPS = ['Where and when', 'Owners and dates', 'Created'];
 const longDate = (d: string | null) => (d ? fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : 'No due date');
 
 /** Apply wizard: where and when, then owners and computed due dates, then the created tasks. */
 export function ApplyWizard({ template, items, open, onClose }: { template: any; items: any[]; open: boolean; onClose: () => void }) {
-  const me = useMe(); const qc = useQueryClient();
+  const me = useMe(); const qc = useQueryClient(); const pf = usePortfolio(); const defaultProduct = useDefaultProduct();
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [f, setF] = useState({ startDate: me.today, projectId: '', milestoneId: '', defaultOwnerId: me.user.id });
+  // A product playbook always files work in its own product; other templates follow the project, or the chosen product (default: the focus).
+  const [product, setProduct] = useState(defaultProduct || 'none');
+  const playbookProduct = pf.product(template.product_id);
   const [assign, setAssign] = useState<Record<string, string>>({});
   const [applyKey, setApplyKey] = useState(newApplyKey);
   const [result, setResult] = useState<any>(null);
@@ -26,7 +31,7 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
   useEffect(() => { if (moved.current) { moved.current = false; headRef.current?.focus(); } }, [step]);
   useEffect(() => {
     if (!open) return;
-    setStep(1); setF({ startDate: me.today, projectId: '', milestoneId: '', defaultOwnerId: me.user.id }); setAssign({}); setApplyKey(newApplyKey()); setResult(null);
+    setStep(1); setF({ startDate: me.today, projectId: '', milestoneId: '', defaultOwnerId: me.user.id }); setAssign({}); setApplyKey(newApplyKey()); setResult(null); setProduct(defaultProduct || 'none');
   }, [open, template.id]);
 
   const projects = useProjects();
@@ -34,7 +39,8 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
   const assignees = useQuery({ queryKey: ['template-assignees', f.projectId], queryFn: () => api.get(`/api/templates/assignees${qs({ projectId: f.projectId })}`), enabled: open });
   const body = useMemo(() => ({
     startDate: f.startDate, projectId: f.projectId || null, milestoneId: f.milestoneId || null, defaultOwnerId: f.defaultOwnerId || null, assignments: assign,
-  }), [f, assign]);
+    productId: f.projectId || template.product_id ? null : productParam(product),
+  }), [f, assign, product]);
   const preview = useQuery({
     queryKey: ['template-preview', template.id, template.version, body], queryFn: () => api.post(`/api/templates/${template.id}/preview`, body),
     enabled: open && step === 2 && /^\d{4}-\d{2}-\d{2}$/.test(f.startDate), placeholderData: keepPreviousData, retry: false,
@@ -92,6 +98,10 @@ export function ApplyWizard({ template, items, open, onClose }: { template: any;
               <option value="">No milestone</option>
               {projectMilestones.map((m: any) => <option key={m.id} value={m.id}>{m.name}{m.due_date ? ` (due ${fmtDate(m.due_date)})` : ''}</option>)}
             </Select>}</Field>
+          {pf.enabled && (template.product_id
+            ? <div className="sm:col-span-2"><Callout tone="info">A {playbookProduct?.name ?? 'product'} playbook: its tasks are filed in {playbookProduct?.name ?? 'that product'}. A project, if you choose one, must belong to it too.</Callout></div>
+            : <Field label="Product" hint={f.projectId ? 'The project decides the product.' : undefined}>{(id) =>
+              <ProductSelect id={id} value={f.projectId ? '' : product} onChange={setProduct} disabled={!!f.projectId} placeholder="From the project" />}</Field>)}
           <div className="sm:col-span-2"><Callout tone="neutral">
             You can assign steps to yourself and to people you manage{f.projectId ? ', and to project members if you own the project' : ''}. Main and system admins can assign anyone.
           </Callout></div>

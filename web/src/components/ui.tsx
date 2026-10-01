@@ -73,10 +73,14 @@ export function Card({ title, actions, children, className, padded = true, subti
     </section>
   );
 }
+/** Extra header content the shell supplies for the current route (the product scope chip on list pages that follow the product focus). */
+export const PageScopeContext = createContext<ReactNode>(null);
 export function PageHeader({ title, subtitle, actions, eyebrow }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; eyebrow?: ReactNode }) {
+  const scope = useContext(PageScopeContext);
   return (
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
       <div className="min-w-0">
+        {scope}
         {eyebrow && <div className="mb-1 text-[12px] font-medium uppercase tracking-wide text-ink-3">{eyebrow}</div>}
         <h1 className="text-[22px] font-semibold leading-tight text-ink">{title}</h1>
         {subtitle && <p className="mt-1 text-sm text-ink-2">{subtitle}</p>}

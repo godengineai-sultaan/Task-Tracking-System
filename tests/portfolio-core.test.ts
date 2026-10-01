@@ -250,6 +250,14 @@ describe('product work and partitions', () => {
       .rejects.toThrow(/row-level security/);
     expect((await outsider.get(`/api/objectives/${obj.id}`)).status).toBe(404);
     expect(ids((await outsider.get('/api/objectives')).body)).not.toContain(obj.id);
+    // A company-wide objective linked to product milestones: outsiders still open it, without the product's milestone names.
+    const wide = (await admin.post('/api/objectives/create', { title: 'Group-wide adoption' })).body;
+    expect((await admin.post(`/api/objectives/${wide.id}/milestones`, { milestoneId: ms.body.id })).status).toBe(200);
+    const seen = await outsider.get(`/api/objectives/${wide.id}`);
+    expect(seen.status).toBe(200);
+    expect(JSON.stringify(seen.body)).not.toContain('"Beta"');
+    expect((await outsider.get('/api/objectives/overview')).status).toBe(200);
+    expect(JSON.stringify((await emp.get(`/api/objectives/${wide.id}`)).body)).toContain('Beta');
   });
   it('templates: product playbooks are visible to that product\'s members only', async () => {
     const names = async (c: Client) => (await c.get('/api/templates')).body.templates.filter((t: any) => t.product_id).map((t: any) => t.product_id);
@@ -324,6 +332,14 @@ describe('product focus', () => {
     expect(listed.map((e: any) => e.id)).toContain(te.body.entry.id);
     const created = await emp.focus('none').post('/api/tasks', { title: 'Written under focus', productId: A });
     expect(created.body.product_id).toBe(A);
+  });
+  it('every list endpoint that follows the focus answers under a product focus and under "none"', async () => {
+    const { FOCUS_PATHS } = await import('../server/src/services/ext/portfolio-scope.js');
+    const query: Record<string, string> = { '/api/search': '?q=Partition' };
+    for (const path of FOCUS_PATHS) for (const f of [A, 'none']) {
+      const r = await admin.focus(f).get(path + (query[path] ?? ''));
+      expect([path, f, r.status < 500]).toEqual([path, f, true]);
+    }
   });
   it('a focus outside the actor\'s scope is refused, never widened', async () => {
     const r = await outsider.focus(A).get('/api/tasks');

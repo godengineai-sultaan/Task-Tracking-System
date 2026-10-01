@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { Command } from 'cmdk';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bell, BarChart3, Briefcase, CalendarCheck2, CalendarDays, ClipboardList, Gauge, LayoutDashboard, LogOut, Menu, Moon, Plug, Plus, Search, Settings,
-  ShieldCheck, Sun, Users, ListChecks, FolderKanban, Repeat, LayoutTemplate, Workflow, CalendarRange, Target, LineChart, Wallet, Send } from 'lucide-react';
+  ShieldCheck, Sun, Users, ListChecks, FolderKanban, Repeat, LayoutTemplate, Workflow, CalendarRange, Target, LineChart, Wallet, Send, Boxes } from 'lucide-react';
 import { BrandMark } from './ext/BrandMark';
 import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
@@ -11,14 +11,17 @@ import { useMe, useRoles } from '../lib/session';
 import { QuickCapture } from './QuickCapture';
 import { PwaStatus } from './ext/PwaStatus';
 import { clearOfflineData, confirmSignOut, usePwa } from '../pwa';
-import { Avatar, IconButton, Kbd, StatusDot, cx, useEscape } from './ui';
+import { Avatar, IconButton, Kbd, PageScopeContext, StatusDot, cx, useEscape } from './ui';
+import { ProductSwitcher } from './ext/ProductSwitcher';
+import { ScopeChip } from './ext/ProductParts';
+import { isFocusRoute, usePortfolio } from '../lib/portfolio';
 
 type NavItem = { to: string; label: string; icon: ReactNode; show: boolean };
 /** One name for the routine view everywhere (nav and command palette): company-wide for the main admin, team-scoped for managers. */
 const routineLabel = (r: { routineAdmin: boolean }) => (r.routineAdmin ? 'Daily routine' : 'Team routine');
 
 export function Shell() {
-  const me = useMe(); const r = useRoles(); const nav = useNavigate(); const loc = useLocation(); const qc = useQueryClient();
+  const me = useMe(); const r = useRoles(); const nav = useNavigate(); const loc = useLocation(); const qc = useQueryClient(); const pf = usePortfolio();
   const [capture, setCapture] = useState(false); const [palette, setPalette] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [bell, setBell] = useState(false);
   const bellRef = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useState<string>(() => { try { return localStorage.getItem('theme') ?? ''; } catch { return ''; } });
@@ -53,6 +56,7 @@ export function Shell() {
       { to: '/blockers', label: 'Blocker escalation', icon: <ShieldCheck className="size-4" />, show: r.canReview || r.sysAdmin },
       { to: '/insights', label: 'Insights', icon: <LineChart className="size-4" />, show: r.canReview || r.leadership },
       { to: '/leadership', label: 'Leadership', icon: <Gauge className="size-4" />, show: r.leadership || r.routineAdmin },
+      { to: '/portfolio', label: 'Portfolio', icon: <Boxes className="size-4" />, show: pf.enabled && (r.leadership || r.routineAdmin || r.sysAdmin || (me.portfolio?.leadOf.length ?? 0) > 0) },
       { to: '/objectives', label: 'Objectives', icon: <Target className="size-4" />, show: true },
       { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer || r.leadership || me.user.ownsProjects },
       { to: '/client-updates', label: 'Client updates', icon: <Send className="size-4" />, show: r.leadership || r.sysAdmin || me.user.ownsClientProjects },
@@ -103,6 +107,7 @@ export function Shell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-line bg-surface/90 px-3 backdrop-blur sm:px-5">
           <IconButton label="Open navigation" className="lg:hidden" onClick={() => setMobileNav(true)}><Menu className="size-5" /></IconButton>
+          {!r.customer && <ProductSwitcher />}
           <button onClick={() => setPalette(true)} className="flex h-9 max-w-md flex-1 items-center gap-2 rounded-lg bg-surface-2 px-3 text-left text-sm text-ink-3 ring-1 ring-inset ring-line hover:ring-line-strong">
             <Search className="size-4" aria-hidden /><span className="flex-1 truncate">Search tasks, projects, actions…</span><span className="hidden sm:inline"><Kbd>⌘K</Kbd></span>
           </button>
@@ -117,7 +122,8 @@ export function Shell() {
           </div>
         </header>
         <PwaStatus />
-        <main id="main" className={cx('mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 sm:px-6 lg:pb-8', r.customer ? 'pb-8' : 'pb-[calc(6rem+env(safe-area-inset-bottom))]')}><Outlet /></main>
+        <main id="main" className={cx('mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 sm:px-6 lg:pb-8', r.customer ? 'pb-8' : 'pb-[calc(6rem+env(safe-area-inset-bottom))]')}>
+          <PageScopeContext.Provider value={isFocusRoute(loc.pathname) ? <ScopeChip /> : null}><Outlet /></PageScopeContext.Provider></main>
       </div>
       {!r.customer && <BottomNav onCapture={() => setCapture(true)} onMore={() => setMobileNav(true)} moreOpen={mobileNav} />}
       <QuickCapture open={capture} onClose={() => setCapture(false)} defaults={{ addToMyDay: loc.pathname === '/' }} />

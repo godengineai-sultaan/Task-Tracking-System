@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import './index.css';
 import { MeProvider, useMeQuery, useRoles } from './lib/session';
 import { Shell } from './components/Shell';
+import { PortfolioProvider } from './lib/portfolio';
 import { ErrorState, Spinner, ToastProvider } from './components/ui';
 import { JoinPage, LoginPage, SignupPage } from './pages/Auth';
 import { initPwa } from './pwa';
@@ -36,6 +37,8 @@ const Profitability = lazy(() => import('./pages/ext/Profitability'));
 const ClientUpdates = lazy(() => import('./pages/ext/ClientUpdates'));
 const Insights = lazy(() => import('./pages/ext/Insights'));
 const Blockers = lazy(() => import('./pages/Blockers'));
+const Portfolio = lazy(() => import('./pages/ext/Portfolio'));
+const ProductHome = lazy(() => import('./pages/ext/ProductHome'));
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: (n, e: any) => n < 2 && (!e?.status || e.status >= 500), refetchOnWindowFocus: true, staleTime: 15_000 } } });
 
@@ -46,7 +49,7 @@ function Authed() {
     if ((me.error as any).status === 401) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
     return <div className="p-6"><ErrorState error={me.error} onRetry={() => me.refetch()} /></div>;
   }
-  return <MeProvider me={me.data!}><Shell /></MeProvider>;
+  return <MeProvider me={me.data!}><PortfolioProvider><Shell /></PortfolioProvider></MeProvider>;
 }
 const page = (el: React.ReactNode) => <Suspense fallback={<Spinner />}>{el}</Suspense>;
 /** Client (customer) accounts only have the portal and their settings: every staff page sends them to the portal. */
@@ -86,6 +89,8 @@ const router = createBrowserRouter([
       { path: 'client-updates', element: page(<ClientUpdates />) },
       { path: 'insights', element: page(<Insights />) },
       { path: 'blockers', element: page(<Blockers />) },
+      { path: 'portfolio', element: page(<Portfolio />) },
+      { path: 'products/:id', element: page(<ProductHome />) },
     ] },
     { path: '*', element: <div className="p-10 text-center text-ink-3">Page not found.</div> },
   ] },
