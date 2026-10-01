@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { tx } from '../app.js';
 import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
-import { forbidden, notFound } from '../lib/errors.js';
+import { conflict, forbidden, notFound } from '../lib/errors.js';
 import { has, requireStaff } from '../services/access.js';
 import { customerView } from '../services/oversight.js';
 
@@ -82,44 +82,56 @@ export async function projectRoutes(app: FastifyInstance) {
     return { ok: true };
   }));
 
+  /** Linking milestones to objectives is leadership's call (as in the objectives area), checked and audited the same way. */
+  async function linkObjective(db: any, a: any, m: { id: string; name: string; objective_id: string | null }, objectiveId: string | null, move?: boolean) {
+    if ((m.objective_id ?? null) === objectiveId) return;
+    if (!has(a, 'leadership') && !has(a, 'system_admin')) throw forbidden('Only leadership or a system admin can link milestones to objectives');
+    if (objectiveId && !(await one(db, `select 1 from objectives where id = $1`, [objectiveId]))) throw notFound('Objective not found');
+    if (m.objective_id && objectiveId && !move) {
+      const cur = await one(db, `select title from objectives where id = $1`, [m.objective_id]);
+      throw conflict(`This milestone is linked to "${cur?.title ?? 'another objective'}". Confirm to move it to this objective.`, { objectiveId: m.objective_id });
+    }
+    if (m.objective_id) await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.milestone_unlinked', resourceType: 'objective', resourceId: m.objective_id, details: { milestoneId: m.id, milestone: m.name } });
+    if (objectiveId) await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.milestone_linked', resourceType: 'objective', resourceId: objectiveId,
+      details: { milestoneId: m.id, milestone: m.name, movedFrom: m.objective_id ?? null } });
+  }
   app.post('/api/projects/:id/milestones', async (req) => tx(req, async (db, a) => {
     const p = await loadEditable(db, a, (req.params as any).id);
     const b = z.object({ name: z.string().min(1).max(200), dueDate: date.nullable().optional(), objectiveId: uuid.nullable().optional() }).parse(req.body);
-    return one(db, `insert into milestones (tenant_id, project_id, name, due_date, objective_id) values ($1,$2,$3,$4,$5) returning *`, [a.tenantId, p.id, b.name, b.dueDate ?? null, b.objectiveId ?? null]);
+    const m = await one(db, `insert into milestones (tenant_id, project_id, name, due_date) values ($1,$2,$3,$4) returning *`, [a.tenantId, p.id, b.name, b.dueDate ?? null]);
+    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'milestone.create', resourceType: 'milestone', resourceId: m.id, details: { projectId: p.id, name: m.name } });
+    if (b.objectiveId) {
+      await linkObjective(db, a, m, b.objectiveId);
+      return one(db, `update milestones set objective_id = $2 where id = $1 returning *`, [m.id, b.objectiveId]);
+    }
+    return m;
   }));
   app.patch('/api/milestones/:id', async (req) => tx(req, async (db, a) => {
     const m = await one(db, `select * from milestones where id = $1`, [(req.params as any).id]);
     if (!m) throw notFound();
     await loadEditable(db, a, m.project_id);
-    const b = z.object({ name: z.string().min(1).max(200).optional(), dueDate: date.nullable().optional(), status: z.enum(['open', 'done', 'cancelled']).optional(), objectiveId: uuid.nullable().optional() }).parse(req.body);
-    return one(db, `update milestones set name = coalesce($2,name), due_date = case when $4 then $3 else due_date end, status = coalesce($5,status),
+    const b = z.object({ name: z.string().min(1).max(200).optional(), dueDate: date.nullable().optional(), status: z.enum(['open', 'done', 'cancelled']).optional(),
+      objectiveId: uuid.nullable().optional(), move: z.boolean().optional() }).parse(req.body);
+    if ('objectiveId' in b) await linkObjective(db, a, m, b.objectiveId ?? null, b.move);
+    const r = await one(db, `update milestones set name = coalesce($2,name), due_date = case when $4 then $3 else due_date end, status = coalesce($5,status),
       objective_id = case when $7 then $6 else objective_id end where id = $1 returning *`,
       [m.id, b.name ?? null, b.dueDate ?? null, 'dueDate' in b, b.status ?? null, b.objectiveId ?? null, 'objectiveId' in b]);
+    const changed = Object.fromEntries((['name', 'due_date', 'status', 'objective_id'] as const).filter((k) => m[k] !== r[k]).map((k) => [k, { from: m[k], to: r[k] }]));
+    if (Object.keys(changed).length) await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'milestone.update', resourceType: 'milestone', resourceId: m.id, details: { changed } });
+    return r;
   }));
   app.get('/api/milestones', async (req) => tx(req, async (db, a) => {
     requireStaff(a);
-    return many(db, `select m.id, m.name, m.due_date, m.status, m.project_id, p.key project_key from milestones m join projects p on p.id = m.project_id where m.status = 'open' order by m.due_date nulls last`);
+    return many(db, `select m.id, m.name, m.due_date, m.status, m.project_id, p.key project_key from milestones m join projects p on p.id = m.project_id
+      where m.status = 'open' and ${visible} order by m.due_date nulls last`, [a.id, has(a, 'routine_admin')]);
   }));
 
   app.get('/api/objectives', async (req) => tx(req, async (db, a) => {
     requireStaff(a);
     return many(db, `select o.*, u.name owner_name from objectives o left join users u on u.id = o.owner_id order by o.status, o.period_end nulls last`);
   }));
-  app.post('/api/objectives', async (req) => tx(req, async (db, a) => {
-    if (!has(a, 'leadership') && !has(a, 'system_admin')) throw forbidden('Leadership sets objectives');
-    const b = z.object({ title: z.string().min(1).max(300), description: z.string().max(5000).default(''), ownerId: uuid.nullable().optional(),
-      periodStart: date.nullable().optional(), periodEnd: date.nullable().optional() }).parse(req.body);
-    return one(db, `insert into objectives (tenant_id, title, description, owner_id, period_start, period_end) values ($1,$2,$3,$4,$5,$6) returning *`,
-      [a.tenantId, b.title, b.description, b.ownerId ?? a.id, b.periodStart ?? null, b.periodEnd ?? null]);
-  }));
-  app.patch('/api/objectives/:id', async (req) => tx(req, async (db, a) => {
-    if (!has(a, 'leadership') && !has(a, 'system_admin')) throw forbidden();
-    const b = z.object({ status: z.enum(['active', 'achieved', 'missed', 'dropped']).optional(), title: z.string().min(1).max(300).optional() }).parse(req.body);
-    const o = await one(db, `update objectives set status = coalesce($2,status), title = coalesce($3,title), version = version + 1 where id = $1 returning *`, [(req.params as any).id, b.status ?? null, b.title ?? null]);
-    if (!o) throw notFound();
-    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.update', resourceType: 'objective', resourceId: o.id, resourceVersion: o.version, details: b });
-    return o;
-  }));
+  // Objectives are created and edited only through the objectives area (POST /api/objectives/create, PUT /api/objectives/:id):
+  // one validated, versioned and audited write path.
 
   app.get('/api/customer/portal', async (req) => tx(req, (db, a) => customerView(db, a)));
 }

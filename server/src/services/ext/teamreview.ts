@@ -1,11 +1,12 @@
 import { DateTime } from 'luxon';
 import PDFDocument from 'pdfkit';
+import { drawPdfBrandHeader, type PdfBrand } from './clientbrand-brand.js';
 import type { Db } from '../../lib/db.js';
 import { many, one } from '../../lib/db.js';
 import { audit } from '../../lib/audit.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { type Actor, has, isStaff, reviewableUserIds } from '../access.js';
-import { buildReport, METRIC_DEFINITIONS } from '../analytics.js';
+import { buildReport, buildReports, METRIC_DEFINITIONS } from '../analytics.js';
 import { localToday } from '../calendar.js';
 import { notify } from '../notify.js';
 import { createTask } from '../tasks.js';
@@ -121,10 +122,9 @@ export async function teamWeek(db: Db, a: Actor, opts: { week?: string; includeM
     where u.id = any($1::uuid[]) and u.status = 'active' and ($2::boolean or u.id <> $3) order by lower(u.name), u.name, u.id`, [ids, !!opts.includeMe, a.id]);
   const reviews = await many(db, `${REVIEW_SELECT} where wr.subject_user_id = any($1::uuid[]) and wr.week_start = $2 order by wr.created_at`, [users.map((u) => u.id), start]);
   const people: PersonWeek[] = [];
-  for (const u of users) {
-    const r = await buildReport(db, u.id, 'week', start, end, { trend: false });
-    people.push(summarizePerson(u, r, reviews.filter((x) => x.subject_user_id === u.id), a));
-  }
+  // One set of queries for the whole team (not a full report round trip per person).
+  const reports = await buildReports(db, users.map((u) => u.id), 'week', start, end, { trend: false });
+  for (const u of users) people.push(summarizePerson(u, reports.get(u.id)!, reviews.filter((x) => x.subject_user_id === u.id), a));
   return {
     week: { start, end, isCurrent: start <= today && today <= end }, today,
     scope: has(a, 'routine_admin') ? 'company' as const : 'team' as const, includeMe: !!opts.includeMe,
@@ -251,11 +251,13 @@ export function teamWeekCsv(d: Awaited<ReturnType<typeof teamWeek>>) {
   return rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n';
 }
 
-export function teamWeekPdf(d: Awaited<ReturnType<typeof teamWeek>>, a: Actor): Promise<Buffer> {
+export function teamWeekPdf(d: Awaited<ReturnType<typeof teamWeek>>, a: Actor, brand?: PdfBrand): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 48, info: { Title: 'Weekly team review', Author: 'Task Tracking and Productivity' } });
     const chunks: Buffer[] = [];
     doc.on('data', (c) => chunks.push(c)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
+    // Organization name, accent and logo, like every other exported report.
+    if (brand) drawPdfBrandHeader(doc, brand);
     const h1 = (t: string) => doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(t).moveDown(0.3);
     const h2 = (t: string) => { doc.moveDown(0.6).font('Helvetica-Bold').fontSize(12).fillColor('#111827').text(t).moveDown(0.2); };
     const p = (t: string, color = '#374151') => doc.font('Helvetica').fontSize(9.5).fillColor(color).text(t, { lineGap: 2 });

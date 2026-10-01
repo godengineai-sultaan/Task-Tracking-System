@@ -102,6 +102,7 @@ export function taskVisibility(a: Actor, offset: number): [string, unknown[]] {
     or exists (select 1 from task_collaborators c where c.task_id = t.id and c.user_id = ${me})
     or (p.id is not null and p.visibility = 'company')
     or (p.id is not null and (p.owner_id = ${me} or exists (select 1 from project_members pm where pm.project_id = p.id and pm.user_id = ${me})))
+    or exists (select 1 from blockers bw where bw.task_id = t.id and bw.resolved_at is null and bw.waiting_on_user_id = ${me})
   )`, [a.id, a.managedUserIds]];
 }
 

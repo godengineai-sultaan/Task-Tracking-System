@@ -97,7 +97,7 @@ export function TaskDetailView({ id, onClose }: { id: string; onClose: () => voi
             </li>
           ))}
         </ol>
-        {d.time.length > 0 && <p className="mt-3 text-[12px] text-ink-3">Time recorded: {hm(d.time.reduce((s: number, e: any) => s + (e.ended_at ? (Date.parse(e.ended_at) - Date.parse(e.started_at)) / 60000 : 0), 0))} across {d.time.length} entr{d.time.length > 1 ? 'ies' : 'y'} (sources shown in My Day / reports).</p>}
+        {d.timeTotalMinutes > 0 && <p className="mt-3 text-[12px] text-ink-3">Time recorded: {hm(d.timeTotalMinutes)}{d.time.length > 0 ? ` across ${d.time.length} entr${d.time.length > 1 ? 'ies' : 'y'} you can see` : ''}{d.timeHiddenEntries > 0 ? ' — teammates\' individual entries stay in their own records' : ''} (sources shown in My Day / reports).</p>}
       </Section>
       <ReassignModal open={reassign} onClose={() => setReassign(false)} task={t} users={users.data ?? []} />
       <div className="h-6" />

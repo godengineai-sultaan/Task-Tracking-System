@@ -5,7 +5,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { decrypt, encrypt, hmacHex, newToken, safeEqualHex } from '../lib/crypto.js';
 import { enqueue } from '../lib/jobs.js';
-import { type Actor, has } from './access.js';
+import { type Actor, assertContribute, has, loadVisibleTask } from './access.js';
 import { createTask } from './tasks.js';
 import { notify } from './notify.js';
 
@@ -88,6 +88,12 @@ function minimize(p: any) {
   return out;
 }
 
+/** Only plain web links become evidence (same rule as manually added evidence): anything else is dropped. */
+export function httpUrlOrNull(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  try { const u = new URL(v); return u.protocol === 'http:' || u.protocol === 'https:' ? u.toString() : null; } catch { return null; }
+}
+
 async function userByEmail(db: Db, email?: string) {
   if (!email) return null;
   return one(db, `select id, name from users where lower(email) = lower($1) and status = 'active' and not ('customer' = any(roles))`, [email]);
@@ -117,7 +123,7 @@ export async function processEvent(db: Db, eventId: string) {
         on conflict (tenant_id, user_id, dedupe_key) do update set event_ids = array_append(suggestions.event_ids, $5::uuid),
           data = suggestions.data || jsonb_build_object('event_count', coalesce((suggestions.data->>'event_count')::int, 1) + 1)`,
         [tenantId, owner.id, kind, `${ev.connection_kind}:${ref}`, eventId, title.slice(0, 200),
-         { source: ev.connection_kind, ref, url: p.url ?? null, event_type: ev.event_type, event_count: 1 }, existingTask?.id ?? null]);
+         { source: ev.connection_kind, ref, url: httpUrlOrNull(p.url), event_type: ev.event_type, event_count: 1 }, existingTask?.id ?? null]);
       return done('suggested', `Suggestion for ${owner.name} (confirmation required)`);
     }
     case 'ics_calendar': {
@@ -139,10 +145,22 @@ export async function processEvent(db: Db, eventId: string) {
 export async function importIcs(db: Db, a: Actor, connectionId: string, icsText: string) {
   const conn = await one(db, `select * from integration_connections where id = $1 and user_id = $2 and kind = 'ics_calendar'`, [connectionId, a.id]);
   if (!conn) throw notFound('Calendar connection not found');
-  const { received, duplicates } = await ingestIcs(db, a.tenantId, connectionId, icsText);
+  const { received, duplicates, unreadable, capped } = await ingestIcs(db, a.tenantId, connectionId, icsText);
   await db.query(`update integration_connections set last_sync_at = now(), last_error = null, status = 'active' where id = $1`, [connectionId]);
-  await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'integration.ics_import', resourceType: 'integration_connection', resourceId: connectionId, details: { received, duplicates } });
-  return { received, duplicates };
+  await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'integration.ics_import', resourceType: 'integration_connection', resourceId: connectionId, details: { received, duplicates, unreadable, capped } });
+  return { received, duplicates, ...(unreadable ? { unreadable } : {}), ...(capped ? { capped } : {}) };
+}
+
+/** Bounds on recurrence expansion: one small VEVENT must not turn into millions of rows and jobs. */
+export const ICS_MAX_INSTANCES_PER_EVENT = 500, ICS_MAX_INSTANCES_PER_IMPORT = 5000;
+/** Rules that repeat more than a couple of times an hour (second/minute rules, or BYMINUTE/BYSECOND lists) are not meetings. */
+export function tooFrequentRule(rrule: any) {
+  const o = rrule?.options ?? {};
+  const freq = String(o.freq ?? '').toUpperCase();
+  if (freq === 'SECONDLY' || freq === 'MINUTELY') return true;
+  const n = (v: unknown) => (Array.isArray(v) && v.length ? v.length : 1);
+  const perDay = (freq === 'HOURLY' ? 24 : n(o.byHour ?? o.byhour)) * n(o.byMinute ?? o.byminute) * n(o.bySecond ?? o.bysecond);
+  return perDay > 48;
 }
 
 /**
@@ -158,15 +176,20 @@ export async function ingestIcs(db: Db, tenantId: string, connectionId: string, 
     throw badRequest(`Could not read calendar file: ${e.message}`);
   }
   const { from, to } = window;
-  let received = 0, duplicates = 0, unreadable = 0;
+  let received = 0, duplicates = 0, unreadable = 0, capped = 0, instancesSeen = 0;
   // Earliest end among events skipped only because they were still running or upcoming (tells a URL subscription when a full re-read is due).
   let nextEnd: Date | null = null;
   for (const ev of Object.values(parsed) as any[]) {
     if (ev.type !== 'VEVENT' || !ev.start) continue;
+    if (instancesSeen >= ICS_MAX_INSTANCES_PER_IMPORT) { capped++; continue; }
     let instances: any[];
     // One unreadable repeat rule (e.g. an endless minute-level rule) must not block every other event.
+    if (ev.rrule && tooFrequentRule(ev.rrule)) { unreadable++; continue; }
     try { instances = ev.rrule ? ical.expandRecurringEvent(ev, { from, to }) : [{ start: ev.start, end: ev.end ?? ev.start, summary: ev.summary, isFullDay: ev.datetype === 'date' }]; }
     catch { unreadable++; continue; }
+    if (instances.length > ICS_MAX_INSTANCES_PER_EVENT) { instances = instances.slice(0, ICS_MAX_INSTANCES_PER_EVENT); capped++; }
+    if (instancesSeen + instances.length > ICS_MAX_INSTANCES_PER_IMPORT) { instances = instances.slice(0, ICS_MAX_INSTANCES_PER_IMPORT - instancesSeen); capped++; }
+    instancesSeen += instances.length;
     for (const inst of instances as any[]) {
       const start = new Date(inst.start), end = new Date(inst.end ?? inst.start);
       if (start < from || start > to || !(end > start)) continue;
@@ -183,7 +206,7 @@ export async function ingestIcs(db: Db, tenantId: string, connectionId: string, 
       await enqueue(db, { tenantId, kind: 'integration.process', payload: { eventId: row.id }, idempotencyKey: `integration.process:${row.id}` });
     }
   }
-  return { received, duplicates, unreadable, nextEnd };
+  return { received, duplicates, unreadable, capped, nextEnd };
 }
 
 export async function decideSuggestion(db: Db, a: Actor, id: string, decision: 'accept' | 'dismiss', opts: { taskId?: string } = {}) {
@@ -191,8 +214,11 @@ export async function decideSuggestion(db: Db, a: Actor, id: string, decision: '
   if (!s) throw notFound('Suggestion not found');
   if (s.status !== 'open') return { status: s.status };
   let result: any = null;
+  const url = httpUrlOrNull(s.data?.url);
   if (decision === 'accept') {
     if (s.kind === 'time_entry') {
+      // Time may only be logged against a task the person can see (same rule as timers and manual entries).
+      if (opts.taskId) await loadVisibleTask(db, a, opts.taskId);
       const dup = await one(db, `select id from time_entries where source = 'calendar' and source_event_id = $1 and deleted_at is null`, [s.event_ids[0]]);
       if (!dup) result = await one(db, `insert into time_entries (tenant_id, user_id, task_id, category, started_at, ended_at, source, source_event_id, note)
         values ($1,$2,$3,'meeting',$4,$5,'calendar',$6,$7) returning *`,
@@ -200,18 +226,19 @@ export async function decideSuggestion(db: Db, a: Actor, id: string, decision: '
       await db.query(`update integration_events set status = 'applied', result = 'Confirmed as meeting time' where id = any($1::uuid[])`, [s.event_ids]);
     } else if (s.kind === 'task') {
       const r = await createTask(db, a, a.tenantId, { title: s.title, sourceType: 'integration', externalKey: `${s.data.source}:${s.data.ref}`,
-        sourceRef: { module: s.data.source, external_ref: s.data.ref, url: s.data.url } });
+        sourceRef: { module: s.data.source, external_ref: s.data.ref, url } });
       result = r.task;
-      if (s.data.url) await db.query(`insert into evidence_links (tenant_id, task_id, kind, label, url, added_by) values ($1,$2,'link',$3,$4,$5)`,
-        [a.tenantId, r.task.id, `${s.data.source} ${s.data.ref}`, s.data.url, a.id]);
+      if (url) await db.query(`insert into evidence_links (tenant_id, task_id, kind, label, url, added_by) values ($1,$2,'link',$3,$4,$5)`,
+        [a.tenantId, r.task.id, `${s.data.source} ${s.data.ref}`, url, a.id]);
       await db.query(`update integration_events set status = 'applied', result = $2 where id = any($1::uuid[])`, [s.event_ids, `Task ${r.task.id}`]);
     } else if (s.kind === 'link_to_task') {
       const taskId = opts.taskId ?? s.matched_task_id;
       if (!taskId) throw badRequest('Choose the task to link this activity to');
-      const t = await one(db, `select id from tasks where id = $1`, [taskId]);
-      if (!t) throw notFound('Task not found');
-      if (s.data.url) await db.query(`insert into evidence_links (tenant_id, task_id, kind, label, url, added_by) values ($1,$2,'link',$3,$4,$5)`,
-        [a.tenantId, taskId, `${s.data.source} ${s.data.ref} (${s.data.event_count ?? 1} event(s))`, s.data.url, a.id]);
+      // Evidence and source links are task changes: the person must be able to see and contribute to the task.
+      const t = await loadVisibleTask(db, a, taskId);
+      await assertContribute(db, a, t);
+      if (url) await db.query(`insert into evidence_links (tenant_id, task_id, kind, label, url, added_by) values ($1,$2,'link',$3,$4,$5)`,
+        [a.tenantId, taskId, `${s.data.source} ${s.data.ref} (${s.data.event_count ?? 1} event(s))`, url, a.id]);
       await db.query(`update tasks set source_ref = coalesce(source_ref, '{}'::jsonb) || jsonb_build_object('external_ref', $2::text) where id = $1`, [taskId, s.data.ref]);
       await db.query(`update integration_events set status = 'applied', result = $2 where id = any($1::uuid[])`, [s.event_ids, `Linked to task ${taskId}`]);
       result = { taskId };

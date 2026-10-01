@@ -19,6 +19,8 @@ async function fixture(o: Org) {
       const keys = Object.keys(row);
       return (await db.query(`insert into ${table} (tenant_id, ${keys.join(',')}) values ($1, ${keys.map((_, i) => `$${i + 2}`).join(',')}) returning *`, [T, ...keys.map((k) => row[k])])).rows[0];
     };
+    // Everyone was employed well before the fixture periods (records start then, so the previous period is comparable).
+    await db.query(`update users set created_at = '2025-01-01T00:00:00Z' where tenant_id = $1`, [T]);
     D.eng = (await ins('departments', { name: 'Eng' })).id;
     D.ops = (await ins('departments', { name: 'Ops' })).id;
     await db.query(`update users set department_id = $1 where id = any($2::uuid[])`, [D.eng, [U.emp, U.emp2, U.manager]]);

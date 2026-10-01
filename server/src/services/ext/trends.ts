@@ -166,8 +166,9 @@ export async function buildPersonalTrends(db: Db, userId: string, weeks = 12, en
     const statuses = intended.map((id) => statusAt(id, endT));
     const recapConfirmed = ['confirmed', 'manager_reviewed'].includes(reviewBy.get(date) ?? '');
     return { ...base, explained: alloc.explainedMinutes, unknown: alloc.unknownMinutes, meeting: alloc.byCategory.meeting,
-      focus: Math.round(fb.reduce((s, r) => s + r.minutes, 0)), focusBlocks: fb.length, switches: taskSwitches(segs), logged: alloc.explainedMinutes > 0,
-      blocked: Math.round(blocked), intended: intended.length, acceptedPlanned: statuses.filter((s) => s === 'done').length,
+      // Windows span the whole scheduled day including the break: cap both at what the day can actually hold.
+      focus: Math.round(Math.min(fb.reduce((s, r) => s + r.minutes, 0), alloc.explainedMinutes)), focusBlocks: fb.length, switches: taskSwitches(segs), logged: alloc.explainedMinutes > 0,
+      blocked: Math.round(Math.min(blocked, cap.availableMinutes)), intended: intended.length, acceptedPlanned: statuses.filter((s) => s === 'done').length,
       carryovers: statuses.filter((s) => s !== 'done' && s !== 'cancelled').length,
       recapExpected: true, recapConfirmed };
   });

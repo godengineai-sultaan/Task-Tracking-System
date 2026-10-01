@@ -66,7 +66,8 @@ export default function Analytics() {
 }
 
 function Report({ r, kind, own }: { r: any; kind: Kind; own: boolean }) {
-  const s = r.summary; const tr = r.trend;
+  // A previous period with no comparable working days gives no deltas (status not_applicable), only its note.
+  const s = r.summary; const trNa = r.trend?.status === 'not_applicable' ? r.trend : null; const tr = trNa ? null : r.trend;
   const delta = (v: number | null | undefined, isPct = true, higherIsGood: boolean | null = true) => {
     if (v === null || v === undefined || !tr) return undefined;
     if (Math.abs(v) < (isPct ? 0.005 : 1)) return { text: 'no change vs prev.', good: null };
@@ -129,6 +130,7 @@ function Report({ r, kind, own }: { r: any; kind: Kind; own: boolean }) {
         </div>
         <p className="mt-3 text-[12px] text-ink-3">{tr.note}</p>
       </Card>}
+      {trNa && <Card title="Trend vs previous period" subtitle={`${fmtDate(trNa.previousPeriod.start)} – ${fmtDate(trNa.previousPeriod.end)}`}><p className="text-[13px] text-ink-3">{trNa.note}</p></Card>}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Delivery" subtitle="Accepted outcomes and deadlines in this period" padded={false}>

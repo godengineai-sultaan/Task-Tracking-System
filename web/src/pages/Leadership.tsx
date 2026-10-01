@@ -20,7 +20,7 @@ export default function Leadership() {
   const tot = d.projects.reduce((a: any, p: any) => ({ open: a.open + p.open, overdue: a.overdue + p.overdue, blocked: a.blocked + p.blocked, review: a.review + p.in_review }), { open: 0, overdue: 0, blocked: 0, review: 0 });
   const byProject = Object.values(d.allocation.reduce((m: any, x: any) => { m[x.project] ??= { project: x.project, minutes: 0, meeting: 0 }; m[x.project].minutes += x.minutes; if (x.category === 'meeting') m[x.project].meeting += x.minutes; return m; }, {})) as any[];
   const maxAlloc = Math.max(1, ...byProject.map((p) => p.minutes));
-  const byDept = Object.values(d.allocation.reduce((m: any, x: any) => { m[x.department] ??= { department: x.department, minutes: 0 }; m[x.department].minutes += x.minutes; return m; }, {})) as any[];
+  const byDept = d.allocationByDepartment as { department: string; minutes: number }[];
   return (
     <div>
       <PageHeader title="Leadership delivery" subtitle="Which projects move outcomes, what is late, and where to rebalance. Aggregates only — no individual rankings."
@@ -57,8 +57,10 @@ export default function Leadership() {
         <Card title="Blocker patterns">
           {d.blockerPatterns.length === 0 ? <p className="text-[13px] text-ink-3">No open blockers.</p> : <ul className="space-y-1.5 text-[13px]">{d.blockerPatterns.map((b: any) =>
             <li key={b.cause} className="flex justify-between"><span className="capitalize">{b.cause}</span><span className="tabular">{b.open} open · avg {hm(b.avg_age_hours * 60)}</span></li>)}</ul>}
-          <p className="mt-4 mb-1.5 text-[12px] font-medium text-ink-3">Workload concentration (open work, not performance)</p>
-          <ul className="space-y-1 text-[13px]">{d.workloadConcentration.map((w: any) => <li key={w.name} className="flex justify-between"><span>{w.name}</span><span className="tabular text-ink-2">{w.open_tasks} open · {hm(w.estimate)}</span></li>)}</ul>
+          <p className="mt-4 mb-1.5 text-[12px] font-medium text-ink-3">{d.workloadConcentration.length ? 'Open work by person (alphabetical; open work, not performance)' : 'Open work by department (open work, not performance)'}</p>
+          {d.workloadConcentration.length > 0
+            ? <ul className="space-y-1 text-[13px]">{d.workloadConcentration.map((w: any) => <li key={w.name} className="flex justify-between"><span>{w.name}</span><span className="tabular text-ink-2">{w.open_tasks} open · {hm(w.estimate)}</span></li>)}</ul>
+            : <ul className="space-y-1 text-[13px]">{d.workloadByDepartment.map((w: any) => <li key={w.department} className="flex justify-between"><span>{w.department} <span className="text-ink-3">· {w.people} people</span></span><span className="tabular text-ink-2">{w.open_tasks} open · {hm(w.estimate)}</span></li>)}</ul>}
         </Card>
         {r.costViewer && d.cost && <Card className="lg:col-span-3" title="Project cost (confidential)" subtitle="Authorized cost rates × confirmed time, last 30 days. Salaries are not shown.">
           <table className="w-full text-[13px]"><thead className="text-left text-[12px] text-ink-3"><tr><th className="py-1 font-medium">Project</th><th className="font-medium text-right">Hours</th><th className="font-medium text-right">Cost</th></tr></thead>

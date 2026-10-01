@@ -4,7 +4,7 @@ import type { Db } from '../../lib/db.js';
 import { many } from '../../lib/db.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { type Actor, has, isStaff, reviewableUserIds, taskVisibility } from '../access.js';
-import { type CalendarData, dayCapacity, eachDate, loadCalendar, localToday } from '../calendar.js';
+import { type CalendarData, dayCapacity, eachDate, loadCalendarsFor, localToday } from '../calendar.js';
 
 /**
  * What-if capacity planner. A deterministic, read-only schedule simulation:
@@ -186,8 +186,9 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
   const rows = await many(db, `with open as (select t.id, t.number, t.title, t.owner_id, t.status, t.priority, t.due_date, t.estimate_minutes, ${vis} as visible
       from tasks t left join projects p on p.id = t.project_id
       where t.owner_id = any($1::uuid[]) and t.status not in ('done','cancelled','backlog')),
-    logged as (select te.task_id, sum(extract(epoch from (te.ended_at - te.started_at))) / 60 minutes from time_entries te
-      where te.task_id in (select id from open) and te.deleted_at is null and te.ended_at is not null group by te.task_id)
+    spans as (select te.task_id, te.user_id, unnest(range_agg(tstzrange(te.started_at, te.ended_at))) r from time_entries te
+      where te.task_id in (select id from open) and te.deleted_at is null and te.ended_at is not null group by te.task_id, te.user_id),
+    logged as (select task_id, sum(extract(epoch from upper(r) - lower(r))) / 60 minutes from spans group by task_id)
     select o.*, coalesce(l.minutes, 0)::int logged_minutes from open o left join logged l on l.task_id = o.id
     order by o.due_date nulls last, o.number`, [ids, ...visParams]);
   const N = input.unestimatedMinutes;
@@ -222,8 +223,9 @@ export async function simulate(db: Db, a: Actor, input: SimulateInput) {
 
   // Capacity per person per day from the work calendar (holidays, recorded leave), then simulated leave and allocation.
   const baseDays = new Map<string, SimDay[]>(), scenDays = new Map<string, SimDay[]>();
+  const cals = await loadCalendarsFor(db, ids, start, end);
   for (const id of ids) {
-    const cal = await loadCalendar(db, id, start, end);
+    const cal = cals.get(id)!;
     const extra = simLeave.get(id) ?? [];
     const scal: CalendarData = { ...cal, leave: [...extra.map((l) => ({ start_date: l.start, end_date: l.end, portion: 'full', kind: 'leave' })), ...cal.leave] };
     const pctOf = alloc.get(id) ?? 100;

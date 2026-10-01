@@ -33,11 +33,12 @@ describe('integration fixes', () => {
     expect((await admin.post(`/api/admin/teams/${team}/members`, { userId: cust })).status).toBe(400);
   });
 
-  it('objective edits through the basic endpoint are versioned and audited', async () => {
-    const o = (await admin.post('/api/objectives', { title: 'Grow retention' })).body;
-    const u = (await admin.patch(`/api/objectives/${o.id}`, { title: 'Grow retention to 95%' })).body;
-    expect(u.version).toBe((o.version ?? 1) + 1);
-    const a = await withOwner((db) => db.query(`select count(*)::int n from audit_events where tenant_id = $1 and action = 'objective.update'`, [org.tenantId]));
+  it('objective edits go through the one versioned, audited write path', async () => {
+    const o = (await admin.post('/api/objectives/create', { title: 'Grow retention' })).body;
+    const u = (await admin.put(`/api/objectives/${o.id}`, { title: 'Grow retention to 95%', version: o.version })).body;
+    expect(u.version).toBe(o.version + 1);
+    expect((await admin.put(`/api/objectives/${o.id}`, { title: 'Stale', version: o.version })).status).toBe(409);
+    const a = await withOwner((db) => db.query(`select count(*)::int n from audit_events where tenant_id = $1 and action = 'objective.updated'`, [org.tenantId]));
     expect(a.rows[0].n).toBe(1);
   });
 

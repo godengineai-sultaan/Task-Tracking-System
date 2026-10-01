@@ -6,7 +6,7 @@ import { enqueue } from '../../lib/jobs.js';
 import { badRequest, forbidden } from '../../lib/errors.js';
 import { type Actor, isStaff, taskVisibility } from '../access.js';
 import { buildReport } from '../analytics.js';
-import { dayCapacity, loadCalendar, localToday, type DayCapacity } from '../calendar.js';
+import { dayCapacity, loadCalendar, loadCalendars, localToday, type DayCapacity } from '../calendar.js';
 import { notify } from '../notify.js';
 
 /**
@@ -264,10 +264,14 @@ async function sendIfNeeded(db: Db, tenantId: string, userId: string, kind: Nudg
  */
 export async function runNudges(db: Db, tenantId: string, now = Date.now()) {
   const stats = { users: 0, sent: 0, scheduled: 0, skippedNoCapacity: 0, optedOut: 0 };
-  for (const u of await staffUsers(db, tenantId)) {
+  const users = await staffUsers(db, tenantId);
+  // Everyone's calendar in three queries; per-person queries happen only when a nudge window is open or about to open.
+  const dates = users.map((u) => DateTime.fromMillis(now, { zone: u.tz }).toISODate()!).sort();
+  const cals = users.length ? await loadCalendars(db, users.map((u) => ({ id: u.id, tz: u.tz })), dates[0], dates[dates.length - 1]) : new Map();
+  for (const u of users) {
     stats.users++;
     const date = DateTime.fromMillis(now, { zone: u.tz }).toISODate()!;
-    const cap = dayCapacity(await loadCalendar(db, u.id, date, date), date);
+    const cap = dayCapacity(cals.get(u.id)!, date);
     if (cap.availableMinutes <= 0 || !cap.windows.length) { stats.skippedNoCapacity++; continue; }
     const wins = nudgeWindows(cap);
     for (const kind of ['plan', 'recap'] as const) {

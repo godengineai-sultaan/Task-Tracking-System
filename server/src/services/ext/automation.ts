@@ -10,6 +10,7 @@ import { type Actor, has, loadActor, taskVisibility } from '../access.js';
 import { notify } from '../notify.js';
 import { CATEGORIES, PRIORITIES, STATUSES, createTask, label } from '../tasks.js';
 import { asAutomation, emitTaskEvent, type TaskEvent } from '../events.js';
+import { userToday } from '../calendar.js';
 
 /**
  * No-code automation rules: trigger -> conditions -> actions.
@@ -219,7 +220,7 @@ async function scopeCheck(db: Db, rule: { scope: string; owner_id: string }, tas
 
 // ---------- Actions ----------
 interface Plan { summary: string; skip?: string; apply?: () => Promise<string | void> }
-interface RunCtx { rule: any; today: string; depth: number; dedupeKey?: string | null; trigger: string }
+interface RunCtx { rule: any; today: string; depth: number; dedupeKey?: string | null; trigger: string; to?: string | null }
 const authorityOf = (rule: any) => `automation_rule:${rule.id}`;
 const TARGET_LABEL: Record<string, string> = { owner: 'the owner', manager: 'the owner\'s manager', reviewer: 'the reviewer', user: '' };
 
@@ -277,7 +278,12 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
   const auditBase = { tenantId, actorId: null, resourceType: 'task', resourceId: task.id, authority: authorityOf(rule) };
   switch (act.type) {
     case 'notify': {
-      const { people, why } = await resolveTarget(db, rule, act.target, act.userId, task);
+      const resolved = await resolveTarget(db, rule, act.target, act.userId, task);
+      const why = resolved.why;
+      // Submitting for review already sends the reviewer a "Review requested" notice: never tell them twice about the same change.
+      const coreNotified = ctx.trigger === 'task.status_changed' && ctx.to === 'in_review' && task.reviewer_id;
+      const people = coreNotified ? resolved.people.filter((p: any) => p.id !== task.reviewer_id) : resolved.people;
+      if (coreNotified && resolved.people.length && !people.length) return { summary: 'Notify the reviewer', skip: 'The reviewer already received a "Review requested" notice for this change' };
       if (!people.length) return { summary: 'Notify', skip: `Nobody to notify: ${why}` };
       const hidden = await hiddenFrom(db, rule, act.target, people[0], task);
       if (hidden) return { summary: `Notify ${people[0].name}`, skip: hidden };
@@ -364,7 +370,7 @@ async function planAction(db: Db, act: Action, task: any, ctx: RunCtx): Promise<
         await db.query(`insert into comments (tenant_id, task_id, author_id, body, kind) values ($1,$2,null,$3,'system')`,
           [tenantId, task.id, `Automation · ${rule.name}: reassigned from ${task.owner_name} to ${u.name}`]);
         await db.query(`update daily_plan_items set removed_at = now(), removed_reason = $2 where task_id = $1 and removed_at is null
-          and plan_id in (select id from daily_plans where user_id = $3 and date >= current_date)`, [task.id, `Reassigned to ${u.name} by automation`, task.owner_id]);
+          and plan_id in (select id from daily_plans where user_id = $3 and date >= $4::date)`, [task.id, `Reassigned to ${u.name} by automation`, task.owner_id, await userToday(db, task.owner_id)]);
         await notify(db, tenantId, u.id, 'task_assigned', `Assigned to you: ${task.title}`, `By automation rule "${rule.name}"`, `/tasks/${task.id}`);
         await notify(db, tenantId, task.owner_id, 'task_reassigned', `Reassigned: ${task.title}`, `To ${u.name} by automation rule "${rule.name}"`, `/tasks/${task.id}`);
         await audit(db, { ...auditBase, action: 'task.reassign', resourceVersion: row.version, reason: `Automation rule "${rule.name}"`, details: { from: task.owner_id, to: u.id, ruleId: rule.id } });
@@ -405,7 +411,7 @@ async function recordRun(db: Db, rule: any, taskId: string, ctx: RunCtx, status:
 
 /** Evaluate one rule against one task; never throws. Returns the recorded run status, or null when the rule did not match. */
 async function evaluateRule(db: Db, rule: any, task: any, ev: EventInfo, today: string): Promise<string | null> {
-  const ctx: RunCtx = { rule, today, depth: ev.depth, dedupeKey: ev.dedupeKey, trigger: ev.trigger };
+  const ctx: RunCtx = { rule, today, depth: ev.depth, dedupeKey: ev.dedupeKey, trigger: ev.trigger, to: ev.to ?? null };
   try {
     if (!matchTrigger(rule.trigger, ev).ok) return null;
     if ((await checkConditions(db, rule.conditions ?? {}, task)).some((c) => !c.ok)) return null;
@@ -528,7 +534,7 @@ export async function dryRun(db: Db, rule: any, taskId: string) {
   checks.push({ label: 'Scope', ...(await scopeCheck(db, rule, task)) });
   const wouldRun = checks.every((c) => c.ok);
   const actions: { type: string; summary: string; skip?: string }[] = [];
-  const ctx: RunCtx = { rule, today, depth: 0, trigger: t.type };
+  const ctx: RunCtx = { rule, today, depth: 0, trigger: t.type, to: t.to ?? null };
   // Planning only reads; the savepoint is a second guarantee that a dry run never changes data.
   await guarded(db, async () => {
     for (const act of rule.actions as Action[]) {

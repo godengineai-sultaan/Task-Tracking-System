@@ -6,6 +6,7 @@ import { audit } from '../../lib/audit.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { type Actor, has, isStaff, taskVisibility } from '../access.js';
 import { CATEGORIES, PRIORITIES, createTask } from '../tasks.js';
+import { notify } from '../notify.js';
 import { type CalendarData, dayCapacity, loadCalendar, localToday } from '../calendar.js';
 import { STARTERS } from './templates-starters.js';
 
@@ -352,9 +353,15 @@ export async function applyTemplate(db: Db, a: Actor, t: any, input: z.infer<typ
       requiresReview: it.requires_review ? true : undefined, requiresEvidence: it.requires_evidence ? true : undefined,
       sourceType: 'template', sourceRef: { templateId: t.id, version: t.version, applicationId: app.id, position: it.position },
       externalKey: `template:${app.id}:${it.position}`,
-    }, { correlationId, authority: 'template_apply' });
+    }, { correlationId, authority: 'template_apply', notifyOwner: false });
     ids.set(it.position, task.id);
   }
+  // One notice per person for the whole application, instead of one per step.
+  const perOwner = new Map<string, number>();
+  for (const row of plan.rows) if (row.ownerId !== a.id) perOwner.set(row.ownerId, (perOwner.get(row.ownerId) ?? 0) + 1);
+  for (const [ownerId, n] of perOwner)
+    await notify(db, a.tenantId, ownerId, 'task_assigned', n === 1 ? `New task from template: ${t.name}` : `${n} new tasks from template: ${t.name}`,
+      `Assigned by ${a.name}${plan.project ? ` in ${plan.project.name}` : ''}`, '/tasks?mine=1');
   for (const it of items) for (const d of it.depends_on ?? [])
     await db.query(`insert into task_dependencies (tenant_id, task_id, depends_on_task_id) values ($1,$2,$3) on conflict do nothing`, [a.tenantId, ids.get(it.position), ids.get(d)]);
   const taskIds = items.map((i) => ids.get(i.position)!);

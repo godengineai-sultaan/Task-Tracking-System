@@ -279,6 +279,8 @@ describe('weekly self-summary', () => {
   const day = (n: number) => iso(lastWeek.plus({ days: n }));
   beforeAll(async () => {
     org = await makeOrg({ tz: TZ });
+    // These people have worked here for a while: their records start before the periods reviewed below.
+    await withOwner((db) => db.query(`update users set created_at = now() - interval '1 year' where tenant_id = $1`, [org.tenantId]));
     [emp, mgr, admin] = await Promise.all([login(org, 'emp'), login(org, 'manager'), login(org, 'admin')]);
     const done = (await emp.post('/api/tasks', { title: 'Publish onboarding guide', priority: 'high' })).body;
     await emp.post(`/api/tasks/${done.id}/status`, { to: 'done' });

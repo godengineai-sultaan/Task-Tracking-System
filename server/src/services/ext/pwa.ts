@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import { one, type Db } from '../../lib/db.js';
+import { many, one, type Db } from '../../lib/db.js';
 import { badRequest, conflict } from '../../lib/errors.js';
 import { type Actor, has } from '../access.js';
 import { localToday } from '../calendar.js';
@@ -38,11 +38,14 @@ export async function syncOfflineCapture(db: Db, a: Actor, c: OfflineCapture, co
   const p = parseQuickCapture(c.text, capturedOn);
   if (!p.title) throw badRequest('The capture has no title left after removing shortcuts');
   const project = p.projectKey ? await one(db, `select id from projects pr where key = $1 and status <> 'archived' and ${projectVisibleSql('pr', 2)}`, [p.projectKey, a.id, has(a, 'routine_admin')]) : null;
-  const owner = p.ownerHint ? await one(db, `select id from users where status = 'active' and not ('customer' = any(roles))
-    and (lower(split_part(email, '@', 1)) = $1 or lower(split_part(name, ' ', 1)) = $1 or lower(replace(name, ' ', '.')) = $1) limit 1`, [p.ownerHint]) : null;
+  // Nobody confirms the owner of an offline capture, so "@name" assigns only on an unambiguous match; otherwise it stays with the capturer.
+  const matches = p.ownerHint ? await many(db, `select id from users where status = 'active' and not ('customer' = any(roles))
+    and (lower(split_part(email, '@', 1)) = $1 or lower(split_part(name, ' ', 1)) = $1 or lower(replace(name, ' ', '.')) = $1) limit 2`, [p.ownerHint]) : [];
+  const owner = matches.length === 1 ? matches[0] : null;
   const warnings = [
     ...(p.projectKey && !project ? [`No project with key ${p.projectKey}`] : []),
-    ...(p.ownerHint && !owner ? [`No teammate matches @${p.ownerHint}; assigned to you`] : []),
+    ...(p.ownerHint && !matches.length ? [`No teammate matches @${p.ownerHint}; assigned to you`] : []),
+    ...(p.ownerHint && matches.length > 1 ? [`@${p.ownerHint} matches more than one person; assigned to you`] : []),
   ];
   const r = await createTask(db, a, a.tenantId, {
     title: p.title, dueDate: p.dueDate, estimateMinutes: p.estimateMinutes, priority: p.priority ?? undefined, category: p.category ?? undefined,

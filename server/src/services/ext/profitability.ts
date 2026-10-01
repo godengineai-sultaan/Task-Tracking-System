@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import { drawPdfBrandHeader, type PdfBrand } from './clientbrand-brand.js';
 import type { Db } from '../../lib/db.js';
 import { many, one } from '../../lib/db.js';
 import { audit } from '../../lib/audit.js';
@@ -73,11 +74,13 @@ async function computeFinancials(db: Db, projects: any[]) {
       order by c.effective_from desc limit 1) rate on true
     where b.start_date is null or d.day >= b.start_date
     group by 1, 2, 3, 4, 5`, [ids, tz]);
-  const est = await many(db, `select t.project_id, count(*)::int open_tasks, count(t.estimate_minutes)::int estimated,
-      coalesce(sum(greatest(t.estimate_minutes - coalesce(l.logged, 0), 0)), 0)::float remaining_minutes
-    from tasks t left join lateral (select sum(extract(epoch from te.ended_at - te.started_at)) / 60 logged from time_entries te
-      where te.task_id = t.id and te.deleted_at is null and te.ended_at is not null) l on true
-    where t.project_id = any($1::uuid[]) and t.status not in ('done','cancelled') group by 1`, [ids]);
+  // Logged time per open task in one grouped pass (not one scan of time_entries per task).
+  const est = await many(db, `with open as (select id, project_id, estimate_minutes from tasks where project_id = any($1::uuid[]) and status not in ('done','cancelled')),
+    logged as (select te.task_id, sum(extract(epoch from te.ended_at - te.started_at)) / 60 logged from time_entries te join open o on o.id = te.task_id
+      where te.deleted_at is null and te.ended_at is not null group by 1)
+    select o.project_id, count(*)::int open_tasks, count(o.estimate_minutes)::int estimated,
+      coalesce(sum(greatest(o.estimate_minutes - coalesce(l.logged, 0), 0)), 0)::float remaining_minutes
+    from open o left join logged l on l.task_id = o.id group by 1`, [ids]);
   const memberRates = await many(db, `select pm.project_id, r.currency, avg(r.hourly_rate)::float rate from project_members pm
     join lateral (select c.hourly_rate, c.currency from cost_rates c where c.user_id = pm.user_id and c.effective_from <= current_date
       order by c.effective_from desc limit 1) r on true where pm.project_id = any($1::uuid[]) group by 1, 2`, [ids]);
@@ -387,11 +390,13 @@ export function profitabilityCsv(d: any) {
   return csv(rows);
 }
 
-export function profitabilityPdf(d: any, a: Actor): Promise<Buffer> {
+export function profitabilityPdf(d: any, a: Actor, brand?: PdfBrand): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 48, info: { Title: 'Project budgets and profitability', Author: 'Task Tracking and Productivity' } });
     const chunks: Buffer[] = [];
     doc.on('data', (c) => chunks.push(c)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
+    // Organization name, accent and logo, like every other exported report.
+    if (brand) drawPdfBrandHeader(doc, brand);
     const money = d.access === 'money';
     const p = (t: string, color = '#374151', size = 9.5) => doc.font('Helvetica').fontSize(size).fillColor(color).text(t, { lineGap: 2 });
     doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text('Project budgets and profitability').moveDown(0.3);

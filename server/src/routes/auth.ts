@@ -6,12 +6,13 @@ import { config } from '../lib/config.js';
 import { withSystem, withTenant, one, many } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
 import { base32Encode, decrypt, encrypt, hashPassword, newToken, sha256, verifyPassword, verifyTotp } from '../lib/crypto.js';
-import { badRequest, forbidden, unauthorized } from '../lib/errors.js';
+import { AppError, badRequest, forbidden, unauthorized } from '../lib/errors.js';
 import { randomBytes } from 'node:crypto';
 import { aiStatus } from '../services/ai.js';
 import { localToday } from '../services/calendar.js';
 
 const password = z.string().min(10, 'Use at least 10 characters').max(200);
+const MFA_SESSION_ATTEMPTS = 5, MFA_ACCOUNT_ATTEMPTS = 10;
 
 async function startSession(reply: FastifyReply, tenantId: string, userId: string, mfaPending: boolean, ip: string, ua: string) {
   const token = newToken();
@@ -27,7 +28,8 @@ export async function authRoutes(app: FastifyInstance) {
     const fail = () => { throw unauthorized('Organization, email or password is incorrect'); };
     if (!tenant || tenant.status !== 'active') { await hashPassword('timing-equalizer'); fail(); }
     const user = await withTenant(tenant.id, (db) => one(db, `select * from users where lower(email) = lower($1)`, [b.email]));
-    const ok = user && user.status === 'active' && (await verifyPassword(b.password, user.password_hash));
+    // Unknown or inactive accounts still pay one password hash, so response time does not reveal which emails exist.
+    const ok = user && user.status === 'active' ? await verifyPassword(b.password, user.password_hash) : (await hashPassword('timing-equalizer'), false);
     await withTenant(tenant.id, (db) => audit(db, { tenantId: tenant.id, actorId: user?.id ?? null, action: 'auth.login', resourceType: 'user', resourceId: user?.id ?? null,
       outcome: ok ? (user.mfa_enabled ? 'mfa_required' : 'success') : 'failure', details: { ip: req.ip } }));
     if (!ok) fail();
@@ -42,7 +44,16 @@ export async function authRoutes(app: FastifyInstance) {
     const s = token ? await withSystem((db) => one(db, `select * from sessions where token_hash = $1 and expires_at > now() and mfa_pending`, [sha256(token)])) : null;
     if (!s) throw unauthorized('Sign in again');
     const u = await withTenant(s.tenant_id, (db) => one(db, `select * from users where id = $1`, [s.user_id]));
-    if (!u?.mfa_secret_enc || !verifyTotp(decrypt(u.mfa_secret_enc), b.code)) throw unauthorized('That code is not valid');
+    if (u?.mfa_locked_until && new Date(u.mfa_locked_until) > new Date()) throw new AppError(429, 'rate_limited', 'Too many incorrect codes. Wait 15 minutes and sign in again.');
+    if (!u?.mfa_secret_enc || !verifyTotp(decrypt(u.mfa_secret_enc), b.code)) {
+      // Failed codes count against this sign-in (dropped after 5) and the account (locked 15 minutes after 10 in a row).
+      const f = await withSystem((db) => one(db, `update sessions set mfa_failures = mfa_failures + 1 where id = $1 returning mfa_failures`, [s.id]));
+      if ((f?.mfa_failures ?? 0) >= MFA_SESSION_ATTEMPTS) await withSystem((db) => db.query(`delete from sessions where id = $1`, [s.id]));
+      if (u) await withTenant(s.tenant_id, (db) => db.query(`update users set mfa_failed_attempts = mfa_failed_attempts + 1,
+        mfa_locked_until = case when mfa_failed_attempts + 1 >= $2 then now() + interval '15 minutes' else mfa_locked_until end where id = $1`, [u.id, MFA_ACCOUNT_ATTEMPTS]));
+      throw unauthorized((f?.mfa_failures ?? 0) >= MFA_SESSION_ATTEMPTS ? 'Too many incorrect codes. Sign in again.' : 'That code is not valid');
+    }
+    await withTenant(s.tenant_id, (db) => db.query(`update users set mfa_failed_attempts = 0, mfa_locked_until = null where id = $1`, [u.id]));
     await withSystem((db) => db.query(`delete from sessions where id = $1`, [s.id]));
     await startSession(reply, s.tenant_id, s.user_id, false, req.ip, String(req.headers['user-agent'] ?? ''));
     await withTenant(s.tenant_id, (db) => db.query(`update users set last_login_at = now() where id = $1`, [s.user_id]));
@@ -159,15 +170,23 @@ export async function authRoutes(app: FastifyInstance) {
     const userId = await withTenant(t.id, async (db) => {
       const inv = await one(db, `select * from invitations where token_hash = $1 for update`, [sha256(token)]);
       if (!inv || inv.accepted_at || inv.revoked_at || new Date(inv.expires_at) < new Date()) throw badRequest('This invitation is no longer valid');
+      // An invitation never takes over an existing account: active accounts sign in, and a deactivated account
+      // can only come back through an invitation issued after it was deactivated.
+      const existing = await one(db, `select id, status, deactivated_at from users where lower(email) = lower($1)`, [inv.email]);
+      if (existing?.status === 'active') throw badRequest('This invitation is no longer valid — that person already has an account. Sign in instead.');
+      if (existing?.status === 'deactivated' && (!existing.deactivated_at || new Date(inv.created_at) <= new Date(existing.deactivated_at)))
+        throw badRequest('This invitation is no longer valid');
       const seats = await one(db, `select count(*)::int n from users where status = 'active' and not ('customer' = any(roles))`);
       if (!inv.roles.includes('customer') && seats.n >= t.seat_limit) throw forbidden('The organization has used all of its seats. Ask an administrator to free or add seats.');
       const u = await one(db, `insert into users (tenant_id, email, name, password_hash, roles, department_id) values ($1,$2,$3,$4,$5,$6)
         on conflict (tenant_id, lower(email)) do update set password_hash = excluded.password_hash, status = 'active', roles = excluded.roles returning id`,
         [t.id, inv.email, b.name ?? inv.name, await hashPassword(b.password), inv.roles, inv.department_id]);
       await db.query(`update invitations set accepted_at = now() where id = $1`, [inv.id]);
+      await db.query(`update invitations set revoked_at = now() where lower(email) = lower($1) and id <> $2 and accepted_at is null and revoked_at is null`, [inv.email, inv.id]);
       await audit(db, { tenantId: t.id, actorId: u.id, action: 'invitation.accept', resourceType: 'invitation', resourceId: inv.id });
       return u.id;
     });
+    await withSystem((db) => db.query(`delete from sessions where user_id = $1`, [userId]));
     await startSession(reply, t.id, userId, false, req.ip, String(req.headers['user-agent'] ?? ''));
     return { ok: true };
   });

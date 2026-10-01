@@ -37,6 +37,35 @@ export async function loadCalendar(db: Db, userId: string, from: string, to: str
   };
 }
 
+/**
+ * Calendars for many people in three queries (schedules, holidays, leave). `scheduleKey` names the schedule a person follows
+ * ('default' or their id), so callers can share per-day capacity between people with the same timezone and schedule.
+ */
+export async function loadCalendars(db: Db, users: { id: string; tz: string }[], from: string, to: string): Promise<Map<string, CalendarData & { scheduleKey: string }>> {
+  const ids = users.map((u) => u.id);
+  const [schedules, holidays, leave] = await Promise.all([
+    many(db, `select user_id, weekday, start_minute, end_minute, break_minutes from work_schedules where user_id is null or user_id = any($1::uuid[])`, [ids]),
+    many(db, `select date::text as date, name from holidays where date between $1 and $2`, [from, to]),
+    many(db, `select user_id, start_date::text as start_date, end_date::text as end_date, portion, kind from leave_entries
+      where user_id = any($1::uuid[]) and start_date <= $3 and end_date >= $2`, [ids, from, to]),
+  ]);
+  const hol = new Map(holidays.map((h) => [h.date, h.name]));
+  const def = schedules.filter((s) => !s.user_id);
+  const cals = new Map<string, CalendarData & { scheduleKey: string }>();
+  for (const u of users) {
+    const own = schedules.filter((s) => s.user_id === u.id);
+    cals.set(u.id, { timezone: u.tz, schedule: new Map((own.length ? own : def).map((r) => [r.weekday, r])), holidays: hol, leave: leave.filter((l) => l.user_id === u.id),
+      scheduleKey: own.length ? u.id : 'default' });
+  }
+  return cals;
+}
+
+/** Bulk calendars for people known only by id (their timezone, else the organization's). */
+export async function loadCalendarsFor(db: Db, userIds: string[], from: string, to: string) {
+  const users = userIds.length ? await many(db, `select u.id, coalesce(u.timezone, t.timezone) tz from users u join tenants t on t.id = u.tenant_id where u.id = any($1::uuid[])`, [userIds]) : [];
+  return loadCalendars(db, users.map((u) => ({ id: u.id, tz: u.tz || 'UTC' })), from, to);
+}
+
 /** Available capacity for one local date. Zero capacity days are reported, never divided by. */
 export function dayCapacity(cal: CalendarData, date: string): DayCapacity {
   const d = DateTime.fromISO(date, { zone: cal.timezone });
@@ -73,6 +102,11 @@ export function eachDate(from: string, to: string): string[] {
 }
 
 export function localToday(tz: string) { return DateTime.now().setZone(tz).toISODate()!; }
+/** A person's local today (their own timezone, else the organization's). */
+export async function userToday(db: Db, userId: string) {
+  const u = await one(db, `select coalesce(u.timezone, t.timezone) tz from users u join tenants t on t.id = u.tenant_id where u.id = $1`, [userId]);
+  return localToday(u?.tz || 'UTC');
+}
 export function localDayBounds(tz: string, date: string) {
   const d = DateTime.fromISO(date, { zone: tz });
   return { start: d.startOf('day').toUTC().toISO()!, end: d.plus({ days: 1 }).startOf('day').toUTC().toISO()! };

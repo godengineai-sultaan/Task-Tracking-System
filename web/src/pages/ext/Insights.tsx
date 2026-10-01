@@ -115,7 +115,7 @@ function Dashboard({ d }: { d: any }) {
         <Stat label="Rework rate" value={fr(c.reworkRate)} sub={naSub(c.reworkRate, `${c.reworkRate.num}/${c.reworkRate.den} accepted outcomes`)} delta={ptsDelta('reworkRate', c.reworkRate, p.reworkRate)} hint={def.reworkRate.definition} />
         <Stat label="Work in progress" value={cnt(c.wip.value)} sub={`${c.wip.blocked} blocked · ${c.wip.inReview} in review`} delta={numDelta(c.wip.value, p.wip.value)} hint={def.wip.definition} />
         <Stat label="Meeting load" value={fr(c.meetingShare)} sub={naSub(c.meetingShare, `${hm(c.meetingShare.num)} of available time`)} delta={ptsDelta('meetingShare', c.meetingShare, p.meetingShare)} hint={def.meetingShare.definition} />
-        <Stat label="Focus time" value={fr(c.focusShare)} sub={naSub(c.focusShare, `${hm(c.focusShare.num)} in 60m+ blocks`)} delta={ptsDelta('focusShare', c.focusShare, p.focusShare)} hint={def.focusShare.definition} />
+        <Stat label="Uninterrupted task time" value={fr(c.focusShare)} sub={naSub(c.focusShare, `${hm(c.focusShare.num)} in unbroken 60m+ stretches`)} delta={ptsDelta('focusShare', c.focusShare, p.focusShare)} hint={def.focusShare.definition} />
         <Stat label="Estimate accuracy" value={fx(c.estimateAccuracy.value)} sub={`${c.estimateAccuracy.n}/${c.estimateAccuracy.accepted} accepted qualify`} delta={numDelta(c.estimateAccuracy.value, p.estimateAccuracy.value, (v) => fx(v))} hint={def.estimateAccuracy.definition} />
       </section>
 
@@ -123,7 +123,7 @@ function Dashboard({ d }: { d: any }) {
         <Observations items={d.observations} />
         <Card title="Where scheduled time went" subtitle="Confirmed, non-overlapping time inside schedules. Hatched = unknown (not recorded), not idle.">
           <AllocationBar byCategory={d.timeComposition.byCategory} unknown={d.timeComposition.unknownMinutes} available={d.timeComposition.availableMinutes} height={14} />
-          {d.timeComposition.availableMinutes > 0 && <p className="mt-3 text-[13px] text-ink-2">{hm(d.timeComposition.focusMinutes)} of task time came in focus blocks of 60 minutes or more ({fr(c.focusShare)} of available time).</p>}
+          {d.timeComposition.availableMinutes > 0 && <p className="mt-3 text-[13px] text-ink-2">{hm(d.timeComposition.focusMinutes)} of task time came in unbroken stretches of 60 minutes or more ({fr(c.focusShare)} of available time).</p>}
         </Card>
       </div>
 
@@ -207,8 +207,8 @@ function Trends({ d }: { d: any }) {
       points={mk((m) => [m.wip.value === null ? null : m.wip.value - m.wip.blocked - m.wip.inReview, m.wip.inReview, m.wip.blocked])} />,
     <TrendChart key="meet" title="Meeting load" hint={def.meetingShare.definition} headline={fr(c.meetingShare)} series={ONE} kind="line" max={1} format={pctF}
       points={ratioPts('meetingShare', (m) => [`${hm(m.meetingShare.num)} in meetings`])} />,
-    <TrendChart key="focus" title="Focus time" hint={def.focusShare.definition} headline={fr(c.focusShare)} series={ONE} kind="line" max={1} format={pctF}
-      points={ratioPts('focusShare', (m) => [`${hm(m.focusShare.num)} in 60m+ blocks`])} />,
+    <TrendChart key="focus" title="Uninterrupted task time" hint={def.focusShare.definition} headline={fr(c.focusShare)} series={ONE} kind="line" max={1} format={pctF}
+      points={ratioPts('focusShare', (m) => [`${hm(m.focusShare.num)} in unbroken 60m+ stretches`])} />,
     <TrendChart key="est" title="Estimate accuracy" hint={def.estimateAccuracy.definition} headline={fx(c.estimateAccuracy.value)} sub="Confirmed time ÷ estimate (1.00x = as estimated)" series={ONE} kind="line" max={1.5} format={fx}
       points={mk((m) => [m.estimateAccuracy.value], () => false, (m) => [`${m.estimateAccuracy.n} of ${m.estimateAccuracy.accepted} accepted qualify`])} />,
   ];
@@ -232,7 +232,7 @@ function TrendTable({ d }: { d: any }) {
         <thead className="text-ink-3"><tr>
           <th className="py-1.5 pr-2 text-left font-medium">Week of</th><th className={th}>Working person-days</th><th className={th}>Recap adoption</th><th className={th}>Logging coverage</th><th className={th}>Unknown</th>
           <th className={th}>Planned completion</th><th className={th}>Accepted</th><th className={th}>Met / late / overdue</th><th className={th}>Reliability</th><th className={th}>Blockers raised</th>
-          <th className={th}>Blocker age</th><th className={th}>Cycle median</th><th className={th}>Rework</th><th className={th}>WIP</th><th className={th}>Meetings</th><th className={th}>Focus</th><th className={th}>Estimate</th>
+          <th className={th}>Blocker age</th><th className={th}>Cycle median</th><th className={th}>Rework</th><th className={th}>WIP</th><th className={th}>Meetings</th><th className={th}>Uninterrupted</th><th className={th}>Estimate</th>
         </tr></thead>
         <tbody className="divide-y divide-line">{d.weeks.map((w: any) => { const m = w.metrics; return (
           <tr key={w.weekOf}>
@@ -256,7 +256,7 @@ function Groups({ d }: { d: any }) {
     <Card title="By department" subtitle={`Alphabetical. ${d.scope.perPerson ? '' : `Departments with fewer than ${d.scope.minGroup} people, and any that would let them be worked out from the total, are withheld.`}`} padded={false}>
       <ScrollX label="Departments table"><table className="w-full min-w-[760px] text-[13px] tabular">
         <thead className="border-b border-line text-[12px] text-ink-3"><tr><th className="px-4 py-2 text-left font-medium">Department</th><th className={th}>People</th><th className={th}>Recap adoption</th>
-          <th className={th}>Logging coverage</th><th className={th}>Planned completion</th><th className={th}>Accepted</th><th className={th}>Deadline reliability</th><th className={th}>Meeting load</th><th className={th}>Focus time</th></tr></thead>
+          <th className={th}>Logging coverage</th><th className={th}>Planned completion</th><th className={th}>Accepted</th><th className={th}>Deadline reliability</th><th className={th}>Meeting load</th><th className={th}>Uninterrupted task time</th></tr></thead>
         <tbody className="divide-y divide-line">{d.groups.map((g: any) => (
           <tr key={g.id ?? 'none'}><th scope="row" className="px-4 py-2 text-left font-medium">{g.name}</th><td className="px-3 text-right">{g.people}</td>
             {g.suppressed ? <td colSpan={7} className="px-3 text-ink-3">{g.people < d.scope.minGroup ? `Withheld: fewer than ${d.scope.minGroup} people` : 'Withheld so smaller departments cannot be worked out from the total'}</td> : <>

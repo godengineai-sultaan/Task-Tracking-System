@@ -139,13 +139,14 @@ test('every automations view passes axe (WCAG 2 A/AA) in light and dark', async 
 
     // Run log, and a filter with no matches explains itself and offers a way back
     await page.getByRole('radio', { name: 'Run log' }).click();
-    await expect(page.getByRole('button', { name: /Bank reconciliation/ })).toBeVisible();
+    // The seeded run names a finance task that really was blocked when the rule fired.
+    await expect(page.getByRole('button', { name: /Chase missing vendor statement/ })).toBeVisible();
     expect(await scan(page), `${colorScheme}: run log`).toEqual([]);
     await page.getByLabel('Rule', { exact: true }).selectOption({ label: 'Follow up when changes are requested' });
     await expect(page.getByText('No runs for this rule yet')).toBeVisible();
     expect(await scan(page), `${colorScheme}: run log, no matches`).toEqual([]);
     await page.getByRole('button', { name: 'Show all runs' }).click();
-    await expect(page.getByRole('button', { name: /Bank reconciliation/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Chase missing vendor statement/ })).toBeVisible();
   }
 });
 
