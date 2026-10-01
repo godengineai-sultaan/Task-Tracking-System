@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, Navigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarDays, CalendarRange, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate, fmtTime, hm, minutesSince, relDue } from '../lib/format';
-import { useMe } from '../lib/session';
+import { useMe, useRoles } from '../lib/session';
 import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, PageHeader, Select, Skeleton, cx, useToast } from '../components/ui';
 import { StatusControl, ReasonDialog } from '../components/TaskStatus';
 import { AllocationBar, EntryModal, EntryRow, useTicker } from '../components/time';
@@ -13,7 +13,8 @@ import { NudgeSettings, SuggestDayDialog, WeeklySummaryDrawer } from '../compone
 
 export default function MyDay() {
   const me = useMe(); const qc = useQueryClient(); const toast = useToast();
-  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`) });
+  const customer = useRoles().customer; // client stakeholders have no My Day; they land on the portal instead of an access error
+  const q = useQuery({ queryKey: ['my-day'], queryFn: () => api.get(`/api/my-day`), enabled: !customer });
   const openedAt = useRef(Date.now());
   const [drawer, setDrawer] = useState<string | null>(null);
   const [removing, setRemoving] = useState<any>(null);
@@ -39,6 +40,7 @@ export default function MyDay() {
     onSuccess: (_r, v: any) => { qc.invalidateQueries(); toast({ tone: 'good', text: v.decision === 'accept' ? 'Confirmed' : 'Dismissed' }); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
+  if (customer) return <Navigate to="/portal" replace />;
   if (q.isLoading) return <div className="space-y-4"><Skeleton className="h-10 w-72" /><div className="grid gap-4 lg:grid-cols-3"><Skeleton className="h-72 lg:col-span-2" /><Skeleton className="h-72" /></div></div>;
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const d = q.data;
@@ -73,14 +75,14 @@ export default function MyDay() {
         <div className="space-y-4 lg:col-span-2">
           <Card title={<span className="flex items-center gap-2"><Target className="size-4 text-accent" aria-hidden />Intended outcomes</span>}
             subtitle="Up to three outcomes that would make today a success." padded={false}
-            actions={<><Button size="sm" variant="subtle" icon={<Sparkles className="size-3.5 text-accent" />} onClick={() => setSuggestOpen(true)}>Suggest my day</Button><span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span></>}>
+            actions={<><Button size="sm" variant="subtle" icon={<Sparkles className="size-3.5 text-accent" />} aria-label="Suggest my day" onClick={() => setSuggestOpen(true)}><span className="sm:hidden">Suggest</span><span className="hidden sm:inline">Suggest my day</span></Button><span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span></>}>
             <ol className="divide-y divide-line">
               {d.intendedOutcomes.map((t: any, i: number) => (
                 <li key={t.id} className="group flex items-center gap-3 px-4 py-3">
                   <span className="w-4 text-center text-[13px] font-semibold text-ink-3 tabular">{i + 1}</span>
                   <StatusControl task={t} />
                   <button className="min-w-0 flex-1 text-left" onClick={() => setDrawer(t.id)}>
-                    <div className={cx('truncate text-[14px] font-medium', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</div>
+                    <div className={cx('text-[14px] font-medium max-sm:line-clamp-2 sm:truncate', t.status === 'done' && 'text-ink-3 line-through')}>{t.title}</div>
                     <TaskMeta t={t} today={d.today} />
                   </button>
                   <TimerButton running={running} taskId={t.id} onToggle={(stop) => timer.mutate(stop ? { stop: true } : { taskId: t.id })} disabled={t.status === 'done'} />

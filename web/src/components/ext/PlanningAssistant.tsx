@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bell, CalendarRange, ChevronLeft, ChevronRight, Copy, RotateCcw } from 'lucide-react';
+import { Bell, CalendarRange, ChevronLeft, ChevronRight, Copy, RotateCcw, Undo2 } from 'lucide-react';
 import { api, qs } from '../../lib/api';
 import { addDays, fmtDate, hm, pct, relDue, STATUS_LABEL } from '../../lib/format';
 import { AssessmentBadge, Badge, Button, Callout, Card, Checkbox, Drawer, Empty, ErrorState, IconButton, Modal, Skeleton, Stat, cx, useToast } from '../ui';
@@ -57,9 +57,11 @@ export function SuggestDayDialog({ open, onClose, date, today, onApply }: { open
   };
 
   const canApply = !!s?.applicable && chosen.length > 0 && !s.current.some((c: any) => ['done', 'cancelled'].includes(c.status));
+  // Only offer "Use these" when there is something to choose; otherwise the dialog is informational.
+  const choosable = !!s?.applicable && slots > 0 && candidates.length > 0;
   return (
     <Modal open={open} onClose={onClose} title="Suggest my day" width="max-w-2xl"
-      footer={s?.applicable ? <>
+      footer={choosable ? <>
         <span className="mr-auto self-center text-[12px] text-ink-3 tabular">{chosen.length} of {slots} open slot{slots === 1 ? '' : 's'} selected</span>
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         <Button variant="primary" onClick={apply} loading={busy} disabled={!canApply}>Use these</Button>
@@ -97,9 +99,13 @@ export function SuggestDayDialog({ open, onClose, date, today, onApply }: { open
               {slots === 0 ? 'Ranked open work' : `Ranked candidates · choose up to ${slots}`}
             </h3>
             {slots === 0 && <div className="mb-2"><Callout tone="neutral">All three outcomes for the day are chosen. Remove one from My Day first if you want to swap.</Callout></div>}
-            {candidates.length === 0 ? (
-              <Empty title="Nothing ready to plan">No open work can be planned right now. Capture a task with <b>Q</b>, or check the work set aside below.</Empty>
-            ) : (
+            {candidates.length === 0 ? (slots > 0 && (
+              <Empty title="Nothing ready to plan">
+                {s.excluded.some((e: any) => !['done', 'cancelled'].includes(e.reason))
+                  ? 'Your open work is blocked, in review or waiting on other work. The reasons are listed under Set aside below.'
+                  : 'You have no open work to plan. Capture a task with Quick capture first.'}
+              </Empty>
+            )) : (
               <ol className="divide-y divide-line rounded-lg ring-1 ring-line" aria-label="Ranked candidates">
                 {candidates.map((c) => {
                   const on = selected.includes(c.id);
@@ -109,7 +115,7 @@ export function SuggestDayDialog({ open, onClose, date, today, onApply }: { open
                       <label className={cx('flex items-start gap-3', full ? 'cursor-not-allowed' : 'cursor-pointer')}>
                         <input type="checkbox" className="mt-1 size-4 shrink-0 accent-[var(--accent)]" checked={on} disabled={full || slots === 0}
                           onChange={(e) => toggle(c.id, e.target.checked)} aria-describedby={`why-${c.id}`} />
-                        <span className="w-5 shrink-0 pt-0.5 text-center text-[12px] font-semibold text-ink-3 tabular" aria-label={`Rank ${c.rank}`}>{c.rank}</span>
+                        <span className="w-5 shrink-0 pt-0.5 text-center text-[12px] font-semibold text-ink-3 tabular"><span className="sr-only">Rank </span>{c.rank}</span>
                         <span className="min-w-0 flex-1">
                           <span className="flex flex-wrap items-center gap-2">
                             <span className="text-[13.5px] font-medium text-ink">{c.title}</span>
@@ -171,15 +177,28 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
   // Edits are kept per week, so a background refetch (for example on window focus) never overwrites them; Reset discards them.
   const [edits, setEdits] = useState<Record<string, string>>({});
   const area = useRef<HTMLTextAreaElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const prevBtn = useRef<HTMLButtonElement>(null); // keeps keyboard focus inside the drawer when "This week" or "Next week" disappears or disables
   useEffect(() => { if (open) setRef(today); }, [open, today]);
+  // The shared Drawer has no name prop: name the dialog after its heading so screen readers announce "Weekly summary".
+  useEffect(() => { if (open) heading.current?.closest('[role="dialog"]')?.setAttribute('aria-labelledby', 'weekly-summary-title'); }, [open]);
   const s = q.data;
   const text: string = s ? edits[s.period.start] ?? s.text : '';
-  const setText = (v: string | null) => s && setEdits((e) => {
+  const setWeekText = (week: string, v: string | null) => setEdits((e) => {
     const n = { ...e };
-    if (v === null) delete n[s.period.start]; else n[s.period.start] = v;
+    if (v === null) delete n[week]; else n[week] = v;
     return n;
   });
+  // Reset discards edits, so it turns into "Undo reset" in place (reachable by keyboard inside the drawer) until the text changes again.
+  const [undo, setUndo] = useState<{ week: string; text: string } | null>(null);
+  const reset = () => {
+    setUndo({ week: s.period.start, text });
+    setWeekText(s.period.start, null);
+    toast({ tone: 'info', text: 'Summary text reset to the generated version' });
+  };
+  const canUndo = !!s && undo?.week === s.period.start && text === s.text;
   const nextStart = s ? addDays(s.period.start, 7) : null;
+  const isCurrentWeek = !nextStart || nextStart > today;
   const copy = async () => {
     let ok = true;
     try { await navigator.clipboard.writeText(text); }
@@ -191,12 +210,13 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
       <div className="space-y-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="flex items-center gap-2 text-[17px] font-semibold"><CalendarRange className="size-4 text-accent" aria-hidden />Weekly summary</h2>
+            <h2 id="weekly-summary-title" ref={heading} className="flex items-center gap-2 text-[17px] font-semibold"><CalendarRange className="size-4 text-accent" aria-hidden />Weekly summary</h2>
             <p className="text-[13px] text-ink-3">{s ? `${fmtDate(s.period.start, { weekday: 'short', day: 'numeric', month: 'short' })} – ${fmtDate(s.period.end, { weekday: 'short', day: 'numeric', month: 'short' })}` : 'Loading week'}</p>
           </div>
           <div className="flex items-center gap-1">
-            <IconButton label="Previous week" onClick={() => setRef(addDays(s?.period.start ?? ref, -7))}><ChevronLeft className="size-4" /></IconButton>
-            <IconButton label="Next week" disabled={!nextStart || nextStart > today} onClick={() => nextStart && setRef(nextStart)} className="disabled:opacity-40"><ChevronRight className="size-4" /></IconButton>
+            {!isCurrentWeek && <Button size="sm" variant="ghost" onClick={() => { setRef(today); prevBtn.current?.focus(); }}>This week</Button>}
+            <IconButton ref={prevBtn} label="Previous week" onClick={() => setRef(addDays(s?.period.start ?? ref, -7))}><ChevronLeft className="size-4" /></IconButton>
+            <IconButton label="Next week" disabled={isCurrentWeek} onClick={() => { if (!nextStart) return; setRef(nextStart); if (addDays(nextStart, 7) > today) prevBtn.current?.focus(); }} className="disabled:opacity-40"><ChevronRight className="size-4" /></IconButton>
           </div>
         </div>
         {q.isLoading ? (
@@ -204,11 +224,11 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
         ) : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : s && (
           <>
             <div className="grid grid-cols-2 gap-3">
-              <Stat label="Accepted outcomes" value={s.facts.acceptedOutcomes} sub={`${s.facts.acceptedPlannedOutcomes} of ${s.facts.intendedOutcomes} planned, same day`} />
+              <Stat label="Accepted outcomes" value={s.facts.acceptedOutcomes} sub={`${s.facts.acceptedPlannedOutcomes} of ${s.facts.intendedOutcomes} planned outcomes accepted the same day`} />
               <Stat label="Carried over" value={s.facts.carryovers} />
               <Stat label="Open blockers" value={s.facts.openBlockers} sub={`${s.facts.resolvedBlockers} resolved`} />
               <Stat label="Recorded time" value={s.facts.availableMinutes ? hm(s.facts.explainedMinutes) : 'N/A'}
-                sub={s.facts.availableMinutes ? `${pct(s.facts.loggingCoverage)} of ${hm(s.facts.availableMinutes)}` : 'No scheduled time'}
+                sub={s.facts.availableMinutes ? `${pct(s.facts.loggingCoverage)} of ${hm(s.facts.availableMinutes)} scheduled` : 'No scheduled time'}
                 hint="Logging coverage: how much scheduled time has a time entry. It is not a productivity measure, and unrecorded time is unknown, not idle." />
             </div>
             {s.reportState !== 'confirmed' && <Callout tone="neutral">Some days have no confirmed recap yet, so parts of this summary are provisional.</Callout>}
@@ -216,11 +236,13 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
               <div className="flex flex-wrap items-end justify-between gap-2">
                 <label htmlFor="weekly-summary-text" className="text-[13px] font-medium text-ink-2">Summary text</label>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="ghost" icon={<RotateCcw className="size-3.5" />} disabled={text === s.text} onClick={() => setText(null)}>Reset</Button>
+                  {canUndo
+                    ? <Button size="sm" variant="ghost" icon={<Undo2 className="size-3.5" />} onClick={() => { setWeekText(undo!.week, undo!.text); setUndo(null); }}>Undo reset</Button>
+                    : <Button size="sm" variant="ghost" icon={<RotateCcw className="size-3.5" />} disabled={text === s.text} onClick={reset}>Reset</Button>}
                   <Button size="sm" variant="primary" icon={<Copy className="size-3.5" />} onClick={copy}>Copy</Button>
                 </div>
               </div>
-              <textarea id="weekly-summary-text" ref={area} value={text} onChange={(e) => setText(e.target.value)} rows={18} spellCheck
+              <textarea id="weekly-summary-text" ref={area} value={text} onChange={(e) => setWeekText(s.period.start, e.target.value)} rows={18} spellCheck
                 className="w-full rounded-lg bg-surface px-3 py-2 text-[13px] leading-relaxed text-ink ring-1 ring-inset ring-line-strong focus:outline-none focus:ring-2 focus:ring-accent" />
               <p className="text-[12px] text-ink-3">Edit freely. Nothing is saved or shared; it only leaves this screen when you copy it.</p>
             </div>

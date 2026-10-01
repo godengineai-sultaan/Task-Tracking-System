@@ -303,6 +303,7 @@ describe('weekly self-summary', () => {
     expect(r.body.period).toEqual({ start: day(0), end: day(6) });
     const text: string = r.body.text;
     expect(text).toMatch(/^Weekly summary: Mon /);
+    expect(text).toContain('\n5 working days, 0 with a confirmed recap'); // a finished week is not described as "so far"
     expect(text).toContain('Accepted outcomes (1)');
     expect(text).toContain('- Publish onboarding guide: accepted');
     expect(text).toContain('Carried over (1)');

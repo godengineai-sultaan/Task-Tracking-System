@@ -179,7 +179,7 @@ export async function suggestDay(db: Db, a: Actor, date?: string, now = Date.now
   if (current.length) sentences.push(`${plural(current.length, 'outcome is', 'outcomes are')} already chosen and will be kept.`);
   if (!slots) sentences.push('All three outcome slots are used, so nothing new is proposed.');
   else if (!add.length) sentences.push('No open work is ready to plan right now.');
-  else sentences.push(`Proposed: ${add.map((c) => `"${c.title}" (${c.reasons[0].replace(/^./, (s: string) => s.toLowerCase())})`).join(', ')}.`);
+  else sentences.push(`Proposed: ${add.map((c) => `"${c.title}" – ${c.reasons[0].replace(/^./, (s: string) => s.toLowerCase())}`).join('; ')}.`);
   if (excluded.length) {
     const by = (r: string) => excluded.filter((e) => e.reason === r).length;
     const bits = [['blocked', 'blocked'], ['in_review', 'in review'], ['dependencies', 'waiting on dependencies'], ['done', 'already done'], ['cancelled', 'cancelled']]
@@ -330,8 +330,9 @@ export async function weeklySummary(db: Db, a: Actor, date?: string) {
   const L: string[] = [];
   L.push(`Weekly summary: ${fmtDay(start)} to ${fmtDay(end)} ${DateTime.fromISO(end).year}`);
   L.push(`${a.name}. Prepared from my recorded work: plans, task status changes, time entries and recaps.`);
-  L.push(s.workingDays === 0 ? 'No scheduled working days so far this week.'
-    : `${plural(s.workingDays, 'working day')} so far, ${s.confirmedRecaps} with a confirmed recap${s.confirmedRecaps < s.workingDays ? ' (figures for the other days are provisional)' : ''}.`);
+  const soFar = end >= today ? ' so far' : ''; // a finished week is complete, not "so far"
+  L.push(s.workingDays === 0 ? `No scheduled working days${soFar} this week.`
+    : `${plural(s.workingDays, 'working day')}${soFar}, ${s.confirmedRecaps} with a confirmed recap${s.confirmedRecaps < s.workingDays ? ' (figures for the other days are provisional)' : ''}.`);
   L.push('');
   L.push(`Accepted outcomes (${r.acceptedOutcomes.length})`);
   if (!r.acceptedOutcomes.length) L.push('- None accepted this week.');
@@ -349,7 +350,7 @@ export async function weeklySummary(db: Db, a: Actor, date?: string) {
     L.push(`- ${b.task}: ${b.reason}${b.waitingOn ? `; waiting on ${b.waitingOn}` : ''}${b.resolvedAt ? ' (resolved)' : b.nextFollowUp ? ` (open; follow-up ${fmtDay(b.nextFollowUp)})` : ' (open; no follow-up date)'}`);
   L.push('');
   L.push('Time allocation');
-  if (s.availableMinutes === 0) L.push('- No scheduled time so far this week, so time ratios are not applicable.');
+  if (s.availableMinutes === 0) L.push(`- No scheduled time${soFar} this week, so time ratios are not applicable.`);
   else {
     L.push(`- ${hm(s.explainedMinutes)} recorded of ${hm(s.availableMinutes)} scheduled (logging coverage ${Math.round((s.loggingCoverage ?? 0) * 100)}%; this measures how much time was recorded, not productivity).`);
     const cats = Object.entries(s.byCategory as Record<string, number>).filter(([, m]) => m > 0).map(([k, m]) => `${CAT_LABEL[k] ?? k} ${hm(m)}`);
