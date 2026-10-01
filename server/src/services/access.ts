@@ -40,8 +40,8 @@ export async function loadActor(db: Db, tenantId: string, userId: string): Promi
      where u.id = $1 and u.tenant_id = $2 and u.status = 'active'`, [userId, tenantId]);
   if (!u) return null;
   const managed = await many<{ user_id: string }>(db,
-    `select distinct tm.user_id from teams t join team_members tm on tm.team_id = t.id
-     where t.manager_id = $1 and tm.user_id <> $1`, [userId]);
+    `select distinct tm.user_id from teams t join team_members tm on tm.team_id = t.id join users mu on mu.id = tm.user_id
+     where t.manager_id = $1 and tm.user_id <> $1 and not ('customer' = any(mu.roles))`, [userId]);
   return {
     id: u.id, tenantId, name: u.name, email: u.email, roles: new Set(u.roles), isFounder: u.is_founder,
     customerId: u.customer_id, departmentId: u.department_id, timezone: u.timezone || u.tenant_tz,

@@ -453,7 +453,6 @@ export async function handleTaskEvent(db: Db, ev: TaskEvent) {
   const rules = await many(db, `select * from automation_rules where enabled and archived_at is null and trigger->>'type' = $1 order by created_at, id`, [ev.type]);
   if (!rules.length) return;
   const today = await tenantToday(db, ev.tenantId);
-  // events.ts counts automation depth in one process-wide counter, so concurrent requests inflate ev.depth.
   // Inside this engine's own chain the async-local depth is exact; a person's direct change (actor set, no chain) is depth 0.
   const depth = chainDepth.getStore() ?? (ev.actorId ? 0 : ev.depth);
   const info: EventInfo = { trigger: ev.type, from: ev.from ?? null, to: ev.to ?? null, decision: (ev.details?.decision as string) ?? null, depth };

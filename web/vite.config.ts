@@ -7,5 +7,5 @@ export default defineConfig({
   root: resolve(import.meta.dirname),
   plugins: [react(), tailwindcss()],
   build: { outDir: resolve(import.meta.dirname, '../dist'), emptyOutDir: true },
-  server: { port: 5173, strictPort: true, proxy: { '/api': 'http://127.0.0.1:4300' } },
+  server: { port: 5173, strictPort: true, proxy: { '/api': 'http://127.0.0.1:4300', '/calendar-feed': 'http://127.0.0.1:4300' } },
 });

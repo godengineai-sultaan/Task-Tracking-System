@@ -1,10 +1,10 @@
 import { DateTime } from 'luxon';
 import { one, type Db } from '../../lib/db.js';
 import { badRequest, conflict } from '../../lib/errors.js';
-import type { Actor } from '../access.js';
+import { type Actor, has } from '../access.js';
 import { localToday } from '../calendar.js';
 import { setPlan } from '../myday.js';
-import { createTask, parseQuickCapture } from '../tasks.js';
+import { createTask, parseQuickCapture, projectVisibleSql } from '../tasks.js';
 
 /**
  * Idempotency for client-generated request ids (offline outbox, retried quick captures).
@@ -37,7 +37,7 @@ export async function syncOfflineCapture(db: Db, a: Actor, c: OfflineCapture, co
   const capturedOn = at.setZone(a.timezone).toISODate()!;
   const p = parseQuickCapture(c.text, capturedOn);
   if (!p.title) throw badRequest('The capture has no title left after removing shortcuts');
-  const project = p.projectKey ? await one(db, `select id from projects where key = $1 and status <> 'archived'`, [p.projectKey]) : null;
+  const project = p.projectKey ? await one(db, `select id from projects pr where key = $1 and status <> 'archived' and ${projectVisibleSql('pr', 2)}`, [p.projectKey, a.id, has(a, 'routine_admin')]) : null;
   const owner = p.ownerHint ? await one(db, `select id from users where status = 'active' and not ('customer' = any(roles))
     and (lower(split_part(email, '@', 1)) = $1 or lower(split_part(name, ' ', 1)) = $1 or lower(replace(name, ' ', '.')) = $1) limit 1`, [p.ownerHint]) : null;
   const warnings = [

@@ -35,6 +35,7 @@ const WhatIf = lazy(() => import('./pages/ext/WhatIf'));
 const Profitability = lazy(() => import('./pages/ext/Profitability'));
 const ClientUpdates = lazy(() => import('./pages/ext/ClientUpdates'));
 const Insights = lazy(() => import('./pages/ext/Insights'));
+const Blockers = lazy(() => import('./pages/Blockers'));
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: (n, e: any) => n < 2 && (!e?.status || e.status >= 500), refetchOnWindowFocus: true, staleTime: 15_000 } } });
 
@@ -81,6 +82,7 @@ const router = createBrowserRouter([
     { path: 'profitability', element: page(<Profitability />) },
     { path: 'client-updates', element: page(<ClientUpdates />) },
     { path: 'insights', element: page(<Insights />) },
+    { path: 'blockers', element: page(<Blockers />) },
     { path: '*', element: <div className="p-10 text-center text-ink-3">Page not found.</div> },
   ] },
 ]);

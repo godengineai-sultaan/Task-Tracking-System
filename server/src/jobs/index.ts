@@ -42,8 +42,9 @@ export function registerJobs() {
     const r1 = await db.query(`delete from ux_timings where created_at < now() - ($1 || ' days')::interval`, [String(days)]);
     const r2 = await db.query(`delete from notifications where created_at < now() - ($1 || ' days')::interval`, [String(Math.min(days, 180))]);
     const r3 = await db.query(`delete from integration_events where received_at < now() - ($1 || ' days')::interval and status in ('ignored','duplicate','rejected')`, [String(days)]);
+    const r4 = await db.query(`delete from automation_runs where created_at < now() - ($1 || ' days')::interval`, [String(Math.min(days, 365))]);
     await audit(db, { tenantId: job.tenantId!, actorId: null, action: 'retention.purge', resourceType: 'tenant', resourceId: job.tenantId!,
-      details: { retentionDays: days, uxTimings: r1.rowCount, notifications: r2.rowCount, integrationEvents: r3.rowCount } });
+      details: { retentionDays: days, uxTimings: r1.rowCount, notifications: r2.rowCount, integrationEvents: r3.rowCount, automationRuns: r4.rowCount } });
   });
   // Scheduler tick (system job): enqueue per-tenant periodic work once per hour, idempotent by hour key.
   registerJob('scheduler.tick', async (db) => {

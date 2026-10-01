@@ -160,6 +160,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/api/admin/teams/:id/members', async (req) => tx(req, async (db, a) => {
     sysAdmin(a);
     const { userId } = z.object({ userId: uuid }).parse(req.body);
+    const member = await one(db, `select roles, status from users where id = $1`, [userId]);
+    if (!member || member.status !== 'active' || member.roles.includes('customer')) throw badRequest('Only active staff accounts can join a team');
     await db.query(`insert into team_members (tenant_id, team_id, user_id) values ($1,$2,$3) on conflict do nothing`, [a.tenantId, (req.params as any).id, userId]);
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'team.member_add', resourceType: 'team', resourceId: (req.params as any).id, details: { userId } });
     return { ok: true };

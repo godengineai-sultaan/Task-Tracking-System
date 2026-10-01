@@ -79,9 +79,12 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
   const owner = await one(db, `select id, status, roles from users where id = $1`, [ownerId]);
   if (!owner || owner.status !== 'active' || owner.roles.includes('customer')) throw badRequest('Owner must be an active staff member');
   if (input.projectId) {
-    const p = await one(db, `select id, status from projects where id = $1`, [input.projectId]);
+    const p = await one(db, `select id, status, visibility, owner_id from projects where id = $1`, [input.projectId]);
     if (!p) throw badRequest('Project not found');
     if (p.status === 'archived') throw badRequest('Project is archived');
+    // Private projects: only their owner, members or the main admin may file work into them.
+    if (a && p.visibility === 'private' && p.owner_id !== a.id && !has(a, 'routine_admin')
+      && !(await one(db, `select 1 from project_members where project_id = $1 and user_id = $2`, [p.id, a.id]))) throw badRequest('Project not found');
   }
   const t = await one(db, `select settings from tenants where id = $1`, [tenantId]);
   const settings = t?.settings ?? {};
@@ -119,7 +122,7 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
     correlationId: opts.correlationId, authority: opts.authority ?? (a ? 'owner/creator' : 'system'), details: { source: input.sourceType ?? 'manual' } });
   if (a && ownerId !== a.id) await notify(db, tenantId, ownerId, 'task_assigned', `New task: ${row.title}`, `Assigned by ${a.name}`, `/tasks/${row.id}`);
   await emitTaskEvent(db, a, { type: 'task.created', tenantId, actorId: a?.id ?? null, task: row, to: row.status });
-  return { task: row, created: true };
+  return { task: await fresh(db, row), created: true };
 }
 
 // ---------- Update fields (optimistic concurrency) ----------
@@ -154,7 +157,7 @@ export async function updateTask(db: Db, a: Actor, task: any, patch: Record<stri
       correlationId, details: { fields: Object.keys(changed) } });
   if (!(Object.keys(changed).length === 1 && 'sortOrder' in changed))
     await emitTaskEvent(db, a, { type: 'task.updated', tenantId: a.tenantId, actorId: a.id, task: row, details: { fields: Object.keys(changed), before: { due_date: task.due_date, priority: task.priority } } });
-  return row;
+  return fresh(db, row);
 }
 
 // ---------- State transitions ----------
@@ -206,7 +209,7 @@ export async function transition(db: Db, a: Actor, task: any, to: Status, opts: 
     reason: opts.reason ?? opts.blocker?.reason ?? null, correlationId: opts.correlationId, details: { from, to } });
   await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: row, from, to, details: to === 'blocked' ? { blocker: opts.blocker } : undefined });
   if (to === 'blocked') await emitTaskEvent(db, a, { type: 'blocker.raised', tenantId: a.tenantId, actorId: a.id, task: row, details: { blocker: opts.blocker } });
-  return row;
+  return fresh(db, row);
 }
 
 async function assertEvidence(db: Db, task: any) {
@@ -235,7 +238,7 @@ export async function reviewTask(db: Db, a: Actor, task: any, decision: 'accepte
     authority: 'reviewer', reason: note || null, correlationId });
   await emitTaskEvent(db, a, { type: 'task.reviewed', tenantId: a.tenantId, actorId: a.id, task: row, from: 'in_review', to, details: { decision, note } });
   await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: row, from: 'in_review', to });
-  return row;
+  return fresh(db, row);
 }
 
 export async function reopenTask(db: Db, a: Actor, task: any, reason: string, correlationId?: string) {
@@ -249,7 +252,7 @@ export async function reopenTask(db: Db, a: Actor, task: any, reason: string, co
     [a.tenantId, task.id, task.status, to, a.id, `Reopened: ${reason}`]);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.reopen', resourceType: 'task', resourceId: task.id, resourceVersion: row.version, reason, correlationId });
   await emitTaskEvent(db, a, { type: 'task.reopened', tenantId: a.tenantId, actorId: a.id, task: row, from: task.status, to, details: { reason } });
-  return row;
+  return fresh(db, row);
 }
 
 export async function reassignTask(db: Db, a: Actor, task: any, newOwnerId: string, reason: string, correlationId?: string) {
@@ -269,7 +272,17 @@ export async function reassignTask(db: Db, a: Actor, task: any, newOwnerId: stri
     reason, correlationId, authority: has(a, 'routine_admin') ? 'routine_admin' : a.managedUserIds.includes(task.owner_id) ? 'team_manager' : 'owner',
     details: { from: task.owner_id, to: newOwnerId } });
   await emitTaskEvent(db, a, { type: 'task.reassigned', tenantId: a.tenantId, actorId: a.id, task: row, details: { fromOwner: task.owner_id, toOwner: newOwnerId, reason } });
-  return row;
+  return fresh(db, row);
+}
+
+/** SQL predicate: projects the actor may see (company-wide, owned, member of, or main admin). Params: $n = actor id, $n+1 = is routine admin. */
+export function projectVisibleSql(alias: string, n: number) {
+  return `(${alias}.visibility = 'company' or ${alias}.owner_id = $${n} or $${n + 1}::boolean or exists (select 1 from project_members pm where pm.project_id = ${alias}.id and pm.user_id = $${n}))`;
+}
+
+/** Re-read a task after events: automation rules may have changed it in the same transaction (keeps version current for clients). */
+async function fresh(db: Db, row: any) {
+  return (await one(db, `select * from tasks where id = $1`, [row.id])) ?? row;
 }
 
 export function label(s: string) {

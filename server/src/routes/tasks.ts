@@ -6,7 +6,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { readStored, storeFile } from '../lib/storage.js';
 import { assertContribute, canSeeRestrictedEvidence, has, isStaff, loadVisibleTask, requireStaff, taskVisibility } from '../services/access.js';
-import { CATEGORIES, PRIORITIES, STATUSES, createTask, parseQuickCapture, reassignTask, reopenTask, reviewTask, transition, updateTask } from '../services/tasks.js';
+import { CATEGORIES, PRIORITIES, STATUSES, createTask, projectVisibleSql, parseQuickCapture, reassignTask, reopenTask, reviewTask, transition, updateTask } from '../services/tasks.js';
 import { setPlan } from '../services/myday.js';
 import { localToday } from '../services/calendar.js';
 import { notify } from '../services/notify.js';
@@ -36,7 +36,7 @@ export async function taskRoutes(app: FastifyInstance) {
   app.post('/api/tasks/parse', async (req) => tx(req, async (db, a) => {
     const { text } = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
     const p = parseQuickCapture(text, localToday(a.timezone));
-    const project = p.projectKey ? await one(db, `select id, key, name from projects where key = $1 and status <> 'archived'`, [p.projectKey]) : null;
+    const project = p.projectKey ? await one(db, `select id, key, name from projects pr where key = $1 and status <> 'archived' and ${projectVisibleSql('pr', 2)}`, [p.projectKey, a.id, has(a, 'routine_admin')]) : null;
     const owner = p.ownerHint ? await one(db, `select id, name from users where status = 'active' and not ('customer' = any(roles))
       and (lower(split_part(email, '@', 1)) = $1 or lower(split_part(name, ' ', 1)) = $1 or lower(replace(name, ' ', '.')) = $1) limit 1`, [p.ownerHint]) : null;
     return { ...p, project, owner, warnings: [

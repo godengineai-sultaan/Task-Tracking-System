@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Db } from '../lib/db.js';
 import type { Actor } from './access.js';
 
@@ -22,13 +23,14 @@ type Listener = (db: Db, ev: TaskEvent, actor: Actor | null) => Promise<void>;
 const listeners: Listener[] = [];
 export function onTaskEvent(l: Listener) { listeners.push(l); }
 
-let currentDepth = 0;
+// Depth is tracked per async call chain (not process-wide), so concurrent requests never inflate each other's depth.
+const depthStore = new AsyncLocalStorage<number>();
+export function currentAutomationDepth() { return depthStore.getStore() ?? 0; }
 /** Run fn as an automation-originated change: events it emits carry depth + 1. */
 export async function asAutomation<T>(fn: () => Promise<T>): Promise<T> {
-  currentDepth++;
-  try { return await fn(); } finally { currentDepth--; }
+  return depthStore.run(currentAutomationDepth() + 1, fn);
 }
 export async function emitTaskEvent(db: Db, actor: Actor | null, ev: Omit<TaskEvent, 'depth'>) {
-  const full: TaskEvent = { ...ev, depth: currentDepth };
+  const full: TaskEvent = { ...ev, depth: currentAutomationDepth() };
   for (const l of listeners) await l(db, full, actor);
 }

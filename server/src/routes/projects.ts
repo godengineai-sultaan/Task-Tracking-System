@@ -115,7 +115,10 @@ export async function projectRoutes(app: FastifyInstance) {
   app.patch('/api/objectives/:id', async (req) => tx(req, async (db, a) => {
     if (!has(a, 'leadership') && !has(a, 'system_admin')) throw forbidden();
     const b = z.object({ status: z.enum(['active', 'achieved', 'missed', 'dropped']).optional(), title: z.string().min(1).max(300).optional() }).parse(req.body);
-    return one(db, `update objectives set status = coalesce($2,status), title = coalesce($3,title) where id = $1 returning *`, [(req.params as any).id, b.status ?? null, b.title ?? null]);
+    const o = await one(db, `update objectives set status = coalesce($2,status), title = coalesce($3,title), version = version + 1 where id = $1 returning *`, [(req.params as any).id, b.status ?? null, b.title ?? null]);
+    if (!o) throw notFound();
+    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'objective.update', resourceType: 'objective', resourceId: o.id, resourceVersion: o.version, details: b });
+    return o;
   }));
 
   app.get('/api/customer/portal', async (req) => tx(req, (db, a) => customerView(db, a)));

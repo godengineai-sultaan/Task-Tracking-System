@@ -57,9 +57,12 @@ export async function setPlan(db: Db, a: Actor, date: string, taskIds: string[],
   if (!isStaff(a)) throw forbidden();
   const uniq = [...new Set(taskIds)];
   if (uniq.length > 3) throw badRequest('Choose up to three intended outcomes for the day');
+  // Only newly added outcomes must be open; outcomes already on the plan stay even after they are done.
+  const already = new Set((await many(db, `select dpi.task_id from daily_plans dp join daily_plan_items dpi on dpi.plan_id = dp.id
+    where dp.user_id = $1 and dp.date = $2 and dpi.removed_at is null`, [a.id, date])).map((r) => r.task_id));
   for (const id of uniq) {
     const t = await loadVisibleTask(db, a, id);
-    if (['done', 'cancelled'].includes(t.status)) throw badRequest(`"${t.title}" is already ${t.status}`);
+    if (!already.has(id) && ['done', 'cancelled'].includes(t.status)) throw badRequest(`"${t.title}" is already ${t.status}`);
   }
   const plan = await one(db, `insert into daily_plans (tenant_id, user_id, date, focus_note) values ($1,$2,$3,coalesce($4,''))
     on conflict (user_id, date) do update set updated_at = now(), focus_note = coalesce($4, daily_plans.focus_note) returning *`, [a.tenantId, a.id, date, focusNote ?? null]);

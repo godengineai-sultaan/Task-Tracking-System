@@ -75,6 +75,10 @@ export default async function seed(ctx: SeedCtx) {
     for (const d of days) {
       const working = k === 'sara' ? d.weekday <= 4 : d.weekday <= 5;
       if (!working || (k === 'meera' && d >= leaveMon && d <= leaveMon.plus({ days: 4 }))) continue;
+      // Another fixture (personal trends) already recorded this person-day: leave it intact rather than double it.
+      const taken = await q1(`select 1 from daily_plans where user_id = $1 and date = $2
+        union all select 1 from time_entries where user_id = $1 and started_at >= $3 and started_at < $4 limit 1`, [uid, d.toISODate(), at(d, 0), at(d, 1440)]);
+      if (taken) continue;
       lastDay = d;
       const wk = Math.round(today.startOf('week').diff(d.startOf('week'), 'weeks').weeks);
       // Morning: pending review decision, blocker resolution.

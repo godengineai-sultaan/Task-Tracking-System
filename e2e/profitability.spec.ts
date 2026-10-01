@@ -31,12 +31,12 @@ test('cost viewer sets a budget on a project and sees consumption', async ({ pag
   await dialog.getByLabel('Start date').fill('');
   await dialog.getByLabel('End date').fill('');
   await dialog.getByLabel('Billing').selectOption('fixed_fee');
-  await dialog.getByLabel('Fixed fee').fill('200000');
-  await dialog.getByLabel('Budget hours').fill('100');
+  await dialog.getByLabel('Fixed fee').fill('5000000');
+  await dialog.getByLabel('Budget hours').fill('800');
   await dialog.getByRole('button', { name: 'Save budget' }).click();
   await expect(page.getByText('Budget saved')).toBeVisible();
   const api = (await getJson(page, `/api/projects/${id}/budget`)).body;
-  expect(api.budget).toMatchObject({ billingType: 'fixed_fee', budgetAmount: 200000, budgetHours: 100 });
+  expect(api.budget).toMatchObject({ billingType: 'fixed_fee', budgetAmount: 5000000, budgetHours: 800 });
   const amountPct = `${Math.round(api.money.consumption * 100)}% used`;
   await expect(card.getByRole('img', { name: new RegExp(`^Budget amount: ${amountPct}`) })).toBeVisible();
   await expect(card.getByRole('img', { name: new RegExp(`^Budgeted hours: ${Math.round(api.hours.consumption * 100)}% used`) })).toBeVisible();

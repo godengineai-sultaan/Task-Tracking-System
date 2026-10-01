@@ -232,7 +232,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div aria-live="polite" className="pointer-events-none fixed bottom-20 left-1/2 z-[60] flex w-[min(92vw,420px)] -translate-x-1/2 flex-col gap-2 sm:bottom-6">
+      <div aria-live="polite" className="pointer-events-none fixed bottom-24 left-1/2 z-[60] flex w-[min(92vw,420px)] -translate-x-1/2 flex-col gap-2 lg:bottom-6">
         {items.map((t) => (
           <div key={t.id} className={cx('pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-3 text-sm shadow-xl ring-1',
             t.tone === 'critical' ? 'bg-critical-soft text-critical-ink ring-critical/30' : 'bg-ink text-bg ring-black/10')}>

@@ -46,11 +46,12 @@ export function Shell() {
     { group: 'Oversight', items: [
       { to: '/admin/routine', label: r.routineAdmin ? 'Daily Routine' : 'Team routine', icon: <LayoutDashboard className="size-4" />, show: r.canReview },
       { to: '/capacity', label: 'Team capacity', icon: <Users className="size-4" />, show: r.canReview || r.leadership },
-      { to: '/team-review', label: 'Weekly team review', icon: <CalendarRange className="size-4" />, show: r.canReview },
+      { to: '/team-review', label: r.canReview ? 'Weekly team review' : 'My weekly reviews', icon: <CalendarRange className="size-4" />, show: true },
+      { to: '/blockers', label: 'Blocker escalation', icon: <ShieldCheck className="size-4" />, show: r.canReview || r.sysAdmin },
       { to: '/insights', label: 'Insights', icon: <LineChart className="size-4" />, show: r.canReview || r.leadership },
       { to: '/leadership', label: 'Leadership', icon: <Gauge className="size-4" />, show: r.leadership || r.routineAdmin },
       { to: '/objectives', label: 'Objectives', icon: <Target className="size-4" />, show: true },
-      { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer },
+      { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer || r.leadership },
       { to: '/client-updates', label: 'Client updates', icon: <Send className="size-4" />, show: r.leadership || r.sysAdmin || r.manager },
     ] },
     { group: 'Setup', items: [
@@ -212,6 +213,7 @@ function CommandPalette({ open, onClose, onCapture }: { open: boolean; onClose: 
     { label: 'My weekly report', run: () => go('/analytics?kind=week'), show: !r.customer },
     { label: 'Admin daily routine', run: () => go('/admin/routine'), show: r.canReview },
     { label: 'Team capacity', run: () => go('/capacity'), show: r.canReview || r.leadership },
+    { label: 'What-if planner', run: () => go('/capacity/what-if'), show: !r.customer },
     { label: 'Leadership delivery', run: () => go('/leadership'), show: r.leadership || r.routineAdmin },
     { label: 'Record leave', run: () => go('/calendar'), show: !r.customer },
   ].filter((a) => a.show);
