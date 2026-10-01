@@ -128,6 +128,7 @@ describe('suggest my day: capacity', () => {
     const r = await emp.get(`/api/planning/suggest?date=${date}`);
     expect(r.body.capacityCheck).toMatchObject({ state: 'over', outcomes: 3, estimateMinutes: 500, unestimated: 1, remainingMinutes: 420 });
     expect(r.body.capacityCheck.text).toMatch(/more than the 7h of scheduled time/);
+    expect(r.body.capacityCheck.text).toMatch(/1 outcome has no estimate/);
     expect(r.body.candidates.find((c: any) => c.title === 'Big design doc').parts.find((p: any) => p.key === 'estimate_fit').points).toBe(8);
   });
 
@@ -148,6 +149,20 @@ describe('suggest my day: capacity', () => {
     const l = await emp.get(`/api/planning/suggest?date=${lv}`);
     expect(l.body).toMatchObject({ applicable: false, candidates: [] });
     expect(l.body.rationale).toMatch(/You are on sick leave/);
+  });
+
+  it('keeps overdue work in view when a person has more than 300 open tasks', async () => {
+    const date = iso(weekdayAhead(9));
+    await withOwner(async (db) => {
+      await db.query(`insert into tasks (tenant_id, title, owner_id, created_by, created_at)
+        select $1, 'Old backlog idea ' || g, $2, $2, now() - interval '60 days' + g * interval '1 minute' from generate_series(1, 300) g`, [org.tenantId, org.users.emp]);
+      await db.query(`insert into tasks (tenant_id, title, owner_id, created_by, due_date, priority) values ($1,'Late tax filing',$2,$2,$3,'high')`,
+        [org.tenantId, org.users.emp, iso(DateTime.fromISO(date).minus({ days: 5 }))]);
+    });
+    const r = await emp.get(`/api/planning/suggest?date=${date}`);
+    expect(r.status).toBe(200);
+    expect(r.body.candidates[0].title).toBe('Late tax filing');
+    expect(r.body.candidates.map((c: any) => c.title)).toEqual(expect.arrayContaining(['Big design doc', 'Data migration', 'Unsized spike']));
   });
 });
 
@@ -212,6 +227,20 @@ describe('nudges: idempotent, opt-out, working days only', () => {
     expect(await withTenant(org.tenantId, (db) => nudgeUser(db, org.tenantId, org.users.emp2, 'plan', W2, at(W2, '09:15')))).toBe(false); // opted out
   });
 
+  it('skips holidays and follows a half-day leave window', async () => {
+    const hol = iso(weekdayAhead(21)), half = iso(weekdayAhead(28));
+    await withOwner(async (db) => {
+      await db.query(`insert into holidays (tenant_id, date, name) values ($1,$2,'Foundation Day')`, [org.tenantId, hol]);
+      await db.query(`insert into leave_entries (tenant_id, user_id, start_date, end_date, portion, kind) values ($1,$2,$3,$3,'half_pm','leave')`, [org.tenantId, org.users.emp2, half]);
+    });
+    for (const hhmm of ['08:30', '09:20', '16:20']) expect(await run(at(hol, hhmm))).toMatchObject({ sent: 0, scheduled: 0, skippedNoCapacity: 6 });
+    // emp2 works 09:00-13:00 that day (opted out of plan reminders): the recap window is 12:15-13:00.
+    expect((await run(at(half, '12:30'))).sent).toBe(6); // plan nudges for admin, manager, emp, outsider, founder + emp2's recap
+    const recap = await withOwner(async (db) => (await db.query(`select user_id from planning_nudges where tenant_id = $1 and date = $2 and kind = 'recap'`, [org.tenantId, half])).rows);
+    expect(recap.map((x) => x.user_id)).toEqual([org.users.emp2]);
+    expect((await run(at(half, '16:30'))).sent).toBe(4); // admin, emp, outsider, founder (manager opted out; emp2's day already ended)
+  });
+
   it('runs as a registered tenant tick job', async () => {
     const { enqueue } = await import('../server/src/lib/jobs.js');
     await withTenant(org.tenantId, (db) => enqueue(db, { tenantId: org.tenantId, kind: 'planning.nudges', payload: {}, idempotencyKey: `test-planning-tick:${org.tenantId}` }));
@@ -234,6 +263,13 @@ describe('nudge preferences', () => {
     const a = await withOwner(async (db) => (await db.query(`select details from audit_events where tenant_id = $1 and action = 'planning.preferences.update'`, [org.tenantId])).rows);
     expect(a).toHaveLength(1);
     expect(a[0].details).toMatchObject({ before: { recapNudge: true }, after: { recapNudge: false } });
+    // Two updates of different fields at the same time both survive (repeated: the race does not trigger every time).
+    for (let i = 0; i < 4; i++) {
+      await emp.put('/api/planning/preferences', { planNudge: true, recapNudge: false });
+      const [p1, p2] = await Promise.all([emp.put('/api/planning/preferences', { planNudge: false }), emp.put('/api/planning/preferences', { recapNudge: true })]);
+      expect([p1.status, p2.status]).toEqual([200, 200]);
+      expect((await emp.get('/api/planning/preferences')).body).toMatchObject({ planNudge: false, recapNudge: true });
+    }
   });
 });
 

@@ -168,16 +168,23 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
   const toast = useToast();
   const [ref, setRef] = useState(today);
   const q = useQuery({ queryKey: ['planning-weekly', ref], queryFn: () => api.get(`/api/planning/weekly-summary${qs({ date: ref })}`), enabled: open });
-  const [text, setText] = useState('');
+  // Edits are kept per week, so a background refetch (for example on window focus) never overwrites them; Reset discards them.
+  const [edits, setEdits] = useState<Record<string, string>>({});
   const area = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { if (q.data) setText(q.data.text); }, [q.data]);
   useEffect(() => { if (open) setRef(today); }, [open, today]);
   const s = q.data;
+  const text: string = s ? edits[s.period.start] ?? s.text : '';
+  const setText = (v: string | null) => s && setEdits((e) => {
+    const n = { ...e };
+    if (v === null) delete n[s.period.start]; else n[s.period.start] = v;
+    return n;
+  });
   const nextStart = s ? addDays(s.period.start, 7) : null;
   const copy = async () => {
+    let ok = true;
     try { await navigator.clipboard.writeText(text); }
-    catch { area.current?.select(); document.execCommand('copy'); }
-    toast({ tone: 'good', text: 'Summary copied to the clipboard' });
+    catch { area.current?.select(); ok = document.execCommand('copy'); }
+    toast(ok ? { tone: 'good', text: 'Summary copied to the clipboard' } : { tone: 'critical', text: 'Could not copy automatically. The text is selected: press Ctrl+C (Cmd+C on a Mac).' });
   };
   return (
     <Drawer open={open} onClose={onClose} title="My Day" width="max-w-xl">
@@ -209,7 +216,7 @@ export function WeeklySummaryDrawer({ open, onClose, today }: { open: boolean; o
               <div className="flex flex-wrap items-end justify-between gap-2">
                 <label htmlFor="weekly-summary-text" className="text-[13px] font-medium text-ink-2">Summary text</label>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="ghost" icon={<RotateCcw className="size-3.5" />} disabled={text === s.text} onClick={() => setText(s.text)}>Reset</Button>
+                  <Button size="sm" variant="ghost" icon={<RotateCcw className="size-3.5" />} disabled={text === s.text} onClick={() => setText(null)}>Reset</Button>
                   <Button size="sm" variant="primary" icon={<Copy className="size-3.5" />} onClick={copy}>Copy</Button>
                 </div>
               </div>

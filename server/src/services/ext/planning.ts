@@ -93,7 +93,7 @@ export async function suggestDay(db: Db, a: Actor, date?: string, now = Date.now
     left join users wu on wu.id = b.waiting_on_user_id
     where (t.owner_id = $1 or exists (select 1 from task_collaborators c where c.task_id = t.id and c.user_id = $1))
       and t.status not in ('done','cancelled')
-    order by t.created_at, t.id limit 300`, [a.id]);
+    order by t.due_date nulls last, (t.status = 'in_progress') desc, t.created_at, t.id limit 300`, [a.id]);
   const [vis, visParams] = taskVisibility(a, 2);
   const deps = open.length ? await many(db, `select d.task_id, t.title, t.status, (${vis}) visible
     from task_dependencies d join tasks t on t.id = d.depends_on_task_id left join projects p on p.id = t.project_id
@@ -162,7 +162,7 @@ export async function suggestDay(db: Db, a: Actor, date?: string, now = Date.now
   const capacityCheck = {
     state, outcomes: counted.length, estimateMinutes, unestimated, remainingMinutes: remaining,
     text: state === 'empty' ? `No open outcomes to check against the ${left}.`
-      : state === 'over' ? `The proposed outcomes are estimated at ${hm(estimateMinutes)}, more than the ${left}. Consider a smaller first step for one of them.`
+      : state === 'over' ? `The proposed outcomes are estimated at ${hm(estimateMinutes)}, more than the ${left}.${unestimated ? ` ${plural(unestimated, 'outcome has', 'outcomes have')} no estimate, so the real total is higher still.` : ''} Consider a smaller first step for one of them.`
       : state === 'partial' ? `The estimated outcomes add up to ${hm(estimateMinutes)} of the ${left}; ${plural(unestimated, 'outcome has', 'outcomes have')} no estimate, so the real total is unknown.`
       : `The proposed outcomes are estimated at ${hm(estimateMinutes)} of the ${left}, leaving ${hm(remaining - estimateMinutes)} for meetings, reviews and unplanned work.`,
   };
@@ -207,10 +207,12 @@ export async function getPreferences(db: Db, userId: string) {
 }
 export async function setPreferences(db: Db, a: Actor, patch: { planNudge?: boolean; recapNudge?: boolean }) {
   if (!isStaff(a)) throw forbidden();
-  const before = await getPreferences(db, a.id);
+  // Lock the row so concurrent updates of different fields cannot overwrite each other (or audit a stale "before").
+  await db.query(`insert into planning_preferences (tenant_id, user_id) values ($1,$2) on conflict (user_id) do nothing`, [a.tenantId, a.id]);
+  const row = await one(db, `select plan_nudge, recap_nudge from planning_preferences where user_id = $1 for update`, [a.id]);
+  const before = { planNudge: row.plan_nudge as boolean, recapNudge: row.recap_nudge as boolean };
   const next = { planNudge: patch.planNudge ?? before.planNudge, recapNudge: patch.recapNudge ?? before.recapNudge };
-  await db.query(`insert into planning_preferences (tenant_id, user_id, plan_nudge, recap_nudge) values ($1,$2,$3,$4)
-    on conflict (user_id) do update set plan_nudge = $3, recap_nudge = $4, updated_at = now()`, [a.tenantId, a.id, next.planNudge, next.recapNudge]);
+  await db.query(`update planning_preferences set plan_nudge = $2, recap_nudge = $3, updated_at = now() where user_id = $1`, [a.id, next.planNudge, next.recapNudge]);
   if (next.planNudge !== before.planNudge || next.recapNudge !== before.recapNudge)
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'planning.preferences.update', resourceType: 'planning_preferences', resourceId: a.id,
       details: { before: { planNudge: before.planNudge, recapNudge: before.recapNudge }, after: next } });

@@ -22,7 +22,11 @@ export default function MyDay() {
   const [weeklyOpen, setWeeklyOpen] = useState(false);
   useTicker(30000);
   const plan = useMutation({
-    mutationFn: (body: { taskIds: string[]; reason?: string }) => api.put('/api/my-day/plan', { ...body, elapsedMs: q.data?.intendedOutcomes?.length ? undefined : Date.now() - openedAt.current }),
+    // Planning time is only recorded up to an hour (the API limit); a page left open longer is not a planning-time measurement.
+    mutationFn: (body: { taskIds: string[]; reason?: string }) => {
+      const elapsed = Date.now() - openedAt.current;
+      return api.put('/api/my-day/plan', { ...body, elapsedMs: q.data?.intendedOutcomes?.length || elapsed > 3600000 ? undefined : elapsed });
+    },
     onSuccess: (d) => { qc.setQueryData(['my-day'], d); qc.invalidateQueries({ queryKey: ['tasks'] }); setRemoving(null); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });

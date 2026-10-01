@@ -19,7 +19,7 @@ export default async function seed({ ins, q, T, U, tasks, today, TZ }: SeedCtx) 
 
   // Routine nudges already sent (in-app only), each with its once-per-day idempotency record.
   let last = today.minus({ days: 1 });
-  while (last.weekday > 5) last = last.minus({ days: 1 });
+  while (last.weekday > 5 || last.toISODate() === '2026-10-02') last = last.minus({ days: 1 }); // never on a weekend or the seeded holiday
   const now = DateTime.now().setZone(TZ);
   const sent: { k: string; kind: 'plan' | 'recap'; day: DateTime; at: DateTime; read: boolean }[] = [
     { k: 'dev', kind: 'recap', day: last, at: last.set({ hour: 17, minute: 15 }), read: true },

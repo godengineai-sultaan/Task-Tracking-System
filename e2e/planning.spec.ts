@@ -15,6 +15,7 @@ test('plan my day: suggest with reasons and apply through the plan endpoint', as
     const r = await fetch('/api/tasks', { method: 'POST', headers: h, body: JSON.stringify({ title: t, dueDate: today, priority: 'urgent', estimateMinutes: 30 }) });
     if (!r.ok) throw new Error(await r.text());
   }, [title, me.today, H] as const);
+  await page.clock.install(); // lets the test leave My Day open for over an hour before applying
   await page.reload();
 
   await page.getByRole('button', { name: 'Suggest my day' }).click();
@@ -42,6 +43,8 @@ test('plan my day: suggest with reasons and apply through the plan endpoint', as
   const a11y = await new AxeBuilder({ page }).include('[role="dialog"]').withTags(['wcag2a', 'wcag2aa']).analyze();
   expect(a11y.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(' ')}`)).toEqual([]);
 
+  // My Day has been open for more than an hour (for example after a "Plan your day" reminder): applying still works.
+  await page.clock.fastForward('01:01:00');
   const [put] = await Promise.all([
     page.waitForResponse((r) => r.url().includes('/api/my-day/plan') && r.request().method() === 'PUT'),
     dialog.getByRole('button', { name: 'Use these' }).click(),
@@ -61,6 +64,7 @@ test('plan my day: suggest with reasons and apply through the plan endpoint', as
 
 test('weekly summary: editable text, copy and week navigation', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.clock.install();
   await signIn(page, 'rahul');
   await page.getByRole('button', { name: 'Weekly summary' }).click();
   const box = page.getByLabel('Summary text');
@@ -71,6 +75,14 @@ test('weekly summary: editable text, copy and week navigation', async ({ page, c
   await expect(page.getByRole('button', { name: 'Next week' })).toBeDisabled();
   await box.fill(`${await box.inputValue()}\nNote: covering support on Friday.`);
   await expect(page.getByRole('button', { name: 'Reset' })).toBeEnabled();
+  // Coming back to the window refetches the summary; the edit must survive it.
+  await page.clock.fastForward('00:30');
+  await Promise.all([
+    page.waitForResponse((r) => r.url().includes('/api/planning/weekly-summary')),
+    page.evaluate(() => window.dispatchEvent(new Event('visibilitychange'))),
+  ]);
+  await page.waitForTimeout(300);
+  await expect(box).toHaveValue(/covering support on Friday/);
   await page.getByRole('button', { name: 'Copy' }).click();
   await expect(page.getByText('Summary copied to the clipboard')).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('covering support on Friday');
