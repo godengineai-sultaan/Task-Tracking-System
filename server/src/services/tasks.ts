@@ -5,6 +5,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
 import { type Actor, assertContribute, canReassign, has, isStaff } from './access.js';
 import { notify } from './notify.js';
+import { emitTaskEvent } from './events.js';
 
 export const STATUSES = ['backlog', 'planned', 'in_progress', 'blocked', 'in_review', 'done', 'cancelled'] as const;
 export type Status = (typeof STATUSES)[number];
@@ -117,6 +118,7 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
   await audit(db, { tenantId, actorId: a?.id ?? null, action: 'task.create', resourceType: 'task', resourceId: row.id, resourceVersion: 1,
     correlationId: opts.correlationId, authority: opts.authority ?? (a ? 'owner/creator' : 'system'), details: { source: input.sourceType ?? 'manual' } });
   if (a && ownerId !== a.id) await notify(db, tenantId, ownerId, 'task_assigned', `New task: ${row.title}`, `Assigned by ${a.name}`, `/tasks/${row.id}`);
+  await emitTaskEvent(db, a, { type: 'task.created', tenantId, actorId: a?.id ?? null, task: row, to: row.status });
   return { task: row, created: true };
 }
 
@@ -150,6 +152,8 @@ export async function updateTask(db: Db, a: Actor, task: any, patch: Record<stri
   if (!(Object.keys(changed).length === 1 && 'sortOrder' in changed))
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.update', resourceType: 'task', resourceId: task.id, resourceVersion: row.version,
       correlationId, details: { fields: Object.keys(changed) } });
+  if (!(Object.keys(changed).length === 1 && 'sortOrder' in changed))
+    await emitTaskEvent(db, a, { type: 'task.updated', tenantId: a.tenantId, actorId: a.id, task: row, details: { fields: Object.keys(changed), before: { due_date: task.due_date, priority: task.priority } } });
   return row;
 }
 
@@ -200,6 +204,8 @@ export async function transition(db: Db, a: Actor, task: any, to: Status, opts: 
   }
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: `task.status.${to}`, resourceType: 'task', resourceId: task.id, resourceVersion: row.version,
     reason: opts.reason ?? opts.blocker?.reason ?? null, correlationId: opts.correlationId, details: { from, to } });
+  await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: row, from, to, details: to === 'blocked' ? { blocker: opts.blocker } : undefined });
+  if (to === 'blocked') await emitTaskEvent(db, a, { type: 'blocker.raised', tenantId: a.tenantId, actorId: a.id, task: row, details: { blocker: opts.blocker } });
   return row;
 }
 
@@ -227,6 +233,8 @@ export async function reviewTask(db: Db, a: Actor, task: any, decision: 'accepte
     decision === 'accepted' ? `Accepted: ${task.title}` : `Changes requested: ${task.title}`, note, `/tasks/${task.id}`);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: `task.review.${decision}`, resourceType: 'task', resourceId: task.id, resourceVersion: row.version,
     authority: 'reviewer', reason: note || null, correlationId });
+  await emitTaskEvent(db, a, { type: 'task.reviewed', tenantId: a.tenantId, actorId: a.id, task: row, from: 'in_review', to, details: { decision, note } });
+  await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: row, from: 'in_review', to });
   return row;
 }
 
@@ -240,6 +248,7 @@ export async function reopenTask(db: Db, a: Actor, task: any, reason: string, co
   await db.query(`insert into task_state_history (tenant_id, task_id, from_status, to_status, actor_id, reason) values ($1,$2,$3,$4,$5,$6)`,
     [a.tenantId, task.id, task.status, to, a.id, `Reopened: ${reason}`]);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.reopen', resourceType: 'task', resourceId: task.id, resourceVersion: row.version, reason, correlationId });
+  await emitTaskEvent(db, a, { type: 'task.reopened', tenantId: a.tenantId, actorId: a.id, task: row, from: task.status, to, details: { reason } });
   return row;
 }
 
@@ -259,6 +268,7 @@ export async function reassignTask(db: Db, a: Actor, task: any, newOwnerId: stri
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.reassign', resourceType: 'task', resourceId: task.id, resourceVersion: row.version,
     reason, correlationId, authority: has(a, 'routine_admin') ? 'routine_admin' : a.managedUserIds.includes(task.owner_id) ? 'team_manager' : 'owner',
     details: { from: task.owner_id, to: newOwnerId } });
+  await emitTaskEvent(db, a, { type: 'task.reassigned', tenantId: a.tenantId, actorId: a.id, task: row, details: { fromOwner: task.owner_id, toOwner: newOwnerId, reason } });
   return row;
 }
 

@@ -11,6 +11,7 @@ import { config } from '../lib/config.js';
 import { hashPassword, newToken, encrypt } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { migrate } from './migrate.js';
+import { seedExtensions } from './seed-ext/index.js';
 
 const TZ = 'Asia/Kolkata';
 let seed = 20261001;
@@ -313,6 +314,7 @@ async function main() {
     checklist: JSON.stringify(['Export approved invoices', 'Prepare bank file', 'Attach payment advice']), created_by: U.meera, last_generated_date: today.minus({ days: 1 }).toISODate() });
   await ins('recurring_templates', { title: 'Leadership weekly review', owner_id: U.asha, category: 'admin', priority: 'medium', estimate_minutes: 60, rule: 'weekly', weekday: 5, created_by: U.asha,
     last_generated_date: today.minus({ days: 1 }).toISODate() });
+  await seedExtensions({ c, q, q1, ins, T, U, P, M, tasks, today, TZ });
   await ins('notifications', { user_id: U.asha, kind: 'info', title: 'Demo data loaded', body: 'This organization contains fictional DEMO fixtures.', link: '/admin/routine' });
   await audit(c as any, { tenantId: T, actorId: null, action: 'seed.demo', resourceType: 'tenant', resourceId: T, details: { note: 'Fictional demo fixtures' } });
   await c.query('commit');

@@ -9,17 +9,31 @@ import { type Actor, assertCanViewPerson, has, loadActor } from './access.js';
 import { buildReport } from './analytics.js';
 import { leadershipDelivery, routineTable } from './oversight.js';
 
+/** Extension point: feature areas register additional export report types (authorized + rendered server-side). */
+export interface ExportReportDef {
+  authorize(db: Db, a: Actor, params: any): Promise<void>;
+  build(db: Db, a: Actor, params: any): Promise<{ data: any; name: string }>;
+  csv?(data: any): string;
+  pdf?(data: any, a: Actor): Promise<Buffer>;
+}
+const extraReports = new Map<string, ExportReportDef>();
+export function registerExportReport(name: string, def: ExportReportDef) { extraReports.set(name, def); }
+
 export interface ExportParams { userId?: string; kind?: 'day' | 'week' | 'month' | 'custom'; start?: string; end?: string; date?: string; departmentId?: string; projectId?: string }
 
-export async function requestExport(db: Db, a: Actor, format: 'pdf' | 'csv', report: 'individual' | 'team_daily' | 'delivery', params: ExportParams) {
+export async function requestExport(db: Db, a: Actor, format: 'pdf' | 'csv', report: string, params: ExportParams & Record<string, any>) {
   await authorizeExport(db, a, report, params);
+  const ext = extraReports.get(report);
+  if (ext && !(format === 'csv' ? ext.csv : ext.pdf)) throw badRequest(`This report is not available as ${format.toUpperCase()}`);
   const row = await one(db, `insert into exports (tenant_id, requested_by, format, report, params) values ($1,$2,$3,$4,$5) returning *`, [a.tenantId, a.id, format, report, params]);
   await enqueue(db, { tenantId: a.tenantId, kind: 'export.generate', payload: { exportId: row.id }, idempotencyKey: `export:${row.id}`, maxAttempts: 3 });
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'export.request', resourceType: 'export', resourceId: row.id, details: { format, report, params } });
   return row;
 }
 
-async function authorizeExport(db: Db, a: Actor, report: string, p: ExportParams) {
+async function authorizeExport(db: Db, a: Actor, report: string, p: any) {
+  const ext = extraReports.get(report);
+  if (ext) return ext.authorize(db, a, p);
   if (report === 'individual') {
     if (!p.userId || !p.start || !p.end) throw badRequest('userId, start and end are required');
     await assertCanViewPerson(db, a, p.userId);
@@ -43,6 +57,14 @@ export async function generateExport(db: Db, exportId: string) {
   }
   const p = ex.params as ExportParams;
   let data: any, name: string;
+  const ext = extraReports.get(ex.report);
+  if (ext) {
+    const built = await ext.build(db, a, ex.params);
+    const buf = ex.format === 'csv' ? Buffer.from(ext.csv!(built.data), 'utf8') : await ext.pdf!(built.data, a);
+    const file = await storeFile(db, ex.tenant_id, buf, `${built.name}.${ex.format}`, ex.format === 'csv' ? 'text/csv' : 'application/pdf', 'export', a.id);
+    await db.query(`update exports set status = 'ready', file_id = $2, completed_at = now() where id = $1`, [exportId, file.id]);
+    return;
+  }
   if (ex.report === 'individual') { data = await buildReport(db, p.userId!, p.kind ?? 'custom', p.start!, p.end!); name = `report-${slug(data.subject.name)}-${p.start}-to-${p.end}`; }
   else if (ex.report === 'team_daily') { data = await routineTable(db, a, { date: p.date!, departmentId: p.departmentId, projectId: p.projectId }); name = `daily-routine-${p.date}`; }
   else { data = await leadershipDelivery(db, a); name = `delivery-${new Date().toISOString().slice(0, 10)}`; }

@@ -7,6 +7,7 @@ import { MeProvider, useMeQuery } from './lib/session';
 import { Shell } from './components/Shell';
 import { ErrorState, Spinner, ToastProvider } from './components/ui';
 import { JoinPage, LoginPage, SignupPage } from './pages/Auth';
+import { initPwa } from './pwa';
 
 const MyDay = lazy(() => import('./pages/MyDay'));
 const Tasks = lazy(() => import('./pages/Tasks'));
@@ -25,6 +26,15 @@ const Integrations = lazy(() => import('./pages/Integrations'));
 const Admin = lazy(() => import('./pages/Admin'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Portal = lazy(() => import('./pages/Portal'));
+const Templates = lazy(() => import('./pages/ext/Templates'));
+const Automations = lazy(() => import('./pages/ext/Automations'));
+const TeamReview = lazy(() => import('./pages/ext/TeamReview'));
+const Objectives = lazy(() => import('./pages/ext/Objectives'));
+const ObjectiveDetail = lazy(() => import('./pages/ext/ObjectiveDetail'));
+const WhatIf = lazy(() => import('./pages/ext/WhatIf'));
+const Profitability = lazy(() => import('./pages/ext/Profitability'));
+const ClientUpdates = lazy(() => import('./pages/ext/ClientUpdates'));
+const Insights = lazy(() => import('./pages/ext/Insights'));
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: (n, e: any) => n < 2 && (!e?.status || e.status >= 500), refetchOnWindowFocus: true, staleTime: 15_000 } } });
 
@@ -62,10 +72,20 @@ const router = createBrowserRouter([
     { path: 'admin', element: page(<Admin />) },
     { path: 'settings', element: page(<Settings />) },
     { path: 'portal', element: page(<Portal />) },
+    { path: 'templates', element: page(<Templates />) },
+    { path: 'automations', element: page(<Automations />) },
+    { path: 'team-review', element: page(<TeamReview />) },
+    { path: 'objectives', element: page(<Objectives />) },
+    { path: 'objectives/:id', element: page(<ObjectiveDetail />) },
+    { path: 'capacity/what-if', element: page(<WhatIf />) },
+    { path: 'profitability', element: page(<Profitability />) },
+    { path: 'client-updates', element: page(<ClientUpdates />) },
+    { path: 'insights', element: page(<Insights />) },
     { path: '*', element: <div className="p-10 text-center text-ink-3">Page not found.</div> },
   ] },
 ]);
 
+initPwa();
 createRoot(document.getElementById('root')!).render(
   <StrictMode><QueryClientProvider client={qc}><ToastProvider><RouterProvider router={router} /></ToastProvider></QueryClientProvider></StrictMode>,
 );

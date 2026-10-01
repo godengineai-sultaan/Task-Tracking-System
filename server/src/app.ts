@@ -19,6 +19,7 @@ import { reportRoutes } from './routes/reports.js';
 import { adminRoutes } from './routes/admin.js';
 import { integrationRoutes } from './routes/integrations.js';
 import { projectRoutes } from './routes/projects.js';
+import { extRoutes } from './routes/ext/index.js';
 
 declare module 'fastify' {
   interface FastifyRequest { actor?: Actor; rawBody?: string }
@@ -103,6 +104,7 @@ export async function buildApp() {
   await app.register(reportRoutes);
   await app.register(adminRoutes);
   await app.register(integrationRoutes);
+  await extRoutes(app);
 
   const dist = resolve(process.cwd(), 'dist');
   if (existsSync(dist)) {

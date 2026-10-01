@@ -3,7 +3,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { Command } from 'cmdk';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bell, BarChart3, Briefcase, CalendarCheck2, CalendarDays, ClipboardList, Gauge, LayoutDashboard, LogOut, Menu, Moon, Plug, Plus, Search, Settings,
-  ShieldCheck, Sun, Users, Building2, ListChecks, FolderKanban, Repeat } from 'lucide-react';
+  ShieldCheck, Sun, Users, ListChecks, FolderKanban, Repeat, LayoutTemplate, Workflow, CalendarRange, Target, LineChart, Wallet, Send } from 'lucide-react';
+import { BrandMark } from './ext/BrandMark';
 import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
 import { useMe, useRoles } from '../lib/session';
@@ -38,15 +39,22 @@ export function Shell() {
       { to: '/projects', label: 'Projects', icon: <FolderKanban className="size-4" />, show: true },
       { to: '/recap', label: 'Daily recap', icon: <ClipboardList className="size-4" />, show: true },
       { to: '/analytics', label: 'My Analytics', icon: <BarChart3 className="size-4" />, show: true },
+      { to: '/templates', label: 'Templates', icon: <LayoutTemplate className="size-4" />, show: true },
     ] },
     { group: 'Oversight', items: [
       { to: '/admin/routine', label: r.routineAdmin ? 'Daily Routine' : 'Team routine', icon: <LayoutDashboard className="size-4" />, show: r.canReview },
       { to: '/capacity', label: 'Team capacity', icon: <Users className="size-4" />, show: r.canReview || r.leadership },
+      { to: '/team-review', label: 'Weekly team review', icon: <CalendarRange className="size-4" />, show: r.canReview },
+      { to: '/insights', label: 'Insights', icon: <LineChart className="size-4" />, show: r.canReview || r.leadership },
       { to: '/leadership', label: 'Leadership', icon: <Gauge className="size-4" />, show: r.leadership || r.routineAdmin },
+      { to: '/objectives', label: 'Objectives', icon: <Target className="size-4" />, show: true },
+      { to: '/profitability', label: 'Profitability', icon: <Wallet className="size-4" />, show: r.costViewer },
+      { to: '/client-updates', label: 'Client updates', icon: <Send className="size-4" />, show: r.leadership || r.sysAdmin || r.manager },
     ] },
     { group: 'Setup', items: [
       { to: '/calendar', label: 'Calendar & leave', icon: <CalendarDays className="size-4" />, show: true },
       { to: '/recurring', label: 'Recurring work', icon: <Repeat className="size-4" />, show: true },
+      { to: '/automations', label: 'Automations', icon: <Workflow className="size-4" />, show: r.sysAdmin || r.manager },
       { to: '/integrations', label: 'Integrations', icon: <Plug className="size-4" />, show: true },
       { to: '/admin', label: 'Administration', icon: <ShieldCheck className="size-4" />, show: r.sysAdmin },
     ] },
@@ -54,7 +62,7 @@ export function Shell() {
   const sidebar = (
     <nav aria-label="Main" className="flex h-full flex-col gap-4 overflow-y-auto px-3 py-4">
       <div className="flex items-center gap-2 px-2">
-        <div className="flex size-8 items-center justify-center rounded-lg bg-accent text-on-accent"><Building2 className="size-4" aria-hidden /></div>
+        <BrandMark />
         <div className="min-w-0"><div className="truncate text-[13px] font-semibold">{me.tenant.name}</div><div className="text-[11px] capitalize text-ink-3">{me.tenant.plan} plan</div></div>
       </div>
       {!r.customer && <button onClick={() => setCapture(true)} className="mx-1 flex h-9 items-center gap-2 rounded-lg bg-accent px-3 text-sm font-medium text-on-accent shadow-sm hover:brightness-110">

@@ -16,7 +16,7 @@ export function pools(urls?: { app: string; owner: string }) {
     appPool = new pg.Pool({ connectionString: urls.app, max: 10 });
     ownerPool = new pg.Pool({ connectionString: urls.owner, max: 4 });
   }
-  appPool ??= new pg.Pool({ connectionString: config.databaseUrl, max: 20 });
+  appPool ??= new pg.Pool({ connectionString: config.databaseUrl, max: Number(process.env.PG_POOL_MAX || 20) });
   ownerPool ??= new pg.Pool({ connectionString: config.migrationDatabaseUrl, max: 4 });
   return { app: appPool, owner: ownerPool };
 }

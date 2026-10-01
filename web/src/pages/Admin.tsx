@@ -3,11 +3,13 @@ import { useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, Copy, RotateCcw, ShieldAlert, UserPlus } from 'lucide-react';
 import { api } from '../lib/api';
+import AdminEscalation from '../components/ext/AdminEscalation';
+import AdminBranding from '../components/ext/AdminBranding';
 import { CATEGORY_LABEL, fmtDateTime, hm, pct } from '../lib/format';
 import { Badge, Button, Callout, Card, Checkbox, ErrorState, Field, Input, Modal, PageHeader, Segmented, Select, Skeleton, Stat, Textarea, useToast } from '../components/ui';
 
 const ROLES = [['member', 'Member'], ['manager', 'Manager'], ['leadership', 'Leadership'], ['routine_admin', 'Main admin (all staff records)'], ['system_admin', 'System admin'], ['cost_viewer', 'Cost viewer'], ['customer', 'Client (portal only)']];
-type Tab = 'org' | 'people' | 'teams' | 'profiles' | 'audit' | 'jobs' | 'ops';
+type Tab = 'org' | 'people' | 'teams' | 'profiles' | 'escalation' | 'branding' | 'audit' | 'jobs' | 'ops';
 
 export default function Admin() {
   const [sp, setSp] = useSearchParams();
@@ -17,9 +19,9 @@ export default function Admin() {
       <PageHeader title="Administration" subtitle="Organization policy, people and access, and operational health." />
       {sp.get('onboarding') && <div className="mb-4"><Callout tone="good" icon={<CheckCircle2 className="mt-0.5 size-4 shrink-0" />}>Your organization is ready. Next: confirm the working schedule and policy below, add departments and teams, then invite people from the People tab.</Callout></div>}
       <div className="mb-4 overflow-x-auto"><Segmented label="Section" value={tab} onChange={(v) => setSp({ tab: v })} options={[
-        { value: 'org', label: 'Organization' }, { value: 'people', label: 'People' }, { value: 'teams', label: 'Teams & departments' }, { value: 'profiles', label: 'Role profiles' },
+        { value: 'org', label: 'Organization' }, { value: 'people', label: 'People' }, { value: 'teams', label: 'Teams & departments' }, { value: 'profiles', label: 'Role profiles' }, { value: 'escalation', label: 'Escalation' }, { value: 'branding', label: 'Branding' },
         { value: 'audit', label: 'Audit' }, { value: 'jobs', label: 'Jobs' }, { value: 'ops', label: 'Operations' }]} /></div>
-      {tab === 'org' && <Org />}{tab === 'people' && <People />}{tab === 'teams' && <Teams />}{tab === 'profiles' && <Profiles />}
+      {tab === 'org' && <Org />}{tab === 'people' && <People />}{tab === 'teams' && <Teams />}{tab === 'profiles' && <Profiles />}{tab === 'escalation' && <AdminEscalation />}{tab === 'branding' && <AdminBranding />}
       {tab === 'audit' && <Audit />}{tab === 'jobs' && <Jobs />}{tab === 'ops' && <Ops />}
     </div>
   );

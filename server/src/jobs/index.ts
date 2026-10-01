@@ -7,8 +7,14 @@ import { snapshotReport } from '../services/myday.js';
 import { generateRecurring } from '../services/tasks.js';
 import { notify } from '../services/notify.js';
 import { audit } from '../lib/audit.js';
+import { registerExtJobs } from './ext/index.js';
+
+/** Extension point: per-tenant job kinds enqueued once per hour by the scheduler (idempotent per hour). */
+const tenantTicks: string[] = [];
+export function registerTenantTick(kind: string) { if (!tenantTicks.includes(kind)) tenantTicks.push(kind); }
 
 export function registerJobs() {
+  registerExtJobs();
   registerJob('report.snapshot', async (db, p, job) => { await snapshotReport(db, job.tenantId!, p.userId, p.date, p.reason); });
   registerJob('export.generate', async (db, p) => { await generateExport(db, p.exportId); });
   registerJob('integration.process', async (db, p) => { await processEvent(db, p.eventId); });
@@ -43,6 +49,7 @@ export function registerJobs() {
     for (const t of tenants) {
       await enqueue(db, { tenantId: t.id, kind: 'recurring.generate', payload: {}, idempotencyKey: `recurring:${t.id}:${hour}` });
       await enqueue(db, { tenantId: t.id, kind: 'blockers.remind', payload: {}, idempotencyKey: `remind:${t.id}:${hour}` });
+      for (const kind of tenantTicks) await enqueue(db, { tenantId: t.id, kind, payload: {}, idempotencyKey: `${kind}:${t.id}:${hour}` });
     }
     await db.query(`delete from sessions where expires_at < now()`);
   });
