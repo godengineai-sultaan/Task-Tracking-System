@@ -25,7 +25,7 @@ export const config = {
   publicUrl: process.env.PUBLIC_URL || 'http://localhost:5173',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 168),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
-  aiModel: process.env.AI_MODEL || 'claude-sonnet-5-5',
+  aiModel: process.env.AI_MODEL || 'claude-opus-5-5',
   production: process.env.NODE_ENV === 'production',
 };
 if (config.encryptionKey.length !== 32) throw new Error('APP_ENCRYPTION_KEY must be 64 hex characters');

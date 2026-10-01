@@ -344,7 +344,7 @@ create table daily_plan_items (
   tenant_id uuid not null references tenants(id) on delete cascade,
   plan_id uuid not null references daily_plans(id) on delete cascade,
   task_id uuid not null references tasks(id) on delete cascade,
-  position int not null check (position between 1 and 3),
+  position int check (position between 1 and 3), -- null only transiently while reordering
   added_at timestamptz not null default now(),
   removed_at timestamptz,
   removed_reason text
