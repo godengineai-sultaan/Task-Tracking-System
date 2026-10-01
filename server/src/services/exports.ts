@@ -75,7 +75,7 @@ export async function generateExport(db: Db, exportId: string) {
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
 // ---------- CSV ----------
-function csvCell(v: unknown) {
+export function csvCell(v: unknown) {
   let s = v === null || v === undefined ? '' : String(v);
   if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; // spreadsheet formula injection guard
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
