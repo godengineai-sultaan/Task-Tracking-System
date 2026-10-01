@@ -2,9 +2,9 @@ import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router';
 import { ArrowLeft, CheckCircle2, ChevronRight, Download, Newspaper } from 'lucide-react';
 import { api } from '../lib/api';
-import { fmtDate } from '../lib/format';
-import { Badge, Card, Empty, ErrorState, PageHeader, Skeleton, StatusBadge } from '../components/ui';
-import { ClientUpdateView, periodText, type ClientUpdate } from '../components/ext/ClientbrandUpdateView';
+import { STATUS_LABEL, fmtDate } from '../lib/format';
+import { Badge, Card, Empty, ErrorState, PageHeader, Skeleton } from '../components/ui';
+import { CLIENT_STATUS, ClientUpdateView, periodText, type ClientUpdate } from '../components/ext/ClientbrandUpdateView';
 
 export default function Portal() {
   const [sp] = useSearchParams();
@@ -30,9 +30,9 @@ function PortalHome() {
             <ProjectUpdates q={updates} projectId={p.id} />
             <div className="grid gap-4 md:grid-cols-2">
               <div><p className="mb-2 text-[12px] font-medium text-ink-3">Milestones</p><ul className="space-y-1.5">{ms.map((m: any) => <li key={m.id} className="flex items-center gap-2 text-[13px]">
-                {m.status === 'done' ? <CheckCircle2 className="size-4 text-good-ink" aria-label="Done" /> : <span role="img" className="size-4 shrink-0 rounded-full ring-2 ring-line-strong" aria-label="Open" />}<span className="flex-1">{m.name}</span><span className="text-ink-3">{fmtDate(m.due_date)}</span></li>)}</ul></div>
+                {m.status === 'done' ? <CheckCircle2 className="size-4 text-good-ink" aria-label="Done" /> : <span role="img" className="size-4 shrink-0 rounded-full ring-2 ring-line-strong" aria-label="Open" />}<span className="flex-1">{m.name}</span><span className="text-ink-3">{m.due_date ? `Due ${fmtDate(m.due_date)}` : ''}</span></li>)}</ul></div>
               <div><p className="mb-2 text-[12px] font-medium text-ink-3">Shared deliverables</p>{ts.length === 0 ? <p className="text-[13px] text-ink-3">Nothing shared yet.</p> :
-                <ul className="space-y-1.5">{ts.map((t: any) => <li key={t.id} className="flex items-center gap-2 text-[13px]"><span className="flex-1">{t.title}</span><StatusBadge status={t.status} /></li>)}</ul>}</div>
+                <ul className="space-y-1.5">{ts.map((t: any) => <li key={t.id} className="flex items-center gap-2 text-[13px]"><span className="flex-1">{t.title}</span>{(() => { const s = CLIENT_STATUS[t.status] ?? { label: STATUS_LABEL[t.status] ?? t.status, tone: 'neutral' as const }; return <Badge tone={s.tone}>{s.label}</Badge>; })()}</li>)}</ul>}</div>
             </div>
           </Card>);
       })}

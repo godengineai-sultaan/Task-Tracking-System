@@ -7,12 +7,24 @@ import { HEX, LogoTile, MIN_CONTRAST, accentPalette, contrastWithWhite, nearestA
 
 const MAX_LOGO = 200 * 1024;
 const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark'
-  || (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  || (document.documentElement.getAttribute('data-theme') !== 'light' && !!window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+/** Re-render the preview when the theme toggle or the system theme changes. */
+function useIsDark() {
+  const [dark, setDark] = useState(isDark);
+  useEffect(() => {
+    const upd = () => setDark(isDark());
+    const mo = new MutationObserver(upd); mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)'); mq?.addEventListener('change', upd);
+    return () => { mo.disconnect(); mq?.removeEventListener('change', upd); };
+  }, []);
+  return dark;
+}
 
 /** Admin tab: organization display name, accessible accent colour and logo. */
 export default function AdminBranding() {
   const q = useBranding(); const qc = useQueryClient(); const toast = useToast();
-  const [name, setName] = useState(''); const [hex, setHex] = useState('');
+  const [name, setName] = useState(''); const [hex, setHex] = useState(''); const [hexTouched, setHexTouched] = useState(false);
+  const dark = useIsDark();
   const [logoError, setLogoError] = useState<string | null>(null); const [confirmRemove, setConfirmRemove] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const b = q.data;
@@ -46,7 +58,9 @@ export default function AdminBranding() {
   const suggestion = valid && !passes ? nearestAccessibleShade(effective) : null;
   const nameOk = name.trim().length >= 2;
   const dirty = name.trim() !== b.displayName || (value || null) !== b.accent;
-  const pal = passes ? accentPalette(effective)[isDark() ? 'dark' : 'light'] : null;
+  // Preview the colour that would be saved; for a failing colour, preview the suggested shade instead.
+  const shown = passes ? effective : suggestion;
+  const pal = shown ? accentPalette(shown)[dark ? 'dark' : 'light'] : null;
   const previewVars = pal ? ({ '--accent': pal.accent, '--accent-ink': pal.ink, '--accent-soft': pal.soft } as CSSProperties) : undefined;
 
   const pick = (f: File | undefined) => {
@@ -57,24 +71,25 @@ export default function AdminBranding() {
   };
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]">
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)] lg:items-start">
       <Card title="Brand identity" subtitle="Shown in the sidebar, the client portal and the header of every PDF.">
         <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (passes && nameOk && dirty) save.mutate(value || null); }}>
           <Field label="Display name" hint="Your organization's name as people and clients see it." error={nameOk ? null : 'Use at least 2 characters.'}>
             {(id) => <Input id={id} value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />}
           </Field>
-          <Field label="Accent colour (hex)" hint={value ? undefined : `Using the default accent ${b.defaultAccent}.`} error={valid ? null : 'Use a 6-digit hex colour such as #256abf.'}>
+          <Field label="Accent colour (hex)" hint={value ? undefined : `Using the default accent ${b.defaultAccent}.`}
+            error={valid || (!hexTouched && value.length < 7) ? null : 'Use a 6-digit hex colour such as #256abf.'}>
             {(id) => (
               <div className="flex flex-wrap items-center gap-2">
                 <input type="color" aria-label="Pick accent colour" value={valid ? effective : b.defaultAccent} onChange={(e) => setHex(e.target.value)}
                   className="h-9 w-12 shrink-0 cursor-pointer rounded-lg bg-surface ring-1 ring-inset ring-line-strong" />
-                <Input id={id} value={hex} placeholder={b.defaultAccent} onChange={(e) => setHex(e.target.value)} className="w-32 font-mono" spellCheck={false} autoComplete="off" />
+                <Input id={id} value={hex} placeholder={b.defaultAccent} onChange={(e) => { setHex(e.target.value); setHexTouched(false); }} onBlur={() => setHexTouched(true)} className="w-32 font-mono" spellCheck={false} autoComplete="off" />
                 {value && <Button type="button" variant="ghost" size="sm" icon={<RotateCcw className="size-3.5" aria-hidden />} onClick={() => setHex('')}>Use default</Button>}
               </div>
             )}
           </Field>
-          {ratio !== null && (passes
-            ? <p className="flex items-center gap-1.5 text-[13px] text-good-ink" role="status"><CheckCircle2 className="size-4" aria-hidden />White text on {effective} has {ratio.toFixed(2)}:1 contrast (meets the 4.5:1 minimum).</p>
+          <div role="status">{ratio !== null && (passes
+            ? <p className="flex items-center gap-1.5 text-[13px] text-good-ink"><CheckCircle2 className="size-4" aria-hidden />White text on {effective} has {ratio.toFixed(2)}:1 contrast (meets the 4.5:1 minimum).</p>
             : <Callout tone="warning" icon={<TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />}>
                 <p>White text on {effective} has only {ratio.toFixed(2)}:1 contrast; buttons and badges need at least 4.5:1, so this colour can't be saved.</p>
                 {suggestion && <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -82,7 +97,7 @@ export default function AdminBranding() {
                   <span>Nearest accessible shade: <span className="font-mono">{suggestion}</span> ({contrastWithWhite(suggestion).toFixed(2)}:1)</span>
                   <Button type="button" size="sm" onClick={() => setHex(suggestion)}>Use {suggestion}</Button>
                 </div>}
-              </Callout>)}
+              </Callout>)}</div>
           <div className="flex items-center justify-end gap-2 border-t border-line pt-3">
             {dirty && <Button type="button" variant="ghost" onClick={() => { setName(b.displayName); setHex(b.accent ?? ''); }}>Discard changes</Button>}
             <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty || !passes || !nameOk}>Save branding</Button>
@@ -91,9 +106,10 @@ export default function AdminBranding() {
       </Card>
 
       <div className="space-y-4">
-        <Card title="Preview" subtitle="How the accent looks in the current theme.">
+        <Card title="Preview" subtitle={`How the accent looks in the current ${dark ? 'dark' : 'light'} theme.`}>
           {pal ? (
             <div style={previewVars} className="space-y-3">
+              {!passes && <p className="text-[12.5px] text-ink-2">Showing the suggested shade <span className="font-mono">{shown}</span>, because {effective} can't be used.</p>}
               <div className="flex items-center gap-2"><LogoTile name={name || b.displayName} logoUrl={b.logo?.url} /><span className="truncate text-[13px] font-semibold">{name || b.displayName}</span></div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex h-9 items-center rounded-lg bg-accent px-3.5 text-sm font-medium text-on-accent">Primary action</span>
