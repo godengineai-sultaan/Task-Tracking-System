@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { DateTime } from 'luxon';
 import { login, makeOrg, withOwner, type Org } from './helpers.js';
 
 let org: Org; let emp: any; let emp2: any; let mgr: any; let admin: any; let outsider: any;
@@ -272,5 +273,60 @@ describe('save as template from a project', () => {
     // a subset of tasks can be chosen
     const sub = await mgr.post('/api/templates/from-project', { projectId: p.id, name: 'Two steps', taskIds: [t1.id, t3.id] });
     expect((await mgr.get(`/api/templates/${sub.body.id}`)).body.items.map((i: any) => i.title)).toEqual(['Brief', 'Launch']);
+  });
+});
+
+describe('review fixes', () => {
+  let tpl: any;
+  beforeAll(async () => {
+    tpl = (await admin.post('/api/templates', { name: 'Review fixes', visibility: 'company', items: [{ title: 'A', dueOffsetDays: 0 }, { title: 'B', dueOffsetDays: 2 }] })).body;
+  });
+
+  it("does not reveal a project member's leave dates to a project owner who may not see their leave", async () => {
+    const p = (await admin.post('/api/projects', { key: 'LVPR', name: 'Leave privacy', ownerId: org.users.emp })).body;
+    await admin.post(`/api/projects/${p.id}/members`, { userId: org.users.emp2 });
+    const r = await emp.post(`/api/templates/${tpl.id}/preview`, { startDate: MON, projectId: p.id, defaultOwnerId: org.users.emp2 });
+    expect(r.status).toBe(200);
+    expect(r.body.rows.flatMap((x: any) => x.skipped).filter((s: any) => s.reason === 'Unavailable')).toEqual([]);
+    // emp2's leave on the 8th is not used (only the holiday on the 9th is skipped), and the plan says so
+    expect(r.body.rows[1].dueDate).toBe('2030-01-10');
+    expect(r.body.assumptions.join(' ')).toMatch(/Leave is not counted for Emp2/);
+    // emp2's manager still plans around the leave
+    const m = await mgr.post(`/api/templates/${tpl.id}/preview`, { startDate: MON, defaultOwnerId: org.users.emp2 });
+    expect(m.body.rows[1].dueDate).toBe('2030-01-11');
+    expect(m.body.rows[1].skipped).toContainEqual({ date: '2030-01-08', reason: 'Unavailable' });
+    expect(m.body.assumptions.join(' ')).not.toMatch(/Leave is not counted/);
+  });
+
+  it('honours assignment keys written with leading zeros instead of silently dropping them', async () => {
+    const r = await mgr.post(`/api/templates/${tpl.id}/preview`, { startDate: MON, defaultOwnerId: org.users.emp, assignments: { '02': org.users.emp2 } });
+    expect(r.status).toBe(200);
+    expect(r.body.rows[1].ownerId).toBe(org.users.emp2);
+    expect((await emp.post(`/api/templates/${tpl.id}/apply`, { startDate: MON, assignments: { '01': org.users.emp2 }, applyKey: key() })).status).toBe(403);
+  });
+
+  it('rejects start dates outside the supported range with a 400, not a server error', async () => {
+    for (const startDate of ['9999-12-31', '1000-01-01']) {
+      expect((await mgr.post(`/api/templates/${tpl.id}/preview`, { startDate, defaultOwnerId: org.users.emp })).status).toBe(400);
+      expect((await mgr.post(`/api/templates/${tpl.id}/apply`, { startDate, defaultOwnerId: org.users.emp, applyKey: key() })).status).toBe(400);
+    }
+  });
+
+  it('counts long offsets on a one-day-a-week schedule as working days', async () => {
+    await withOwner((db) => db.query(`insert into work_schedules (tenant_id, user_id, weekday, start_minute, end_minute) values ($1,$2,1,540,1020)`, [org.tenantId, org.users.founder]));
+    const t = (await admin.post('/api/templates', { name: 'Long horizon', items: [{ title: 'Far', dueOffsetDays: 200 }] })).body;
+    const r = await admin.post(`/api/templates/${t.id}/preview`, { startDate: MON, defaultOwnerId: org.users.founder });
+    expect(r.status).toBe(200);
+    expect(r.body.warnings).toEqual([]);
+    expect(r.body.rows[0].dueDate).toBe(DateTime.fromISO(MON).plus({ weeks: 200 }).toISODate());
+  });
+
+  it('refuses to silently drop tasks when a project has more than 100 to copy', async () => {
+    const p = (await admin.post('/api/projects', { key: 'BIGP', name: 'Big project' })).body;
+    await withOwner((db) => db.query(`insert into tasks (tenant_id, project_id, title, owner_id, created_by)
+      select $1, $2, 'Bulk ' || g, $3, $3 from generate_series(1, 101) g`, [org.tenantId, p.id, org.users.admin]));
+    const r = await admin.post('/api/templates/from-project', { projectId: p.id, name: 'Too big' });
+    expect(r.status).toBe(400);
+    expect(r.body.message).toMatch(/100/);
   });
 });

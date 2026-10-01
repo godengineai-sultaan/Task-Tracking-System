@@ -12,7 +12,8 @@ import { STARTERS } from './templates-starters.js';
 export const TEMPLATE_CATEGORIES = ['people', 'finance', 'procurement', 'client', 'team', 'product', 'operations', 'other'] as const;
 
 const uuid = z.string().uuid();
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => DateTime.fromISO(d).isValid, 'Invalid date');
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => DateTime.fromISO(d).isValid, 'Invalid date')
+  .refine((d) => d >= '2000-01-01' && d <= '2099-12-31', 'Choose a start date between 2000 and 2099');
 
 export const itemSchema = z.object({
   title: z.string().trim().min(1).max(300),
@@ -222,11 +223,14 @@ const isWorking = (cal: CalendarData, date: string) => {
   const c = dayCapacity(cal, date);
   return { working: c.status === 'working' || c.status === 'partial_leave', c };
 };
-/** The n-th working day on/after `start` (day 0 = first working day). Null when the schedule has no working days. */
+/** Calendar days searched for n working days: one working day a week, plus up to two years of holidays and leave. */
+const searchDays = (n: number) => 7 * (n + 1) + 730;
+/** The n-th working day on/after `start` (day 0 = first working day). Null when no working day is found. */
 export function addWorkingDays(cal: CalendarData, start: string, n: number) {
   const skipped: { date: string; reason: string }[] = [];
+  if (!cal.schedule.size) return null;
   let d = DateTime.fromISO(start); let left = n;
-  for (let guard = 0; guard < 1200; guard++, d = d.plus({ days: 1 })) {
+  for (let guard = 0; guard < searchDays(n); guard++, d = d.plus({ days: 1 })) {
     const iso = d.toISODate()!;
     const { working, c } = isWorking(cal, iso);
     if (!working) {
@@ -252,8 +256,10 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
     if (!m || !project || m.project_id !== project.id) throw badRequest('The milestone must belong to the chosen project');
   }
   const positions = new Set(items.map((i) => i.position));
-  for (const k of Object.keys(input.assignments)) if (!positions.has(Number(k))) throw badRequest(`Step ${k} does not exist in this template`);
-  const ownerOf = (pos: number) => input.assignments[String(pos)] ?? input.defaultOwnerId ?? a.id;
+  // Keys are positions: "2" and "02" both mean step 2.
+  const assignments = new Map(Object.entries(input.assignments).map(([k, v]) => [Number(k), v]));
+  for (const k of assignments.keys()) if (!positions.has(k)) throw badRequest(`Step ${k} does not exist in this template`);
+  const ownerOf = (pos: number) => assignments.get(pos) ?? input.defaultOwnerId ?? a.id;
   const ownerIds = [...new Set(items.map((i) => ownerOf(i.position)))];
   const users = new Map((await many(db, `select id, name, status, roles from users where id = any($1::uuid[])`, [ownerIds])).map((u) => [u.id, u]));
   const allowed = new Set((await assignableUsers(db, a, project)).map((u) => u.id));
@@ -267,9 +273,16 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
   const warnings: string[] = [];
   const dated = items.filter((i) => i.due_offset_days !== null);
   const maxOffset = Math.max(0, ...dated.map((i) => i.due_offset_days));
-  const to = DateTime.fromISO(input.startDate).plus({ days: maxOffset * 3 + 120 }).toISODate()!;
+  const to = DateTime.fromISO(input.startDate).plus({ days: searchDays(maxOffset) }).toISODate()!;
   const cals = new Map<string, CalendarData>();
-  for (const id of new Set(dated.map((i) => ownerOf(i.position)))) cals.set(id, await loadCalendar(db, id, input.startDate, to));
+  // Leave is personal: it is used (and shown as "Unavailable") only for owners whose leave this actor may see, as in the leave calendar.
+  const seesLeave = (id: string) => id === a.id || a.managedUserIds.includes(id) || has(a, 'system_admin') || has(a, 'routine_admin');
+  const leaveHidden: string[] = [];
+  for (const id of new Set(dated.map((i) => ownerOf(i.position)))) {
+    const cal = await loadCalendar(db, id, input.startDate, to);
+    if (!seesLeave(id)) { cal.leave = []; leaveHidden.push(users.get(id).name); }
+    cals.set(id, cal);
+  }
 
   const rows = items.map((i) => {
     const ownerId = ownerOf(i.position);
@@ -279,7 +292,7 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
       if (r) ({ date: dueDate, skipped } = r);
       else {
         dueDate = DateTime.fromISO(input.startDate).plus({ days: i.due_offset_days }).toISODate();
-        warnings.push(`${users.get(ownerId).name} has no working days in their schedule, so step ${i.position} uses calendar days.`);
+        warnings.push(`${users.get(ownerId).name} has no working days in their schedule after the start date, so step ${i.position} uses calendar days.`);
       }
     }
     return {
@@ -296,7 +309,10 @@ export async function computePlan(db: Db, a: Actor, items: any[], input: Preview
   if (input.startDate < localToday(a.timezone)) warnings.push('The start date is in the past, so some tasks may be overdue as soon as they are created.');
   return {
     startDate: input.startDate, project: project && { id: project.id, key: project.key, name: project.name, ownerId: project.owner_id },
-    milestoneId: input.milestoneId ?? null, rows, warnings, assumptions: PLAN_ASSUMPTIONS,
+    milestoneId: input.milestoneId ?? null, rows, warnings,
+    assumptions: leaveHidden.length
+      ? [...PLAN_ASSUMPTIONS, `Leave is not counted for ${leaveHidden.join(', ')}: you can see leave only for yourself and people you manage. Their dates skip weekends and company holidays only.`]
+      : PLAN_ASSUMPTIONS,
   };
 }
 
@@ -316,6 +332,8 @@ async function replay(db: Db, a: Actor, templateId: string, existing: any) {
 export async function applyTemplate(db: Db, a: Actor, t: any, input: z.infer<typeof applySchema>, correlationId?: string) {
   const prior = await one(db, `select * from task_template_applications where apply_key = $1`, [input.applyKey]);
   if (prior) return replay(db, a, t.id, prior);
+  // Lock the template so a concurrent edit cannot swap its steps between reading the version and reading the steps.
+  t = await one(db, `select * from task_templates where id = $1 for share`, [t.id]);
   if (t.archived_at) throw badRequest('This template is archived. Restore it before applying it.');
   const items = await itemsOf(db, t.id);
   const plan = await computePlan(db, a, items, input);
@@ -354,8 +372,9 @@ export async function templateFromProject(db: Db, a: Actor, input: z.infer<typeo
   const [vis, params] = taskVisibility(a, 3);
   const tasks = await many(db, `select t.*, u.title owner_title from tasks t left join projects p on p.id = t.project_id join users u on u.id = t.owner_id
     where t.project_id = $1 and t.status <> 'cancelled' and ($2::uuid[] is null or t.id = any($2::uuid[])) and ${vis}
-    order by t.due_date nulls last, t.sort_order, t.number limit 100`, [project.id, input.taskIds ?? null, ...params]);
+    order by t.due_date nulls last, t.sort_order, t.number limit 101`, [project.id, input.taskIds ?? null, ...params]);
   if (!tasks.length) throw badRequest('There are no tasks in this project that you can see to save as a template');
+  if (tasks.length > 100) throw badRequest('A template holds up to 100 steps, and this project has more than 100 tasks you can see. Choose up to 100 tasks to copy.');
   const ids = tasks.map((t) => t.id);
   const pos = new Map(ids.map((id, i) => [id, i + 1]));
   const checklists = await many(db, `select task_id, text from checklist_items where task_id = any($1::uuid[]) order by position`, [ids]);
