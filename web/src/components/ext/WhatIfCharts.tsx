@@ -47,7 +47,7 @@ function LoadBar({ side, label, scale }: { side: SideLoad; label: string; scale:
           {side.scheduledMinutes > 0 && <div className="h-full rounded-l bg-[var(--c-task)]" style={{ width: w(side.scheduledMinutes) }} />}
           {side.spareMinutes > 0 && <div className={cx('h-full bg-surface-3 ring-1 ring-inset ring-line-strong', !side.overflowMinutes && 'rounded-r', !side.scheduledMinutes && 'rounded-l')} style={{ width: w(side.spareMinutes) }} />}
           {side.overflowMinutes > 0 && <div className="h-full rounded-r bg-serious" style={{ width: w(side.overflowMinutes), minWidth: 3 }} />}
-          {side.availableMinutes === 0 && <span className="text-[12px] text-ink-3">No available time</span>}
+          {side.availableMinutes === 0 && <span className="ml-2 self-center text-[12px] leading-none text-ink-3">No available time</span>}
         </div>
       </Tip>
       <span className={cx('w-14 shrink-0 text-right text-[12px] tabular', side.lateTasks ? 'font-medium text-critical-ink' : 'text-ink-3')}>{side.lateTasks} late</span>
@@ -106,7 +106,7 @@ export function PersonLoadChart({ people }: { people: PersonResult[] }) {
             </li>))}
         </ul>
       ) : (
-        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Load table">
+        <div className="relative overflow-x-auto" tabIndex={0} role="region" aria-label="Load table">
           <table className="w-full min-w-[640px] text-[13px]">
             <caption className="sr-only">Baseline and scenario load per person</caption>
             <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr>

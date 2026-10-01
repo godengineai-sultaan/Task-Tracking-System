@@ -26,7 +26,7 @@ export default function Capacity() {
             <FlaskConical className="size-4" aria-hidden />What-if</Link></>} />
       {q.isLoading ? <Skeleton className="h-96" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : (
         <Card padded={false}>
-          <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-[13px]">
+          <div className="relative overflow-x-auto" tabIndex={0} role="region" aria-label="Team capacity by person"><table className="w-full min-w-[900px] text-[13px]">
             <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr><th className="px-4 py-2 font-medium">Person</th><th className="px-3 py-2 font-medium">Working days</th>
               <th className="px-3 py-2 font-medium">Available</th><th className="px-3 py-2 font-medium">Estimated open work</th><th className="w-[26%] px-3 py-2 font-medium">Load</th><th className="px-3 py-2 font-medium" title={`Open tasks projected to finish after their due date within ${horizon} days, filling available time in due-date order (what-if baseline).`}>Projected late</th><th className="px-3 py-2 font-medium">Calendar</th><th className="px-3 py-2 font-medium">Allocation assumptions</th></tr></thead>
             <tbody className="divide-y divide-line">{q.data.people.map((p: any) => {
@@ -57,7 +57,7 @@ export default function Capacity() {
                   <td className="px-3 py-2.5 text-[12px]">{p.allocations.length === 0 ? <span className="text-ink-3">—</span> : p.allocations.map((a: any, i: number) => <div key={i}><Badge>{a.project} {a.percent}%</Badge>{a.assumption && <span className="ml-1 text-ink-3">{a.assumption}</span>}</div>)}</td>
                 </tr>);
             })}</tbody></table></div>
-          <div className="border-t border-line p-4"><Callout tone="neutral">{q.data.note} Leave and holidays are removed from availability, so they never inflate load. Calendar strip: solid = working day, faded = half-day leave, hatched = leave/holiday. Projected late = open tasks that would finish after their due date if each person works through them in due-date order (what-if baseline; tasks without an estimate assumed to take 1h).</Callout></div>
+          <div className="space-y-3 border-t border-line p-4">{proj.error && <ErrorState error={{ message: `Projected late counts are unavailable: ${(proj.error as Error).message}` }} onRetry={() => proj.refetch()} />}<Callout tone="neutral">{q.data.note} Leave and holidays are removed from availability, so they never inflate load. Calendar strip: solid = working day, faded = half-day leave, hatched = leave/holiday. Projected late = open tasks that would finish after their due date if each person works through them in due-date order (what-if baseline; tasks without an estimate assumed to take 1h).</Callout></div>
         </Card>)}
     </div>
   );

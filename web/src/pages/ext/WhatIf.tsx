@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FlaskConical, Loader2, RotateCcw, Save, Trash2, X } from 'lucide-react';
@@ -47,15 +47,21 @@ export default function WhatIf() {
     setChanges(s.changes); setUnest(String(s.unestimated_minutes)); setLoaded({ id: s.id, name: s.name, version: s.version });
     if (inScope.length < s.people.length) toast({ tone: 'info', text: 'Some people in this scenario are no longer in your planning scope and were left out.' });
   };
-  const reset = () => { setChanges([]); setLoaded(null); setUnest('60'); if (ctx.data) setPeople(ctx.data.defaults); };
+  // Keep keyboard focus on the page when the focused control disappears (removed change, reset, deleted scenario).
+  const changesRef = useRef<HTMLDivElement>(null); const loadRef = useRef<HTMLSelectElement>(null);
+  const refocus = (i = 0) => requestAnimationFrame(() => {
+    const removes = changesRef.current?.querySelectorAll<HTMLElement>('ul button');
+    (removes?.length ? removes[Math.min(i, removes.length - 1)] : changesRef.current?.querySelector<HTMLElement>('[role=group] button'))?.focus();
+  });
+  const reset = () => { setChanges([]); setLoaded(null); setUnest('60'); if (ctx.data) setPeople(ctx.data.defaults); refocus(); };
   const del = useMutation({
     mutationFn: () => api.del(`/api/whatif/scenarios/${loaded!.id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['whatif-scenarios'] }); toast({ tone: 'good', text: `Deleted "${loaded!.name}"` }); setLoaded(null); setDeleting(false); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['whatif-scenarios'] }); toast({ tone: 'good', text: `Deleted "${loaded!.name}"` }); setLoaded(null); setDeleting(false); setTimeout(() => loadRef.current?.focus()); },
     onError: (e: any) => toast({ tone: 'critical', text: e.message }),
   });
 
   if (ctx.isLoading) return <div><PageHeader title="What-if planner" /><Skeleton className="h-96" /></div>;
-  if (ctx.error) return <div><PageHeader title="What-if planner" /><ErrorState error={ctx.error} onRetry={() => ctx.refetch()} /></div>;
+  if (ctx.error) return <div><PageHeader title="What-if planner" /><ErrorState error={ctx.error} onRetry={(ctx.error as any).status === 403 ? undefined : () => ctx.refetch()} /></div>;
   const c = ctx.data!;
   const sel = new Set(people ?? []);
   const toggle = (id: string, on: boolean) => setPeople((p) => (on ? [...(p ?? []), id] : (p ?? []).filter((x) => x !== id)));
@@ -65,7 +71,7 @@ export default function WhatIf() {
       <PageHeader eyebrow={roles.canReview || roles.leadership ? <Link to="/capacity" className="hover:underline">Team capacity</Link> : 'Planning'} title="What-if planner"
         subtitle="Try leave, reassignments, allocation, deadline and new-work changes on a copy of the plan. Nothing here changes real tasks, calendars or leave."
         actions={<>
-          <Select aria-label="Load a saved scenario" className="h-9 w-52" value={loaded?.id ?? ''} onChange={(e) => { if (e.target.value) load(e.target.value); }} disabled={saved.isLoading}>
+          <Select ref={loadRef} aria-label="Load a saved scenario" className="h-9 w-56 sm:w-72" value={loaded?.id ?? ''} onChange={(e) => { if (e.target.value) load(e.target.value); }} disabled={saved.isLoading}>
             <option value="">{saved.data?.length ? 'Saved scenarios…' : 'No saved scenarios'}</option>
             {saved.data?.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </Select>
@@ -77,7 +83,7 @@ export default function WhatIf() {
         <div className="space-y-4">
           <Card title="Setup">
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-1">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
                 <Field label="Start date">{(id) => <Input id={id} type="date" value={start} onChange={(e) => e.target.value && setStart(e.target.value)} />}</Field>
                 <div className="space-y-1.5"><div className="text-[13px] font-medium text-ink-2">Horizon</div><Segmented label="Horizon" value={horizon} onChange={setHorizon} options={HORIZONS} /></div>
               </div>
@@ -100,7 +106,8 @@ export default function WhatIf() {
           </Card>
 
           <Card title="Changes" subtitle="Hypothetical only" actions={(changes.length > 0 || loaded) ? <Button size="sm" variant="ghost" icon={<RotateCcw className="size-3.5" aria-hidden />} onClick={reset}>Reset</Button> : undefined}>
-            {changes.length === 0 ? <p className="mb-3 text-[13px] text-ink-3">No changes yet. Add one below to compare the scenario against today's plan.</p> : (
+            <div ref={changesRef}>
+            {changes.length === 0 ? <p className="mb-3 text-[13px] text-ink-3">No changes yet. Add one to compare the scenario against today's plan.</p> : (
               <ul className="mb-3 space-y-2" aria-label="Scenario changes">
                 {changes.map((ch, i) => {
                   const dsc = describeChange(ch, peopleMap, taskMap); const meta = CHANGE_TYPES.find((x) => x.type === ch.type)!; const Icon = meta.icon;
@@ -108,17 +115,19 @@ export default function WhatIf() {
                     <li key={i} className="flex items-start gap-2.5 rounded-lg bg-surface-2 px-2.5 py-2">
                       <Icon className="mt-0.5 size-4 shrink-0 text-accent-ink" aria-hidden />
                       <div className="min-w-0 flex-1"><div className="text-[12px] text-ink-3">{meta.label}</div><div className="break-words text-[13px] font-medium">{dsc.title}</div><div className="text-[12px] text-ink-2">{dsc.detail}</div></div>
-                      <IconButton label={`Remove change: ${dsc.title}`} className="size-7" onClick={() => setChanges((x) => x.filter((_, j) => j !== i))}><X className="size-3.5" /></IconButton>
+                      <IconButton label={`Remove change: ${dsc.title}`} className="size-7" onClick={() => { setChanges((x) => x.filter((_, j) => j !== i)); refocus(i); }}><X className="size-3.5" /></IconButton>
                     </li>);
                 })}
               </ul>)}
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2">
-              {CHANGE_TYPES.map((t) => <Button key={t.type} size="sm" icon={<t.icon className="size-3.5" aria-hidden />} onClick={() => setAdding(t.type)} disabled={changes.length >= 50}>{t.label}</Button>)}
+            <p id="whatif-add-change" className="mb-1.5 text-[12px] font-medium text-ink-3">Add a change</p>
+            <div role="group" aria-labelledby="whatif-add-change" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2">
+              {CHANGE_TYPES.filter((t) => t.type !== 'reassign' || c.people.length > 1).map((t) => <Button key={t.type} size="sm" icon={<t.icon className="size-3.5" aria-hidden />} onClick={() => setAdding(t.type)} disabled={changes.length >= 50}>{t.label}</Button>)}
+            </div>
             </div>
           </Card>
         </div>
 
-        <div className="min-w-0 space-y-4" aria-live="polite" aria-busy={sim.isFetching}>
+        <div className="min-w-0 space-y-4" aria-busy={sim.isFetching}>
           {!people?.length ? <Card><Empty icon={<FlaskConical className="size-6" />} title="Pick at least one person">Choose whose plan to simulate in Setup.</Empty></Card>
             : sim.isLoading ? <><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}</div><Skeleton className="h-64" /></>
             : sim.error && !sim.data ? <ErrorState error={sim.error} onRetry={() => sim.refetch()} />
@@ -175,8 +184,9 @@ function Results({ data, names, fetching, error, onRetry }: { data: any; names: 
       {error ? <ErrorState error={error} onRetry={onRetry} /> : null}
       <div className="flex items-center justify-between gap-2 text-[12px] text-ink-3">
         <span>{fmtDate(data.start, { weekday: 'short', day: 'numeric', month: 'short' })} – {fmtDate(data.end, { weekday: 'short', day: 'numeric', month: 'short' })} · {data.people.length} {data.people.length === 1 ? 'person' : 'people'} · {s.tasks} open tasks</span>
-        {fetching && <span className="inline-flex items-center gap-1" role="status"><Loader2 className="size-3.5 animate-spin" aria-hidden />Updating…</span>}
+        {fetching && <span className="inline-flex items-center gap-1"><Loader2 className="size-3.5 animate-spin" aria-hidden />Updating…</span>}
       </div>
+      <p className="sr-only" role="status">{fetching ? 'Updating projection…' : `Projection updated: ${s.scenarioLate} projected late in the scenario, ${s.baselineLate} in the baseline; ${s.newlyLate} become late, ${s.recovered} back on time.`}</p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat label="Projected late" value={<span className="tabular">{s.baselineLate} → {s.scenarioLate}</span>} sub="baseline → scenario"
           tone={s.scenarioLate > s.baselineLate ? 'critical' : undefined} hint="Open tasks projected to finish after their due date (includes tasks already overdue)." />
@@ -202,9 +212,9 @@ function Results({ data, names, fetching, error, onRetry }: { data: any; names: 
 
       <Card title="Tasks" padded={false} actions={<Segmented label="Task filter" value={filter} onChange={setFilter}
         options={[{ value: 'changed', label: 'Changed' }, { value: 'late', label: 'Late' }, { value: 'all', label: 'All' }]} />}>
-        {rows.length === 0 ? <Empty title={filter === 'changed' ? 'No task changes in this scenario' : filter === 'late' ? 'No task is projected late' : 'No open tasks'}>
-          {filter === 'changed' ? 'Add a change, or switch to All to see every projected finish.' : 'Open tasks for the selected people appear here.'}</Empty> : (
-          <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Task projections">
+        {rows.length === 0 ? <Empty action={filter !== 'all' ? <Button size="sm" onClick={() => setFilter('all')}>Show all tasks</Button> : undefined} title={filter === 'changed' ? 'No task changes in this scenario' : filter === 'late' ? 'No task is projected late' : 'No open tasks'}>
+          {filter === 'changed' ? 'Add a change to see which tasks move, or view every projected finish now.' : filter === 'late' ? 'No open task is projected to finish after its due date, in the baseline or the scenario.' : 'Open tasks for the selected people appear here.'}</Empty> : (
+          <div className="relative overflow-x-auto" tabIndex={0} role="region" aria-label="Task projections">
             <table className="w-full min-w-[760px] text-[13px]">
               <caption className="sr-only">Projected finish per task, baseline and scenario</caption>
               <thead className="border-b border-line text-left text-[12px] text-ink-3"><tr>
@@ -216,17 +226,18 @@ function Results({ data, names, fetching, error, onRetry }: { data: any; names: 
                   <td className="max-w-[260px] px-4 py-2">
                     {t.id ? <Link to={`/tasks/${t.id}`} className="font-medium hover:underline">{t.title}</Link> : <span className={cx('font-medium', !t.visible && 'text-ink-3')}>{t.title}</span>}
                     <div className="flex flex-wrap gap-1 text-[11px] text-ink-3">
+                      <span aria-hidden className="sm:hidden"><Badge tone={OUTCOME[t.change].tone}>{OUTCOME[t.change].label}</Badge></span>
                       {t.number && <span>#{t.number}</span>}
                       <span>{hm(t.remainingMinutes)} left</span>
-                      {t.assumption && <Badge>assumed</Badge>}{t.blocked && <Badge tone="critical">blocked</Badge>}{t.awaitingReview && <Badge tone="warning">in review</Badge>}
+                      {t.assumption && <Badge>estimate assumed</Badge>}{t.blocked && <Badge tone="critical">blocked</Badge>}{t.awaitingReview && <Badge tone="warning">in review</Badge>}
                     </div>
                   </td>
                   <td className="px-2 py-2">{t.baselineOwnerId && t.baselineOwnerId !== t.ownerId ? <>{who(t.baselineOwnerId)} → <span className="font-medium">{who(t.ownerId)}</span></> : who(t.ownerId)}</td>
-                  <td className="px-2 py-2 tabular">{t.baselineDueDate !== t.dueDate && t.baseline ? <>{fmtDate(t.baselineDueDate)} → <span className="font-medium">{fmtDate(t.dueDate)}</span></> : fmtDate(t.dueDate)}</td>
-                  <td className={cx('px-2 py-2 tabular', t.baseline?.late && 'text-critical-ink')}>{finishText(t.baseline, data.end)}{t.baseline?.late && <span className="sr-only"> (late)</span>}</td>
-                  <td className={cx('px-2 py-2 tabular', t.scenario.late && 'font-medium text-critical-ink')}>{finishText(t.scenario, data.end)}{t.scenario.late && <span className="sr-only"> (late)</span>}
+                  <td className="whitespace-nowrap px-2 py-2 tabular">{t.baselineDueDate !== t.dueDate && t.baseline ? <>{fmtDate(t.baselineDueDate)} → <span className="font-medium">{fmtDate(t.dueDate)}</span></> : fmtDate(t.dueDate)}</td>
+                  <td className={cx('whitespace-nowrap px-2 py-2 tabular', t.baseline?.late && 'text-critical-ink')}>{finishText(t.baseline, data.end)}{t.baseline?.late && <span className="sr-only"> (late)</span>}</td>
+                  <td className={cx('whitespace-nowrap px-2 py-2 tabular', t.scenario.late && 'font-medium text-critical-ink')}>{finishText(t.scenario, data.end)}{t.scenario.late && <span className="sr-only"> (late)</span>}
                     {t.scenario.lateDays ? <div className="text-[11px]">{t.scenario.lateDays}d after due</div> : null}</td>
-                  <td className="px-2 py-2 tabular">{t.shiftDays ? `${t.shiftDays > 0 ? '+' : '−'}${Math.abs(t.shiftDays)}d` : t.baseline && !t.baseline.finish !== !t.scenario.finish ? (t.scenario.finish ? 'earlier' : 'beyond horizon') : '—'}</td>
+                  <td className="whitespace-nowrap px-2 py-2 tabular">{t.shiftDays ? `${t.shiftDays > 0 ? '+' : '−'}${Math.abs(t.shiftDays)}d` : t.baseline && !t.baseline.finish !== !t.scenario.finish ? (t.scenario.finish ? 'earlier' : 'beyond horizon') : '—'}</td>
                   <td className="px-2 py-2 pr-4"><Badge tone={OUTCOME[t.change].tone}>{OUTCOME[t.change].label}</Badge></td>
                 </tr>))}</tbody>
             </table>
