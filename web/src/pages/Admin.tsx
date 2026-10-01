@@ -79,7 +79,8 @@ function Org() {
           <Button size="sm" loading={retention.isPending} onClick={() => retention.mutate()}>Run retention now</Button>
         </div>
       </Card>
-      <div className="lg:col-span-2"><Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>Save organization settings</Button></div>
+      <div className="flex flex-wrap gap-2 lg:col-span-2"><Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>Save organization settings</Button>
+        <a href="/api/admin/export-data"><Button>Download organization data (JSON)</Button></a></div>
     </div>
   );
 }
@@ -129,6 +130,7 @@ function People() {
           <Checkbox checked={edit.is_founder} onChange={(v) => setEdit({ ...edit, is_founder: v })} label="Founder / co-founder" />
         </div>}
       </Modal>
+      {users.data.some(() => true) && <CostRates users={users.data} />}
       <InviteModal open={invite} onClose={() => setInvite(false)} depts={depts.data ?? []} onLink={setLink} />
       <Modal open={!!link} onClose={() => setLink(null)} title="Invitation link" footer={<Button variant="primary" onClick={() => setLink(null)}>Done</Button>}>
         <p className="text-[13px] text-ink-2">Send this one-time link to the person. It expires in 7 days and is shown only now.</p>
@@ -278,5 +280,25 @@ function Ops() {
         <Card className="lg:col-span-2" title="Integration health"><ul className="space-y-1 text-[13px]">{d.integrations.map((c: any) => <li key={c.id} className="flex flex-wrap justify-between gap-2"><span>{c.name} <Badge>{c.status}</Badge></span><span className="text-ink-3">{c.events} events · {c.rejected} rejected{c.last_error && ` · ${c.last_error}`}</span></li>)}</ul></Card>
       </div>
     </div>
+  );
+}
+
+function CostRates({ users }: { users: any[] }) {
+  const qc = useQueryClient(); const err = useErr();
+  const q = useQuery({ queryKey: ['cost-rates'], queryFn: () => api.get('/api/admin/cost-rates'), retry: false });
+  const [f, setF] = useState({ userId: '', hourlyRate: '', currency: 'INR', effectiveFrom: new Date().toISOString().slice(0, 10) });
+  const m = useMutation({ mutationFn: () => api.post('/api/admin/cost-rates', { ...f, hourlyRate: Number(f.hourlyRate) }), onSuccess: () => { setF({ ...f, userId: '', hourlyRate: '' }); qc.invalidateQueries({ queryKey: ['cost-rates'] }); }, onError: err });
+  if (q.error) return null; // only cost viewers can see rates
+  return (
+    <Card title="Cost rates (confidential)" subtitle="Used only for project cost analysis by cost viewers. Amounts are never written to the audit log or shown in staff analytics.">
+      <ul className="space-y-1 text-[13px]">{(q.data ?? []).map((c: any) => <li key={c.id} className="flex justify-between"><span>{c.user_name}</span><span className="tabular">{c.currency} {c.hourly_rate}/h from {c.effective_from}</span></li>)}</ul>
+      <form className="mt-3 flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+        <Select aria-label="Person" className="h-8 w-44" value={f.userId} onChange={(e) => setF({ ...f, userId: e.target.value })}><option value="">Person…</option>{users.filter((u) => !u.roles.includes('customer')).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}</Select>
+        <Input aria-label="Hourly rate" type="number" min={0} className="h-8 w-28" value={f.hourlyRate} onChange={(e) => setF({ ...f, hourlyRate: e.target.value })} placeholder="Rate/h" />
+        <Input aria-label="Currency" className="h-8 w-20" maxLength={3} value={f.currency} onChange={(e) => setF({ ...f, currency: e.target.value.toUpperCase() })} />
+        <Input aria-label="Effective from" type="date" className="h-8 w-40" value={f.effectiveFrom} onChange={(e) => setF({ ...f, effectiveFrom: e.target.value })} />
+        <Button size="sm" type="submit" disabled={!f.userId || !f.hourlyRate}>Add rate</Button>
+      </form>
+    </Card>
   );
 }

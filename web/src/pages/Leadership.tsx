@@ -1,10 +1,11 @@
 import { Link } from 'react-router';
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, FileSpreadsheet } from 'lucide-react';
 import { api } from '../lib/api';
 import { fmtDate, hm } from '../lib/format';
 import { useRoles } from '../lib/session';
-import { Badge, Button, Callout, Card, ErrorState, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
+import { Badge, Button, Callout, Card, ErrorState, Input, PageHeader, Skeleton, Stat, useToast } from '../components/ui';
 import { downloadExport } from './util';
 
 export default function Leadership() {
@@ -17,6 +18,7 @@ export default function Leadership() {
   const tot = d.projects.reduce((a: any, p: any) => ({ open: a.open + p.open, overdue: a.overdue + p.overdue, blocked: a.blocked + p.blocked, review: a.review + p.in_review }), { open: 0, overdue: 0, blocked: 0, review: 0 });
   const byProject = Object.values(d.allocation.reduce((m: any, x: any) => { m[x.project] ??= { project: x.project, minutes: 0, meeting: 0 }; m[x.project].minutes += x.minutes; if (x.category === 'meeting') m[x.project].meeting += x.minutes; return m; }, {})) as any[];
   const maxAlloc = Math.max(1, ...byProject.map((p) => p.minutes));
+  const byDept = Object.values(d.allocation.reduce((m: any, x: any) => { m[x.department] ??= { department: x.department, minutes: 0 }; m[x.department].minutes += x.minutes; return m; }, {})) as any[];
   return (
     <div>
       <PageHeader title="Leadership delivery" subtitle="Which projects move outcomes, what is late, and where to rebalance. Aggregates only — no individual rankings."
@@ -41,6 +43,7 @@ export default function Leadership() {
             <li key={o.id}><div className="text-[13px] font-medium">{o.title}</div><div className="text-[12px] text-ink-3">{o.owner} · ends {fmtDate(o.period_end)} · {o.milestones_done}/{o.milestones} milestones</div>
               <div className="mt-1 h-1.5 rounded-full bg-surface-2"><div className="h-full rounded-full bg-[var(--c-task)]" style={{ width: `${o.milestones ? (o.milestones_done / o.milestones) * 100 : 0}%` }} /></div></li>))}
             {d.objectives.length === 0 && <li className="text-[13px] text-ink-3">No active objectives.</li>}</ul>
+          <NewObjective />
         </Card>
         <Card title="Open milestones" padded={false}>
           <ul className="divide-y divide-line">{d.milestones.map((m: any) => (
@@ -52,6 +55,8 @@ export default function Leadership() {
             <li key={p.project} className="text-[13px]"><div className="flex justify-between"><span>{p.project}</span><span className="tabular text-ink-2">{hm(p.minutes)}</span></div>
               <div className="mt-1 h-2 rounded-full bg-surface-2"><div className="h-full rounded-full bg-[var(--c-task)]" style={{ width: `${(p.minutes / maxAlloc) * 100}%` }} /></div>
               {p.meeting > 0 && <div className="text-[11px] text-ink-3">{hm(p.meeting)} in meetings</div>}</li>))}</ul>
+          <p className="mb-1.5 mt-4 text-[12px] font-medium text-ink-3">By department</p>
+          <ul className="space-y-1 text-[13px]">{byDept.sort((a, b) => b.minutes - a.minutes).map((x) => <li key={x.department} className="flex justify-between"><span>{x.department}</span><span className="tabular text-ink-2">{hm(x.minutes)}</span></li>)}</ul>
         </Card>
         <Card title="Blocker patterns">
           {d.blockerPatterns.length === 0 ? <p className="text-[13px] text-ink-3">No open blockers.</p> : <ul className="space-y-1.5 text-[13px]">{d.blockerPatterns.map((b: any) =>
@@ -67,5 +72,18 @@ export default function Leadership() {
       </div>
       <div className="mt-4"><Callout tone="neutral">{d.note}</Callout></div>
     </div>
+  );
+}
+
+function NewObjective() {
+  const qc = useQueryClient(); const toast = useToast(); const [f, setF] = useState({ title: '', periodEnd: '' });
+  const m = useMutation({ mutationFn: () => api.post('/api/objectives', { title: f.title, periodEnd: f.periodEnd || null }), onSuccess: () => { setF({ title: '', periodEnd: '' }); qc.invalidateQueries({ queryKey: ['leadership'] }); },
+    onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
+  return (
+    <form className="mt-4 flex flex-wrap gap-2 border-t border-line pt-3" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+      <Input aria-label="Objective" className="h-8 min-w-0 flex-1" placeholder="New objective" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+      <Input aria-label="Objective end date" type="date" className="h-8 w-36" value={f.periodEnd} onChange={(e) => setF({ ...f, periodEnd: e.target.value })} />
+      <Button size="sm" type="submit" disabled={!f.title} loading={m.isPending}>Add</Button>
+    </form>
   );
 }

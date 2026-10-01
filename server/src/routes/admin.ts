@@ -315,6 +315,34 @@ export async function adminRoutes(app: FastifyInstance) {
       activation, recap, blockers, deadlines, evidence, managerFollowUps: followUps.n, ai, jobs, integrations };
   }));
 
+  /** Organization data export (JSON). Excludes password hashes, MFA secrets, integration secrets and session tokens. */
+  app.get('/api/admin/export-data', async (req, reply) => {
+    const data = await tx(req, async (db, a) => {
+      sysAdmin(a);
+      const tables: Record<string, string> = {
+        tenant: `select id, slug, name, legal_name, timezone, plan, seat_limit, modules, settings, created_at from tenants where id = $1`,
+        users: `select id, email, name, roles, title, department_id, role_profile_id, customer_id, is_founder, timezone, status, created_at from users`,
+        departments: 'select * from departments', teams: 'select * from teams', team_members: 'select * from team_members', customers: 'select * from customers',
+        role_profiles: 'select * from role_profiles', projects: 'select * from projects', project_members: 'select * from project_members', objectives: 'select * from objectives',
+        milestones: 'select * from milestones', tasks: 'select * from tasks', task_state_history: 'select * from task_state_history', task_collaborators: 'select * from task_collaborators',
+        task_dependencies: 'select * from task_dependencies', checklist_items: 'select * from checklist_items', comments: 'select * from comments', blockers: 'select * from blockers',
+        task_reviews: 'select * from task_reviews', evidence_links: 'select id, task_id, kind, label, url, file_id, source_module, source_reference, restricted, added_by, created_at from evidence_links',
+        daily_plans: 'select * from daily_plans', daily_plan_items: 'select * from daily_plan_items', daily_reviews: 'select * from daily_reviews', daily_review_versions: 'select * from daily_review_versions',
+        time_entries: 'select * from time_entries', time_entry_revisions: 'select * from time_entry_revisions', work_schedules: 'select * from work_schedules', holidays: 'select * from holidays',
+        leave_entries: 'select * from leave_entries', capacity_allocations: 'select * from capacity_allocations', manager_reviews: 'select * from manager_reviews',
+        recurring_templates: 'select * from recurring_templates', report_versions: 'select id, user_id, period_kind, period_start, period_end, version, status, definitions_version, reason, generated_at from report_versions',
+        integration_connections: 'select id, user_id, kind, name, status, settings, last_sync_at, created_at from integration_connections',
+        audit_events: 'select * from audit_events order by id',
+      };
+      const out: Record<string, unknown> = { exportedAt: new Date().toISOString(), schema: 'task-tracking-export-v1', excluded: ['password hashes', 'MFA secrets', 'integration secrets', 'sessions', 'cost rates', 'file contents (download separately)'] };
+      for (const [k, sql] of Object.entries(tables)) out[k] = await many(db, sql, k === 'tenant' ? [a.tenantId] : []);
+      await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'tenant.data_export', resourceType: 'tenant', resourceId: a.tenantId });
+      return out;
+    });
+    reply.header('content-type', 'application/json').header('content-disposition', `attachment; filename="organization-export-${new Date().toISOString().slice(0, 10)}.json"`);
+    return reply.send(JSON.stringify(data, null, 1));
+  });
+
   app.post('/api/admin/retention/run', async (req) => tx(req, async (db, a) => {
     sysAdmin(a);
     await enqueue(db, { tenantId: a.tenantId, kind: 'retention.purge', payload: {} });

@@ -7,6 +7,6 @@ export default async function () {
   const env = Object.fromEntries(readFileSync('.env', 'utf8').split('\n').filter((l) => /^[A-Z_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
   process.env.DATABASE_URL = env.DATABASE_URL.replace(/\/taskapp$/, `/${env.TEST_DATABASE_NAME}`);
   process.env.MIGRATION_DATABASE_URL = env.MIGRATION_DATABASE_URL.replace(/\/taskapp$/, `/${env.TEST_DATABASE_NAME}`);
-  const { migrate } = await import('../server/src/cli/migrate.ts');
+  const { migrate } = await import('../server/src/cli/migrate.js');
   await migrate(process.env.MIGRATION_DATABASE_URL);
 }

@@ -100,3 +100,34 @@ describe('audit', () => {
     expect(v.ok).toBe(false);
   });
 });
+
+describe('organization data export and MFA', () => {
+  it('admin data export contains records but never secrets', async () => {
+    const r = await aAdmin.get('/api/admin/export-data');
+    expect(r.status).toBe(200);
+    const text = JSON.stringify(r.body);
+    expect(r.body.tasks.length).toBeGreaterThan(0);
+    expect(text).not.toMatch(/password_hash|mfa_secret|secret_enc|token_hash|scrypt\$/);
+    expect((await aEmp.get('/api/admin/export-data')).status).toBe(403);
+  });
+  it('two-step verification gates sign-in until a valid TOTP code is given', async () => {
+    const { totp } = await import('../server/src/lib/crypto.js');
+    const u = await login(A, 'outsider');
+    const setup = (await u.post('/api/me/mfa/setup')).body;
+    expect(setup.qr).toMatch(/^data:image\/png;base64,/);
+    expect((await u.post('/api/me/mfa/enable', { code: '000000' })).status).toBe(400);
+    expect((await u.post('/api/me/mfa/enable', { code: totp(setup.secret) })).status).toBe(200);
+    const app = await getApp();
+    const first = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { 'x-requested-with': 'fetch', 'content-type': 'application/json' },
+      payload: { organization: A.slug, email: `outsider@${A.slug}.test`, password: 'test-password-123' } });
+    expect(first.json()).toEqual({ mfaRequired: true });
+    const pending = client(`tt_sid=${first.cookies.find((c) => c.name === 'tt_sid')!.value}`);
+    expect((await pending.get('/api/me')).status).toBe(401);
+    expect((await pending.post('/api/auth/mfa', { code: '123456' })).status).toBe(401);
+    const ok = await app.inject({ method: 'POST', url: '/api/auth/mfa', headers: { cookie: `tt_sid=${first.cookies.find((c) => c.name === 'tt_sid')!.value}`, 'x-requested-with': 'fetch', 'content-type': 'application/json' },
+      payload: { code: totp(setup.secret) } });
+    expect(ok.statusCode).toBe(200);
+    const full = client(`tt_sid=${ok.cookies.find((c) => c.name === 'tt_sid')!.value}`);
+    expect((await full.get('/api/me')).body.user.mfa_enabled).toBe(true);
+  });
+});

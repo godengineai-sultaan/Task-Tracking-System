@@ -163,3 +163,14 @@ describe('manager review actions never overwrite the employee record', () => {
     expect(notes).toEqual(expect.arrayContaining(['review_acknowledge', 'review_clarification_request', 'review_follow_up']));
   });
 });
+
+describe('AI boundary', () => {
+  it('without a configured provider, AI drafting is unavailable and never fabricates output', async () => {
+    const me = (await emp.get('/api/me')).body;
+    expect(me.ai).toMatchObject({ configured: false, available: false });
+    const r = await emp.post('/api/ai/task-draft', { note: 'Follow up with the vendor about laptops' });
+    expect(r.status).toBe(503); expect(r.body.error).toBe('ai_unavailable');
+    const runs = await withOwner((db) => db.query(`select count(*)::int n from ai_runs where tenant_id = $1 and status = 'succeeded'`, [org.tenantId]));
+    expect(runs.rows[0].n).toBe(0);
+  });
+});

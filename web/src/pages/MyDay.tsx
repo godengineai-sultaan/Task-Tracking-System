@@ -98,6 +98,7 @@ export default function MyDay() {
                 </li>
               )}
             </ol>
+            <FocusNote date={d.date} value={d.plan?.focusNote ?? ''} ids={ids} />
             {d.scopeChanges.length > 0 && (
               <div className="border-t border-line px-4 py-2.5 text-[12px] text-ink-3">
                 Replanned today: {d.scopeChanges.map((s: any) => `${s.title} (${s.removed_reason})`).join('; ')}
@@ -214,3 +215,16 @@ export function TaskMeta({ t, today }: { t: any; today: string }) {
 }
 const addDaysIso = (d: string, n: number) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
 void qs; void useEffect;
+
+function FocusNote({ date, value, ids }: { date: string; value: string; ids: string[] }) {
+  const qc = useQueryClient(); const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  const save = useMutation({ mutationFn: () => api.put('/api/my-day/plan', { date, taskIds: ids, focusNote: v }), onSuccess: (d) => qc.setQueryData(['my-day'], d) });
+  return (
+    <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
+      <label htmlFor="focus-note" className="shrink-0 text-[12px] font-medium text-ink-3">Focus block</label>
+      <input id="focus-note" value={v} onChange={(e) => setV(e.target.value)} onBlur={() => v !== value && save.mutate()} placeholder="e.g. 14:00–16:00 protected for the tracking page"
+        className="min-w-0 flex-1 rounded-md bg-transparent px-1.5 py-1 text-[13px] hover:bg-surface-2 focus:bg-surface-2 focus:outline-none" />
+    </div>
+  );
+}
