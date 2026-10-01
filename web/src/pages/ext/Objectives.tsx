@@ -82,7 +82,7 @@ function ObjectiveRow({ o }: { o: any }) {
         {o.tasks > 0 && <span>{o.tasksDone}/{o.tasks} tasks accepted · {BASIS[o.workBasis]}</span>}
         <span>{o.keyResults} key result{o.keyResults === 1 ? '' : 's'}</span>
         {f?.expected != null && <span>Expected now {pct(f.expected)}</span>}
-        {o.latestCheckin && <span>Owner confidence {o.latestCheckin.confidence}/5</span>}
+        {o.latestCheckin && <span>{o.latestCheckin.by_owner ? 'Owner confidence' : 'Latest confidence'} {o.latestCheckin.confidence}/5{!o.latestCheckin.by_owner && o.latestCheckin.author_name ? ` (${o.latestCheckin.author_name})` : ''}</span>}
       </div>
       {f && f.status !== 'on_track' && f.reasons[0] && <p className="mt-2 text-[13px] text-ink-2">{f.reasons[0]}</p>}
     </li>

@@ -115,7 +115,7 @@ function KeyResultsCard({ d }: { d: any }) {
             <div className="mt-2"><ProgressMeter value={k.progress} label={`Progress of key result ${k.title}`} /></div>
             <p className="mt-1.5 text-[12px] text-ink-2">{k.explanation}</p>
             {k.links.length > 0 && <div className="mt-1.5 flex flex-wrap gap-1">{k.links.map((l: any) => <Badge key={l.id}>{l.label}</Badge>)}</div>}
-            {can && k.kind === 'manual' && d.objective.status === 'active' && <ReportValue objectiveId={d.objective.id} kr={k} />}
+            {can && k.kind === 'manual' && d.objective.status === 'active' && <ReportValue key={`${k.id}:${k.version}`} objectiveId={d.objective.id} kr={k} />}
           </li>))}</ul>)}
       {modal && <KrModal d={d} kr={modal.id ? modal : null} onClose={() => setModal(null)} />}
       <Modal open={!!del} onClose={() => setDel(null)} title="Delete key result"

@@ -123,7 +123,8 @@ export default async function (app: FastifyInstance) {
     const msIds = it.milestones.filter((m) => m.status !== 'cancelled').map((m) => m.id);
     const [vis, vp] = taskVisibility(a, 2);
     const [tasks, checkins, history, krMilestones, krProjects] = await Promise.all([
-      many(db, `select t.id, t.number, t.title, t.status, t.estimate_minutes, t.due_date, t.accepted_at, t.milestone_id, t.owner_id, u.name owner_name
+      many(db, `select t.id, t.number, t.title, t.status, t.estimate_minutes, t.due_date, t.accepted_at, t.milestone_id, t.owner_id, u.name owner_name,
+          count(*) over () visible_total
         from tasks t left join projects p on p.id = t.project_id left join users u on u.id = t.owner_id
         where t.milestone_id = any($1::uuid[]) and t.status <> 'cancelled' and ${vis}
         order by t.status = 'done', t.due_date nulls last, t.number limit 500`, [msIds, ...vp]),
@@ -151,7 +152,8 @@ export default async function (app: FastifyInstance) {
       milestones: it.milestones.map((m) => visibleProjects.has(m.project_id)
         ? { id: m.id, name: m.name, due_date: m.due_date, status: m.status, project_id: m.project_id, project_key: m.project_key, project_name: m.project_name, stats: m.stats, restricted: false }
         : { id: m.id, name: 'Milestone in a private project', due_date: m.due_date, status: m.status, project_id: null, project_key: null, project_name: null, stats: m.stats, restricted: true }),
-      tasks, hiddenTasks: Math.max(0, totalTasks - tasks.length),
+      // The list is capped at 500; hidden = tasks the actor cannot see, not tasks past the cap.
+      tasks: tasks.map(({ visible_total, ...t }) => t), hiddenTasks: Math.max(0, totalTasks - (tasks[0]?.visible_total ?? 0)),
       checkins, statusHistory: history,
       permissions: { canEdit: canEdit(a), canMaintain: canMaintain(a, o), canCheckIn: canMaintain(a, o) && o.status === 'active' },
     };

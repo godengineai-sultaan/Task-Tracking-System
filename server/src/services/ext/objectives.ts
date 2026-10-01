@@ -136,8 +136,11 @@ export interface AssessInput {
   open: { tasks: number; estimated: number; minutes: number };
   /** Accepted linked tasks inside the velocity window. */
   accepted: { minutes: number; tasks: number; unestimated: number };
-  latestCheckin?: { confidence: number; created_at: string | Date } | null;
+  latestCheckin?: LatestCheckin | null;
+  /** Tenant timezone, for showing the check-in date as a local date. */
+  tz?: string;
 }
+export interface LatestCheckin { confidence: number; created_at: string | Date; author_name?: string | null; by_owner?: boolean }
 export interface Signal { key: 'elapsed' | 'velocity'; used: boolean; status: ForecastStatus | null; summary: string }
 export interface Forecast {
   status: ForecastStatus; reasons: string[]; facts: string[]; assumptions: string[]; signals: Signal[];
@@ -152,7 +155,8 @@ export function assess(i: AssessInput): Forecast {
     historyWeeks: null, velocityPerWeek: null, remainingMinutes: null, projectedWeeks: null, weeksLeft: null, openEstimateCoverage: null, rules: OKR_RULES };
   const finish = (status: ForecastStatus) => {
     f.status = status;
-    if (i.latestCheckin) facts.push(`Owner's latest check-in confidence: ${i.latestCheckin.confidence}/5 (${DateTime.fromJSDate(new Date(i.latestCheckin.created_at)).toISODate()}). Shown for context; it does not change the computed status.`);
+    const c = i.latestCheckin;
+    if (c) facts.push(`Latest check-in confidence: ${c.confidence}/5 (${DateTime.fromJSDate(new Date(c.created_at), { zone: i.tz ?? 'utc' }).toISODate()}${c.author_name ? `, by ${c.author_name}${c.by_owner ? ', the owner' : ''}` : ''}). Shown for context; it does not change the computed status.`);
     return f;
   };
   const start = i.periodStart ?? i.createdDate;
@@ -196,6 +200,9 @@ export function assess(i: AssessInput): Forecast {
   if (i.open.tasks === 0) skip('there are no open linked tasks, so there is no remaining estimate to forecast.');
   else if (historyWeeks < OKR_RULES.minHistoryWeeks) skip(`only ${historyWeeks} week${historyWeeks === 1 ? '' : 's'} of history since the period started; at least ${OKR_RULES.minHistoryWeeks} are needed.`);
   else if (cov! < OKR_RULES.estimateCoverage) skip(`only ${i.open.estimated} of ${plural(i.open.tasks, 'open task')} (${pctText(cov!)}) have an estimate; ${pctText(OKR_RULES.estimateCoverage)} is needed to size the remaining work.`);
+  // Accepted work without estimates has an unknown size: do not read it as zero pace.
+  else if (i.accepted.tasks && (i.accepted.tasks - i.accepted.unestimated) / i.accepted.tasks < OKR_RULES.estimateCoverage)
+    skip(`only ${i.accepted.tasks - i.accepted.unestimated} of ${plural(i.accepted.tasks, 'task')} accepted in the last ${historyWeeks} weeks have an estimate; ${pctText(OKR_RULES.estimateCoverage)} is needed to measure the recent pace.`);
   else {
     const velocity = i.accepted.minutes / historyWeeks;
     Object.assign(f, { velocityPerWeek: Math.round(velocity), remainingMinutes: i.open.minutes });
@@ -233,7 +240,7 @@ export async function tenantToday(db: Db, tenantId: string) {
 export interface ObjectiveComputed {
   objective: any; work: Progress & { stats: WorkStats; milestones: number; milestonesDone: number };
   keyResults: KeyResultResult[]; progress: RollUp; forecast: Forecast | null;
-  milestones: (MilestoneRow & { stats: WorkStats })[]; latestCheckin: { confidence: number; created_at: string | Date } | null;
+  milestones: (MilestoneRow & { stats: WorkStats })[]; latestCheckin: LatestCheckin | null;
 }
 
 /** Load and compute objectives (batched queries; no per-person or per-day loops). */
@@ -247,7 +254,8 @@ export async function computeObjectives(db: Db, tenantId: string, opts: { ids?: 
   const oids = objs.map((o) => o.id);
   const [krs, checkins] = await Promise.all([
     many(db, `select * from objective_key_results where objective_id = any($1::uuid[]) order by position, created_at`, [oids]),
-    many(db, `select distinct on (objective_id) objective_id, confidence, created_at from objective_checkins where objective_id = any($1::uuid[]) order by objective_id, created_at desc`, [oids]),
+    many(db, `select distinct on (c.objective_id) c.objective_id, c.confidence, c.created_at, c.author_id, u.name author_name
+      from objective_checkins c left join users u on u.id = c.author_id where c.objective_id = any($1::uuid[]) order by c.objective_id, c.created_at desc`, [oids]),
   ]);
   const krMs = [...new Set(krs.flatMap((k) => k.milestone_ids ?? []))], krPs = [...new Set(krs.flatMap((k) => k.project_ids ?? []))];
   const milestones = await many<MilestoneRow>(db, `select m.id, m.objective_id, m.name, m.due_date, m.status, m.project_id, p.key project_key, p.name project_name,
@@ -274,7 +282,8 @@ export async function computeObjectives(db: Db, tenantId: string, opts: { ids?: 
     }
     const keyResults = krs.filter((k) => k.objective_id === o.id).map((k) => keyResultProgress(k, msById, tasks));
     const progress = rollUp(work, keyResults);
-    const latest = checkins.find((c) => c.objective_id === o.id) ?? null;
+    const lc = checkins.find((c) => c.objective_id === o.id);
+    const latest: LatestCheckin | null = lc ? { confidence: lc.confidence, created_at: lc.created_at, author_name: lc.author_name ?? null, by_owner: !!o.owner_id && lc.author_id === o.owner_id } : null;
     let forecast: Forecast | null = null;
     if (o.status === 'active') {
       const start = o.period_start ?? o.created_date;
@@ -285,10 +294,10 @@ export async function computeObjectives(db: Db, tenantId: string, opts: { ids?: 
         progress: progress.value, progressExplanation: [work.value !== null ? `Linked work: ${work.explanation}` : '', progress.explanation].filter(Boolean).join(' '),
         open: { tasks: stats.open, estimated: stats.openEstimated, minutes: stats.openMinutes },
         accepted: { minutes: acc.reduce((s, t) => s + (t.estimate_minutes ?? 0), 0), tasks: acc.length, unestimated: acc.filter((t) => t.estimate_minutes === null).length },
-        latestCheckin: latest ? { confidence: latest.confidence, created_at: latest.created_at } : null });
+        latestCheckin: latest, tz });
     }
     return { objective: o, work: { ...work, stats, milestones: activeMs.length, milestonesDone: msDone }, keyResults, progress, forecast, milestones: linked,
-      latestCheckin: latest ? { confidence: latest.confidence, created_at: latest.created_at } : null };
+      latestCheckin: latest };
   });
   return { today, tz, items };
 }
@@ -302,12 +311,18 @@ export function isoWeekKey(date: string) { const d = utc(date); return `${d.week
  * hourly tick within a week does nothing. Owners are notified only when the status changes to at_risk/off_track.
  */
 export async function evaluateWeeklyStatuses(db: Db, tenantId: string, periodKeyOverride?: string) {
-  const { today, items } = await computeObjectives(db, tenantId, { activeOnly: true });
-  const periodKey = periodKeyOverride ?? isoWeekKey(today);
+  const periodKey = periodKeyOverride ?? isoWeekKey((await tenantToday(db, tenantId)).today);
   let recorded = 0, notified = 0;
+  // The tick runs hourly: only objectives without this week's snapshot are computed, so most runs do no work.
+  const pending = (await many(db, `select o.id from objectives o where o.tenant_id = $1 and o.status = 'active'
+      and not exists (select 1 from objective_status_history h where h.objective_id = o.id and h.period_key = $2)`, [tenantId, periodKey])).map((r) => r.id as string);
+  if (!pending.length) return { periodKey, recorded, notified };
+  const { items } = await computeObjectives(db, tenantId, { ids: pending, activeOnly: true });
+  const prevs = new Map((await many(db, `select distinct on (objective_id) objective_id, status from objective_status_history
+      where objective_id = any($1::uuid[]) and period_key <> $2 order by objective_id, evaluated_at desc`, [pending, periodKey])).map((r) => [r.objective_id as string, r]));
   for (const it of items) {
     const f = it.forecast!; const o = it.objective;
-    const prev = await one(db, `select status from objective_status_history where objective_id = $1 and period_key <> $2 order by evaluated_at desc limit 1`, [o.id, periodKey]);
+    const prev = prevs.get(o.id);
     const row = await one(db, `insert into objective_status_history (tenant_id, objective_id, period_key, status, previous_status, progress, expected, reasons)
         values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (objective_id, period_key) do nothing returning id`,
       [tenantId, o.id, periodKey, f.status, prev?.status ?? null, it.progress.value, f.expected, JSON.stringify(f.reasons)]);

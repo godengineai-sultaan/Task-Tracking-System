@@ -178,6 +178,21 @@ describe('forecast statuses', () => {
     const noStart = assess({ ...base, periodStart: null, progress: 0.5 });
     expect(noStart.assumptions[0]).toMatch(/creation date \(2026-04-20\)/);
   });
+
+  it('pure assess: accepted work without estimates is an unknown pace, not a zero pace', () => {
+    const base = { today: '2026-06-10', periodStart: '2026-05-01', periodEnd: '2026-06-30', createdDate: '2026-04-20', progressExplanation: '', progress: 0.7,
+      open: { tasks: 2, estimated: 2, minutes: 600 } };
+    // 5 tasks accepted in the window, none estimated: velocity cannot be measured, so it is not used (elapsed time alone says on track).
+    const f = assess({ ...base, accepted: { minutes: 0, tasks: 5, unestimated: 5 } });
+    expect(f.signals[1]).toMatchObject({ key: 'velocity', used: false, status: null });
+    expect(f.velocityPerWeek).toBeNull();
+    expect(f.status).toBe('on_track');
+    expect(f.assumptions.join(' ')).toMatch(/only 0 of 5 tasks accepted in the last 4 weeks have an estimate/);
+    // Nothing accepted at all is a measured zero pace and still counts.
+    expect(assess({ ...base, accepted: { minutes: 0, tasks: 0, unestimated: 0 } }).status).toBe('off_track');
+    // Mostly estimated accepted work is still used.
+    expect(assess({ ...base, accepted: { minutes: 1200, tasks: 5, unestimated: 1 } }).signals[1]).toMatchObject({ used: true });
+  });
 });
 
 describe('permissions', () => {
@@ -214,6 +229,15 @@ describe('permissions', () => {
     expect(d.permissions).toEqual({ canEdit: false, canMaintain: false, canCheckIn: false });
     expect((await detail(o.id, emp)).permissions).toEqual({ canEdit: false, canMaintain: true, canCheckIn: true });
     expect((await emp2.get('/api/objectives/overview')).status).toBe(200);
+  });
+
+  it('a check-in by someone other than the owner is not reported as the owner\'s confidence', async () => {
+    expect((await admin.post(`/api/objectives/${o.id}/checkins`, { confidence: 2, note: 'Leadership view' })).status).toBe(200);
+    const facts = (await detail(o.id)).forecast.facts.join(' ');
+    expect(facts).toMatch(new RegExp(`Latest check-in confidence: 2/5 \\(${day(0)}, by Admin\\)`));
+    expect(facts).not.toMatch(/Owner's/);
+    const row = (await admin.get('/api/objectives/overview')).body.items.find((x: any) => x.id === o.id);
+    expect(row.latestCheckin).toMatchObject({ confidence: 2, author_name: 'Admin', by_owner: false });
   });
 
   it('cannot link milestones or projects from private projects the actor cannot see', async () => {
@@ -285,5 +309,41 @@ describe('weekly early-warning notifications', () => {
     expect(statuses[3].previous_status).toBe('on_track');
     const d = (await a2.get(`/api/objectives/${o.id}`)).body;
     expect(d.statusHistory[0]).toMatchObject({ period_key: 'test-week-4', status: 'off_track', notified: true });
+  });
+
+  it('an objective created later in the week still gets this week\'s snapshot; existing ones are not re-recorded', async () => {
+    const week = (await withOwner(async (db) => (await db.query(`select period_key from objective_status_history where objective_id = $1 and period_key like '%-W%'`, [o.id])).rows))[0].period_key;
+    const late = (await a2.post('/api/objectives/create', { title: 'Late objective', ownerId: org2.users.emp })).body;
+    await run(); await run();
+    const rows = await withOwner(async (db) => (await db.query(`select objective_id, status from objective_status_history where tenant_id = $1 and period_key = $2`, [org2.tenantId, week])).rows);
+    expect(rows.filter((r) => r.objective_id === o.id)).toHaveLength(1);
+    expect(rows.filter((r) => r.objective_id === late.id)).toEqual([{ objective_id: late.id, status: 'insufficient_data' }]);
+  });
+});
+
+describe('isolation and scale', () => {
+  it('another tenant cannot read, edit, check in on or link into an objective', async () => {
+    const other = await makeOrg();
+    const oa = await login(other, 'admin');
+    const o = await objective({ title: 'Tenant A objective', periodEnd: day(30) });
+    const ms = await milestone('Tenant A milestone');
+    expect((await oa.get(`/api/objectives/${o.id}`)).status).toBe(404);
+    expect((await oa.put(`/api/objectives/${o.id}`, { title: 'Hijack', version: o.version })).status).toBe(404);
+    expect((await oa.post(`/api/objectives/${o.id}/checkins`, { confidence: 3 })).status).toBe(404);
+    expect((await oa.get('/api/objectives/overview')).body.items.map((x: any) => x.id)).not.toContain(o.id);
+    const own = (await oa.post('/api/objectives/create', { title: 'Tenant B objective' })).body;
+    expect((await oa.post(`/api/objectives/${own.id}/key-results`, { title: 'Cross', kind: 'milestone_completion', milestoneIds: [ms] })).status).toBe(400);
+    expect((await oa.post(`/api/objectives/${own.id}/milestones`, { milestoneId: ms })).status).toBe(404);
+  });
+
+  it('hidden-task count is not inflated when the visible task list is capped', async () => {
+    const o = await objective({ title: 'Large objective', periodStart: day(-7), periodEnd: day(30) });
+    const ms = await milestone('Large milestone'); await link(o.id, ms);
+    await withOwner((db) => db.query(`insert into tasks (tenant_id, project_id, milestone_id, title, owner_id, created_by, status)
+      select $1, $2, $3, 'Bulk task ' || g, $4, $4, 'planned' from generate_series(1, 505) g`, [org.tenantId, projectId, ms, org.users.emp]));
+    const d = await detail(o.id); // admin is a routine admin and can see every task
+    expect(d.work.stats.tasks).toBe(505);
+    expect(d.tasks).toHaveLength(500);
+    expect(d.hiddenTasks).toBe(0);
   });
 });
