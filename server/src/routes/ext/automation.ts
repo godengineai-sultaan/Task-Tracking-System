@@ -103,7 +103,7 @@ export default async function (app: FastifyInstance) {
     if (q.ruleId) { vals.push(q.ruleId); where.push(`x.rule_id = $${vals.length}`); }
     if (q.status) { vals.push(q.status); where.push(`x.status = $${vals.length}`); }
     vals.push(q.limit);
-    return many(db, `select x.id, x.rule_id, x.rule_version, x.task_id, x.trigger, x.status, x.depth, x.created_at,
+    return many(db, `select x.id, x.rule_id, x.rule_version, vt.id task_id, x.trigger, x.status, x.depth, x.created_at,
         case when vt.id is not null then x.message end message, case when vt.id is not null then x.results else '[]'::jsonb end results,
         r.name rule_name, r.scope rule_scope, vt.title task_title, vt.number task_number, (vt.id is not null) task_visible
       from automation_runs x join automation_rules r on r.id = x.rule_id

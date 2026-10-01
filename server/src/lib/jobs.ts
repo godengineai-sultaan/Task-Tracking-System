@@ -15,8 +15,18 @@ export async function enqueue(db: Db, j: EnqueueInput) {
 }
 
 export type JobHandler = (db: Db, payload: any, job: { id: string; tenantId: string | null; attempts: number }) => Promise<void>;
+/** Runs with no transaction open; the handler opens its own short transactions (for network I/O between database steps). */
+export type OpenJobHandler = (tenantId: string | null, payload: any, job: { id: string; tenantId: string | null; attempts: number }) => Promise<void>;
+/** Called in its own tenant transaction when a job is dead-lettered (e.g. to mark the record the job was producing as failed). */
+export type DeadJobHandler = (db: Db, payload: any, error: string) => Promise<void>;
 const handlers = new Map<string, JobHandler>();
-export function registerJob(kind: string, h: JobHandler) { handlers.set(kind, h); }
+const openHandlers = new Map<string, OpenJobHandler>();
+const deadHandlers = new Map<string, DeadJobHandler>();
+export function registerJob(kind: string, h: JobHandler, opts: { onDead?: DeadJobHandler } = {}) {
+  handlers.set(kind, h);
+  if (opts.onDead) deadHandlers.set(kind, opts.onDead);
+}
+export function registerOpenJob(kind: string, h: OpenJobHandler) { openHandlers.set(kind, h); }
 
 const workerId = `${hostname()}:${process.pid}`;
 
@@ -31,11 +41,12 @@ export async function runOneJob(): Promise<boolean> {
        returning *`, [workerId])).rows[0];
   });
   if (!job) return false;
-  const h = handlers.get(job.kind);
+  const h = handlers.get(job.kind), open = openHandlers.get(job.kind);
   try {
-    if (!h) throw new Error(`No handler for job kind ${job.kind}`);
     const ctx = { id: job.id, tenantId: job.tenant_id, attempts: job.attempts };
-    if (job.tenant_id) await withTenant(job.tenant_id, (db) => h(db, job.payload, ctx));
+    if (open) await open(job.tenant_id, job.payload, ctx);
+    else if (!h) throw new Error(`No handler for job kind ${job.kind}`);
+    else if (job.tenant_id) await withTenant(job.tenant_id, (db) => h(db, job.payload, ctx));
     else await withSystem((db) => h(db, job.payload, ctx));
     await withSystem((db) => db.query(`update jobs set status='succeeded', finished_at=now(), locked_at=null, last_error=null where id=$1`, [job.id]));
   } catch (e: any) {
@@ -46,6 +57,9 @@ export async function runOneJob(): Promise<boolean> {
       `update jobs set status=$2, last_error=$3, locked_at=null, run_at = now() + ($4 || ' seconds')::interval,
          finished_at = case when $2 = 'dead' then now() else null end where id=$1`,
       [job.id, dead ? 'dead' : 'queued', String(e?.message ?? e).slice(0, 2000), String(delaySec)]));
+    const onDead = deadHandlers.get(job.kind);
+    if (dead && onDead && job.tenant_id) await withTenant(job.tenant_id, (db) => onDead(db, job.payload, String(e?.message ?? e)))
+      .catch((err: any) => log.error({ job: job.id, kind: job.kind, err: err?.message }, 'dead-letter handler failed'));
   }
   return true;
 }

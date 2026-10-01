@@ -5,8 +5,8 @@ import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { readStored, storeFile } from '../lib/storage.js';
-import { assertContribute, canSeeRestrictedEvidence, has, isStaff, loadVisibleTask, requireStaff, taskVisibility } from '../services/access.js';
-import { CATEGORIES, PRIORITIES, STATUSES, createTask, projectVisibleSql, parseQuickCapture, reassignTask, reopenTask, reviewTask, transition, updateTask } from '../services/tasks.js';
+import { assertContribute, canSeeRestrictedEvidence, canViewPersonRecords, has, isStaff, loadVisibleTask, requireStaff, taskVisibility } from '../services/access.js';
+import { CATEGORIES, PRIORITIES, STATUSES, assertProjectUsable, createTask, projectVisibleSql, parseQuickCapture, reassignTask, reopenTask, reviewTask, transition, updateTask } from '../services/tasks.js';
 import { setPlan } from '../services/myday.js';
 import { localToday } from '../services/calendar.js';
 import { notify } from '../services/notify.js';
@@ -34,6 +34,7 @@ export async function taskRoutes(app: FastifyInstance) {
   }));
 
   app.post('/api/tasks/parse', async (req) => tx(req, async (db, a) => {
+    requireStaff(a);
     const { text } = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
     const p = parseQuickCapture(text, localToday(a.timezone));
     const project = p.projectKey ? await one(db, `select id, key, name from projects pr where key = $1 and status <> 'archived' and ${projectVisibleSql('pr', 2)}`, [p.projectKey, a.id, has(a, 'routine_admin')]) : null;
@@ -72,9 +73,13 @@ export async function taskRoutes(app: FastifyInstance) {
     if (q.due === 'week') add(`t.due_date between $? and ($?::date + 7)`.replace(/\$\?/g, `$${vals.length + 1}`), today);
     if (q.due === 'none') where.push('t.due_date is null');
     vals.push(q.limit);
-    const customer = has(a, 'customer');
+    // Client accounts get the same customer-safe projection as the task detail and portal (no owners, estimates, tags or internal blocker text).
+    if (has(a, 'customer')) return many(db, `select t.id, t.number, t.title, t.status, t.due_date, t.accepted_at, t.project_id, p.name project_name, p.key project_key, t.milestone_id
+      from tasks t left join projects p on p.id = t.project_id
+      where ${where.join(' and ')}
+      order by t.sort_order desc, t.created_at desc limit $${vals.length}`, vals);
     return many(db, `select t.id, t.number, t.title, t.status, t.priority, t.category, t.due_date, t.estimate_minutes, t.tags, t.version, t.sort_order,
-        t.owner_id, ${customer ? 'null' : 'u.name'} owner_name, t.project_id, p.name project_name, p.key project_key, t.milestone_id, t.requires_review, t.requires_evidence,
+        t.owner_id, u.name owner_name, t.project_id, p.name project_name, p.key project_key, t.milestone_id, t.requires_review, t.requires_evidence,
         t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at, t.customer_visible,
         (select count(*) from checklist_items c where c.task_id = t.id)::int checklist_total,
         (select count(*) from checklist_items c where c.task_id = t.id and c.done)::int checklist_done,
@@ -127,11 +132,17 @@ export async function taskRoutes(app: FastifyInstance) {
       many(db, `select te.id, te.started_at, te.ended_at, te.source, te.category, te.user_id, u.name user_name from time_entries te join users u on u.id = te.user_id
         where te.task_id = $1 and te.deleted_at is null order by te.started_at desc limit 50`, [t.id]),
     ]);
+    // Exact time entries are person records: only the people who may see that person's records get them; others see the total.
+    const viewable = new Map<string, boolean>();
+    for (const uid of new Set(time.map((e) => e.user_id as string))) viewable.set(uid, await canViewPersonRecords(db, a, uid));
+    const visibleTime = time.filter((e) => viewable.get(e.user_id));
+    const totals = await one(db, `select coalesce(sum(extract(epoch from ended_at - started_at)) / 60, 0)::int minutes from time_entries
+      where task_id = $1 and deleted_at is null and ended_at is not null`, [t.id]);
     const visibleEvidence = evidence.map((e) => canSeeRestrictedEvidence(a, e, t) ? e
       : { id: e.id, kind: e.kind, label: 'Confidential reference', restricted: true, created_at: e.created_at, hidden: true });
     const { project_owner_id, project_customer_id, ...task } = t;
     return { task, owner, reviewer, project, milestone, checklist, dependencies: deps, dependents, collaborators, evidence: visibleEvidence, blockers, comments,
-      history, reviews, time, canEdit: await canEditCheck(db, a, t) };
+      history, reviews, time: visibleTime, timeTotalMinutes: totals.minutes, timeHiddenEntries: time.length - visibleTime.length, canEdit: await canEditCheck(db, a, t) };
   }));
   async function canEditCheck(db: any, a: any, t: any) { try { await assertContribute(db, a, t); return true; } catch { return false; } }
 
@@ -332,6 +343,7 @@ export async function taskRoutes(app: FastifyInstance) {
     const b = recurringSchema.parse(req.body);
     const owner = b.ownerId ?? a.id;
     if (owner !== a.id && !a.managedUserIds.includes(owner) && !has(a, 'routine_admin')) throw forbidden('You can create recurring work for yourself or your team');
+    if (b.projectId) await assertProjectUsable(db, a, b.projectId);
     const r = await one(db, `insert into recurring_templates (tenant_id, title, description, project_id, owner_id, category, priority, estimate_minutes, checklist, rule, weekday, month_day, active, created_by, last_generated_date)
       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, $15::date - 1) returning *`,
       [a.tenantId, b.title, b.description, b.projectId ?? null, owner, b.category, b.priority, b.estimateMinutes ?? null, JSON.stringify(b.checklist), b.rule, b.weekday ?? null, b.monthDay ?? null, b.active, a.id, localToday(a.timezone)]);
@@ -344,10 +356,16 @@ export async function taskRoutes(app: FastifyInstance) {
     const cur = await one(db, `select * from recurring_templates where id = $1`, [(req.params as any).id]);
     if (!cur) throw notFound();
     if (![cur.owner_id, cur.created_by].includes(a.id) && !a.managedUserIds.includes(cur.owner_id) && !has(a, 'routine_admin')) throw forbidden();
-    const b = recurringSchema.partial().parse(req.body);
+    // No defaults on edit: fields that are not sent stay as they are (a title edit must not resume a paused template).
+    const b = z.object({ title: z.string().min(1).max(300), description: z.string().max(5000), category: z.enum(CATEGORIES), priority: z.enum(PRIORITIES),
+      estimateMinutes: z.number().int().min(1).max(10000).nullable(), rule: z.enum(['daily', 'weekdays', 'weekly', 'monthly']),
+      weekday: z.number().int().min(1).max(7).nullable(), monthDay: z.number().int().min(1).max(28).nullable(), active: z.boolean() }).partial().parse(req.body);
+    // Resuming a paused template starts from today: occurrences missed while it was paused are not backfilled.
     return one(db, `update recurring_templates set title = coalesce($2,title), description = coalesce($3,description), rule = coalesce($4,rule),
       weekday = coalesce($5,weekday), month_day = coalesce($6,month_day), active = coalesce($7,active), estimate_minutes = coalesce($8, estimate_minutes),
-      priority = coalesce($9, priority), category = coalesce($10, category) where id = $1 returning *`,
-      [cur.id, b.title ?? null, b.description ?? null, b.rule ?? null, b.weekday ?? null, b.monthDay ?? null, b.active ?? null, b.estimateMinutes ?? null, b.priority ?? null, b.category ?? null]);
+      priority = coalesce($9, priority), category = coalesce($10, category),
+      last_generated_date = case when $7::boolean and not active then greatest(last_generated_date, $11::date - 1) else last_generated_date end where id = $1 returning *`,
+      [cur.id, b.title ?? null, b.description ?? null, b.rule ?? null, b.weekday ?? null, b.monthDay ?? null, b.active ?? null, b.estimateMinutes ?? null, b.priority ?? null, b.category ?? null,
+       localToday(a.timezone)]);
   }));
 }

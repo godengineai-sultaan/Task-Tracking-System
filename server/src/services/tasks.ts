@@ -3,9 +3,10 @@ import type { Db } from '../lib/db.js';
 import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
-import { type Actor, assertContribute, canReassign, has, isStaff } from './access.js';
+import { type Actor, assertContribute, canReassign, has, isStaff, loadActor } from './access.js';
 import { notify } from './notify.js';
 import { emitTaskEvent } from './events.js';
+import { userToday } from './calendar.js';
 
 export const STATUSES = ['backlog', 'planned', 'in_progress', 'blocked', 'in_review', 'done', 'cancelled'] as const;
 export type Status = (typeof STATUSES)[number];
@@ -72,20 +73,14 @@ export interface TaskInput {
   recurringTemplateId?: string | null; occurrenceDate?: string | null; collaboratorIds?: string[]; checklist?: string[];
 }
 
-export async function createTask(db: Db, a: Actor | null, tenantId: string, input: TaskInput, opts: { correlationId?: string; authority?: string } = {}) {
+export async function createTask(db: Db, a: Actor | null, tenantId: string, input: TaskInput, opts: { correlationId?: string; authority?: string; notifyOwner?: boolean } = {}) {
   if (a && !isStaff(a)) throw forbidden();
   const ownerId = input.ownerId ?? a?.id;
   if (!ownerId) throw badRequest('Owner is required');
   const owner = await one(db, `select id, status, roles from users where id = $1`, [ownerId]);
   if (!owner || owner.status !== 'active' || owner.roles.includes('customer')) throw badRequest('Owner must be an active staff member');
-  if (input.projectId) {
-    const p = await one(db, `select id, status, visibility, owner_id from projects where id = $1`, [input.projectId]);
-    if (!p) throw badRequest('Project not found');
-    if (p.status === 'archived') throw badRequest('Project is archived');
-    // Private projects: only their owner, members or the main admin may file work into them.
-    if (a && p.visibility === 'private' && p.owner_id !== a.id && !has(a, 'routine_admin')
-      && !(await one(db, `select 1 from project_members where project_id = $1 and user_id = $2`, [p.id, a.id]))) throw badRequest('Project not found');
-  }
+  if (input.projectId) await assertProjectUsable(db, a, input.projectId);
+  if (input.milestoneId) await assertMilestoneInProject(db, input.milestoneId, input.projectId ?? null);
   const t = await one(db, `select settings from tenants where id = $1`, [tenantId]);
   const settings = t?.settings ?? {};
   const category = input.category ?? 'delivery';
@@ -120,9 +115,24 @@ export async function createTask(db: Db, a: Actor | null, tenantId: string, inpu
     await db.query(`insert into checklist_items (tenant_id, task_id, text, position) values ($1,$2,$3,$4)`, [tenantId, row.id, text.trim(), pos++]);
   await audit(db, { tenantId, actorId: a?.id ?? null, action: 'task.create', resourceType: 'task', resourceId: row.id, resourceVersion: 1,
     correlationId: opts.correlationId, authority: opts.authority ?? (a ? 'owner/creator' : 'system'), details: { source: input.sourceType ?? 'manual' } });
-  if (a && ownerId !== a.id) await notify(db, tenantId, ownerId, 'task_assigned', `New task: ${row.title}`, `Assigned by ${a.name}`, `/tasks/${row.id}`);
+  if (a && ownerId !== a.id && opts.notifyOwner !== false) await notify(db, tenantId, ownerId, 'task_assigned', `New task: ${row.title}`, `Assigned by ${a.name}`, `/tasks/${row.id}`);
   await emitTaskEvent(db, a, { type: 'task.created', tenantId, actorId: a?.id ?? null, task: row, to: row.status });
   return { task: await fresh(db, row), created: true };
+}
+
+/** A project work can be filed into: exists, not archived, and (when private) the actor is its owner, a member or the main admin. */
+export async function assertProjectUsable(db: Db, a: Actor | null, projectId: string) {
+  const p = await one(db, `select id, status, visibility, owner_id from projects where id = $1`, [projectId]);
+  if (!p) throw badRequest('Project not found');
+  if (p.status === 'archived') throw badRequest('Project is archived');
+  // Private projects: only their owner, members or the main admin may file work into them.
+  if (a && p.visibility === 'private' && p.owner_id !== a.id && !has(a, 'routine_admin')
+    && !(await one(db, `select 1 from project_members where project_id = $1 and user_id = $2`, [p.id, a.id]))) throw badRequest('Project not found');
+  return p;
+}
+async function assertMilestoneInProject(db: Db, milestoneId: string, projectId: string | null) {
+  const m = await one(db, `select project_id from milestones where id = $1`, [milestoneId]);
+  if (!m || m.project_id !== projectId) throw badRequest('That milestone belongs to a different project');
 }
 
 // ---------- Update fields (optimistic concurrency) ----------
@@ -141,6 +151,15 @@ export async function updateTask(db: Db, a: Actor, task: any, patch: Record<stri
   }
   if (!sets.length) return task;
   if (patch.reviewerId && patch.reviewerId === task.owner_id) throw badRequest('Reviewer must be someone other than the owner');
+  // Moving work between projects follows the same rules as filing it there; a milestone must belong to the resulting project.
+  const projectId = ('projectId' in patch ? patch.projectId : task.project_id) as string | null;
+  if ('projectId' in patch && patch.projectId && patch.projectId !== task.project_id) await assertProjectUsable(db, a, patch.projectId as string);
+  if (patch.milestoneId) await assertMilestoneInProject(db, patch.milestoneId as string, projectId);
+  else if (projectId !== task.project_id && task.milestone_id && !('milestoneId' in patch)) { vals.push(null); sets.push(`milestone_id = $${vals.length + 2}`); changed.milestoneId = null; }
+  if (patch.reviewerId) {
+    const r = await one(db, `select status, roles from users where id = $1`, [patch.reviewerId]);
+    if (!r || r.status !== 'active' || r.roles.includes('customer')) throw badRequest('Reviewer must be an active staff member');
+  }
   const scopeChange = ('dueDate' in patch && patch.dueDate !== task.due_date) || ('title' in patch && patch.title !== task.title);
   const row = await one(db, `update tasks set ${sets.join(', ')}, version = version + 1, updated_at = now() where id = $1 and version = $2 returning *`,
     [task.id, version, ...vals]);
@@ -224,10 +243,12 @@ export async function reviewTask(db: Db, a: Actor, task: any, decision: 'accepte
   if (!allowed) throw forbidden('Only the assigned reviewer can accept or request changes');
   if (task.owner_id === a.id) throw forbidden('Owners cannot accept their own work');
   if (decision === 'changes_requested' && !note.trim()) throw badRequest('Explain what needs to change');
-  await db.query(`insert into task_reviews (tenant_id, task_id, reviewer_id, decision, note) values ($1,$2,$3,$4,$5)`, [a.tenantId, task.id, a.id, decision, note]);
   const to = decision === 'accepted' ? 'done' : 'in_progress';
+  // Guarded on the state that was checked: a concurrent second decision finds no row instead of applying twice.
   const row = await one(db, `update tasks set status = $2, version = version + 1, updated_at = now()
-      ${decision === 'accepted' ? ', done_at = now(), accepted_at = now()' : ''} where id = $1 returning *`, [task.id, to]);
+      ${decision === 'accepted' ? ', done_at = now(), accepted_at = now()' : ''} where id = $1 and version = $3 and status = 'in_review' returning *`, [task.id, to, task.version]);
+  if (!row) throw conflict('This task was changed by someone else. Reload to see the latest version.');
+  await db.query(`insert into task_reviews (tenant_id, task_id, reviewer_id, decision, note) values ($1,$2,$3,$4,$5)`, [a.tenantId, task.id, a.id, decision, note]);
   await db.query(`insert into task_state_history (tenant_id, task_id, from_status, to_status, actor_id, reason) values ($1,$2,'in_review',$3,$4,$5)`,
     [a.tenantId, task.id, to, a.id, decision === 'accepted' ? `Accepted${note ? `: ${note}` : ''}` : `Changes requested: ${note}`]);
   await db.query(`insert into comments (tenant_id, task_id, author_id, body, kind) values ($1,$2,$3,$4,'review')`,
@@ -247,7 +268,8 @@ export async function reopenTask(db: Db, a: Actor, task: any, reason: string, co
   if (!reason?.trim()) throw badRequest('Reopening needs a reason (kept in rework history)');
   const to = task.status === 'done' ? 'in_progress' : 'planned';
   const row = await one(db, `update tasks set status = $2, version = version + 1, updated_at = now(), reopen_count = reopen_count + 1,
-      done_at = null, accepted_at = null, cancelled_at = null where id = $1 returning *`, [task.id, to]);
+      done_at = null, accepted_at = null, cancelled_at = null where id = $1 and version = $3 and status in ('done','cancelled') returning *`, [task.id, to, task.version]);
+  if (!row) throw conflict('This task was changed by someone else. Reload to see the latest version.');
   await db.query(`insert into task_state_history (tenant_id, task_id, from_status, to_status, actor_id, reason) values ($1,$2,$3,$4,$5,$6)`,
     [a.tenantId, task.id, task.status, to, a.id, `Reopened: ${reason}`]);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.reopen', resourceType: 'task', resourceId: task.id, resourceVersion: row.version, reason, correlationId });
@@ -260,12 +282,13 @@ export async function reassignTask(db: Db, a: Actor, task: any, newOwnerId: stri
   if (!reason?.trim()) throw badRequest('Reassignment needs a reason');
   const u = await one(db, `select id, name, status, roles from users where id = $1`, [newOwnerId]);
   if (!u || u.status !== 'active' || u.roles.includes('customer')) throw badRequest('New owner must be an active staff member');
-  const row = await one(db, `update tasks set owner_id = $2, version = version + 1, updated_at = now() where id = $1 returning *`, [task.id, newOwnerId]);
+  const row = await one(db, `update tasks set owner_id = $2, version = version + 1, updated_at = now() where id = $1 and version = $3 returning *`, [task.id, newOwnerId, task.version]);
+  if (!row) throw conflict('This task was changed by someone else. Reload to see the latest version.');
   await db.query(`insert into comments (tenant_id, task_id, author_id, body, kind) values ($1,$2,$3,$4,'system')`,
     [a.tenantId, task.id, a.id, `Reassigned to ${u.name}: ${reason}`]);
-  // The previous owner's plan keeps the item with a visible scope-change reason.
+  // The previous owner's plan keeps the item with a visible scope-change reason (from their own local today; past days are history).
   await db.query(`update daily_plan_items set removed_at = now(), removed_reason = $2 where task_id = $1 and removed_at is null
-    and plan_id in (select id from daily_plans where user_id = $3 and date >= current_date)`, [task.id, `Reassigned to ${u.name}`, task.owner_id]);
+    and plan_id in (select id from daily_plans where user_id = $3 and date >= $4::date)`, [task.id, `Reassigned to ${u.name}`, task.owner_id, await userToday(db, task.owner_id)]);
   await notify(db, a.tenantId, newOwnerId, 'task_assigned', `Reassigned to you: ${task.title}`, reason, `/tasks/${task.id}`);
   if (task.owner_id !== a.id) await notify(db, a.tenantId, task.owner_id, 'task_reassigned', `Reassigned: ${task.title}`, `To ${u.name} — ${reason}`, `/tasks/${task.id}`);
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'task.reassign', resourceType: 'task', resourceId: task.id, resourceVersion: row.version,
@@ -300,16 +323,26 @@ export function occursOn(tpl: any, date: string) {
     default: return false;
   }
 }
+const RECURRING_CATCH_UP_DAYS = 7;
 /** Create due occurrences up to `through` (idempotent through the unique (template, occurrence_date) index). */
 export async function generateRecurring(db: Db, tenantId: string, through: string) {
   const tpls = await many(db, `select * from recurring_templates where active`);
   let created = 0;
+  const end = DateTime.fromISO(through);
+  // Missed occurrences are caught up for at most a week (e.g. after downtime); older ones are never backfilled as overdue work.
+  const earliest = end.minus({ days: RECURRING_CATCH_UP_DAYS });
+  const skip = (id: string) => db.query(`update recurring_templates set last_generated_date = greatest(coalesce(last_generated_date, $2::date), $2::date) where id = $1`, [id, through]);
   for (const tpl of tpls) {
     const owner = await one(db, `select status from users where id = $1`, [tpl.owner_id]);
-    if (owner?.status !== 'active') continue;
-    const from = tpl.last_generated_date ? DateTime.fromISO(tpl.last_generated_date).plus({ days: 1 }).toISODate()! : DateTime.fromISO(through).toISODate()!;
-    let d = DateTime.fromISO(from);
-    const end = DateTime.fromISO(through);
+    // While the owner is inactive nothing is due; moving the marker forward keeps a later reactivation from backfilling.
+    if (owner?.status !== 'active') { await skip(tpl.id); continue; }
+    // The template files work only where its creator (or, if they left, its owner) may still file it.
+    if (tpl.project_id) {
+      const checker = (tpl.created_by && await loadActor(db, tenantId, tpl.created_by)) || await loadActor(db, tenantId, tpl.owner_id);
+      try { await assertProjectUsable(db, checker, tpl.project_id); } catch { await skip(tpl.id); continue; }
+    }
+    const next = tpl.last_generated_date ? DateTime.fromISO(tpl.last_generated_date).plus({ days: 1 }) : end;
+    let d = next < earliest ? earliest : next;
     while (d <= end) {
       const date = d.toISODate()!;
       if (occursOn(tpl, date)) {

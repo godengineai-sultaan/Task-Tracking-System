@@ -4,6 +4,8 @@ import { drainJobs, localIso, login, makeOrg, pastWorkday, withOwner, type Org }
 let org: Org; let emp: any; let mgr: any; let emp2: any; let admin: any;
 beforeAll(async () => {
   org = await makeOrg();
+  // These people have worked here for a while: their records start before the periods reviewed below.
+  await withOwner((db) => db.query(`update users set created_at = now() - interval '1 year' where tenant_id = $1`, [org.tenantId]));
   [emp, mgr, emp2, admin] = await Promise.all([login(org, 'emp'), login(org, 'manager'), login(org, 'emp2'), login(org, 'admin')]);
 });
 

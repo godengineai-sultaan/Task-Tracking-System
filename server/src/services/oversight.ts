@@ -4,8 +4,8 @@ import { many, one } from '../lib/db.js';
 import { audit } from '../lib/audit.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { type Actor, assertCanViewPerson, has, reviewableUserIds } from './access.js';
-import { buildReport } from './analytics.js';
-import { dayCapacity, eachDate, loadCalendar, localDayBounds } from './calendar.js';
+import { buildReport, buildReports, primaryEntrySegments } from './analytics.js';
+import { dayCapacity, eachDate, loadCalendarsFor, localDayBounds } from './calendar.js';
 import { createTask, reassignTask } from './tasks.js';
 import { notify } from './notify.js';
 
@@ -22,13 +22,18 @@ export async function routineTable(db: Db, a: Actor, f: { date: string; departme
     users = users.filter((u) => inProject.has(u.id));
   }
   const rows: any[] = [];
+  // Everyone's day report and counts in one set of queries (not ~20 queries per person).
+  const uids = users.map((u) => u.id);
+  const reports = await buildReports(db, uids, 'day', f.date, f.date);
+  const openBy = new Map((await many(db, `select owner_id, count(*) filter (where status = 'in_progress')::int in_progress, count(*) filter (where status = 'blocked')::int blocked,
+      count(*) filter (where due_date < $2 and status not in ('done','cancelled'))::int overdue
+    from tasks where owner_id = any($1::uuid[]) and status not in ('done','cancelled') group by owner_id`, [uids, f.date])).map((r) => [r.owner_id, r]));
+  const reviewRows = await many(db, `select subject_user_id, action, resolved_at from manager_reviews where subject_user_id = any($1::uuid[]) and date = $2`, [uids, f.date]);
   for (const u of users) {
-    const r = await buildReport(db, u.id, 'day', f.date, f.date);
+    const r = reports.get(u.id)!;
     const d = r.days[0] as any;
-    const open = await one(db, `select count(*) filter (where status = 'in_progress')::int in_progress, count(*) filter (where status = 'blocked')::int blocked,
-        count(*) filter (where due_date < $2 and status not in ('done','cancelled'))::int overdue
-      from tasks where owner_id = $1 and status not in ('done','cancelled')`, [u.id, f.date]);
-    const reviews = await many(db, `select action, resolved_at from manager_reviews where subject_user_id = $1 and date = $2`, [u.id, f.date]);
+    const open = openBy.get(u.id) ?? { in_progress: 0, blocked: 0, overdue: 0 };
+    const reviews = reviewRows.filter((x) => x.subject_user_id === u.id);
     const recapStatus = !d.recap ? (d.capacity.availableMinutes === 0 ? 'not_required' : d.isToday ? 'pending' : 'missing') : d.recap.status;
     rows.push({
       user: { id: u.id, name: u.name, title: u.title, department: u.department, isFounder: u.is_founder },
@@ -166,9 +171,17 @@ export async function teamCapacity(db: Db, a: Actor, start: string, days = 10) {
   const scope = has(a, 'leadership') && !has(a, 'routine_admin') ? (await many(db, `select id from users where status='active' and not ('customer' = any(roles))`)).map((r) => r.id) : ids;
   const end = DateTime.fromISO(start).plus({ days: days * 2 }).toISODate()!;
   const out: any[] = [];
+  // People and calendars in bulk; open work and allocations below are read once for everyone and split per person.
+  const people = new Map((await many(db, `select u.id, u.name, u.title, d.name department from users u left join departments d on d.id = u.department_id
+    where u.id = any($1::uuid[])`, [scope])).map((u) => [u.id, u]));
+  const cals = await loadCalendarsFor(db, scope, start, end);
+  const openAll = await many(db, `select t.owner_id, t.estimate_minutes, t.due_date, t.status, p.name project from tasks t left join projects p on p.id = t.project_id
+    where t.owner_id = any($1::uuid[]) and t.status not in ('done','cancelled','backlog')`, [scope]);
+  const allocAll = await many(db, `select ca.user_id, ca.percent, ca.assumption, ca.start_date::text start_date, ca.end_date::text end_date, p.name project
+    from capacity_allocations ca join projects p on p.id = ca.project_id where ca.user_id = any($1::uuid[])`, [scope]);
   for (const uid of scope) {
-    const u = await one(db, `select u.id, u.name, u.title, d.name department from users u left join departments d on d.id = u.department_id where u.id = $1`, [uid]);
-    const cal = await loadCalendar(db, uid, start, end);
+    const u = people.get(uid) ?? null;
+    const cal = cals.get(uid)!;
     let wd = 0, avail = 0, leaveDays = 0, last = start;
     const daily: { date: string; minutes: number; status: string }[] = [];
     for (const d of eachDate(start, end)) {
@@ -178,10 +191,9 @@ export async function teamCapacity(db: Db, a: Actor, start: string, days = 10) {
       if (c.status === 'leave' || c.status === 'holiday') leaveDays++;
       if (c.availableMinutes > 0) { wd++; avail += c.availableMinutes; last = d; }
     }
-    const open = await many(db, `select t.estimate_minutes, t.due_date, t.status, p.name project from tasks t left join projects p on p.id = t.project_id
-      where t.owner_id = $1 and t.status not in ('done','cancelled','backlog') and (t.due_date is null or t.due_date <= $2)`, [uid, last]);
-    const allocations = await many(db, `select ca.percent, ca.assumption, p.name project from capacity_allocations ca join projects p on p.id = ca.project_id
-      where ca.user_id = $1 and ca.start_date <= $2 and (ca.end_date is null or ca.end_date >= $3)`, [uid, last, start]);
+    const open = openAll.filter((t) => t.owner_id === uid && (t.due_date === null || t.due_date <= last)).map(({ owner_id, ...t }) => t);
+    const allocations = allocAll.filter((x) => x.user_id === uid && x.start_date <= last && (x.end_date === null || x.end_date >= start))
+      .map((x) => ({ percent: x.percent, assumption: x.assumption, project: x.project }));
     const est = open.filter((t) => t.estimate_minutes);
     const estMinutes = est.reduce((s, t) => s + t.estimate_minutes, 0);
     out.push({ user: u, horizon: { start, end: last, workingDays: wd }, availableMinutes: avail, leaveOrHolidayDays: leaveDays, daily,
@@ -191,9 +203,31 @@ export async function teamCapacity(db: Db, a: Actor, start: string, days = 10) {
   return { start, days, people: out, note: 'Load = estimated open commitments ÷ available capacity. Tasks without estimates are not counted — see estimate coverage.' };
 }
 
+/** Groups smaller than this are withheld from leadership-only viewers (same rule as Insights). */
+const MIN_GROUP = 3;
+/**
+ * Which groups to withhold: those under MIN_GROUP people, plus (complementary suppression) the smallest visible groups until the
+ * withheld people number at least MIN_GROUP — otherwise "total minus visible groups" would reveal them.
+ */
+function withheldGroups<K>(groups: { key: K; ids: Set<string> }[]) {
+  const sorted = [...groups].sort((x, y) => x.ids.size - y.ids.size);
+  const withheld = new Set(sorted.filter((g) => g.ids.size < MIN_GROUP).map((g) => g.key));
+  const people = () => new Set(sorted.filter((g) => withheld.has(g.key)).flatMap((g) => [...g.ids])).size;
+  for (const g of sorted) {
+    const n = people();
+    if (n === 0 || n >= MIN_GROUP) break;
+    withheld.add(g.key);
+  }
+  return withheld;
+}
+
 /** Leadership delivery: projects, milestones, lateness, blockers, allocation. Aggregates only — no person ranking. */
 export async function leadershipDelivery(db: Db, a: Actor) {
   if (!has(a, 'leadership') && !has(a, 'routine_admin')) throw forbidden('Leadership view requires the leadership role');
+  // Per-person workload is for the main admin only (alphabetical, never ranked); leadership-only viewers get department aggregates
+  // with small groups withheld. A routine admin without leadership follows the founder-visibility policy.
+  const perPerson = has(a, 'routine_admin');
+  const hideFounders = !has(a, 'leadership') && a.tenantSettings.founders_visible_to_routine_admin === false && !a.isFounder;
   const projects = await many(db, `select p.id, p.key, p.name, p.status, p.target_date, p.business_outcome, p.visibility, c.name customer, d.name department, u.name owner,
       count(t.*) filter (where t.status not in ('done','cancelled'))::int open,
       count(t.*) filter (where t.status = 'done')::int done,
@@ -209,16 +243,62 @@ export async function leadershipDelivery(db: Db, a: Actor) {
     from milestones m join projects p on p.id = m.project_id left join tasks t on t.milestone_id = m.id
     where m.status = 'open' group by m.id, p.name, p.id order by m.due_date nulls last limit 50`);
   const since = DateTime.now().minus({ days: 30 }).toISODate();
-  const allocation = await many(db, `with segs as (select te.*, coalesce(p.name, 'No project') project, coalesce(d.name, 'No department') department,
-        extract(epoch from (coalesce(te.ended_at, now()) - te.started_at)) / 60 minutes
-      from time_entries te left join tasks t on t.id = te.task_id left join projects p on p.id = t.project_id
-      left join users u on u.id = te.user_id left join departments d on d.id = u.department_id
-      where te.deleted_at is null and te.started_at >= $1)
-    select project, department, category, round(sum(minutes))::int minutes from segs group by 1,2,3 order by minutes desc`, [since]);
+  // Confirmed (finished) time only; each person's overlapping entries are counted once, as in every other report.
+  const entries = await many(db, `select te.user_id, te.started_at, te.ended_at, te.source, te.created_at, te.category,
+      coalesce(p.name, 'No project') project, coalesce(d.name, 'No department') department
+    from time_entries te join users u on u.id = te.user_id left join tasks t on t.id = te.task_id left join projects p on p.id = t.project_id
+    left join departments d on d.id = u.department_id
+    where te.deleted_at is null and te.ended_at is not null and te.started_at >= $1 and ($2::boolean = false or u.is_founder = false or u.id = $3)`, [since, hideFounders, a.id]);
+  const byUser = new Map<string, any[]>();
+  for (const e of entries) { const l = byUser.get(e.user_id); if (l) l.push(e); else byUser.set(e.user_id, [e]); }
+  const cells = new Map<string, { project: string; department: string; category: string; minutes: number; ids: Set<string> }>();
+  for (const [uid, list] of byUser) for (const s of primaryEntrySegments(list, Date.now())) {
+    const k = `${s.e.project}\u0000${s.e.department}\u0000${s.e.category}`;
+    const c = cells.get(k) ?? { project: s.e.project, department: s.e.department, category: s.e.category, minutes: 0, ids: new Set<string>() };
+    c.minutes += (s.b - s.a) / 60000; c.ids.add(uid); cells.set(k, c);
+  }
+  const deptGroups = new Map<string, Set<string>>(), projGroups = new Map<string, Set<string>>();
+  for (const c of cells.values()) {
+    for (const [m, key] of [[deptGroups, c.department], [projGroups, c.project]] as const) { const g = m.get(key) ?? new Set<string>(); c.ids.forEach((i) => g.add(i)); m.set(key, g); }
+  }
+  const hiddenDepts = perPerson ? new Set<string>() : withheldGroups([...deptGroups].map(([key, ids]) => ({ key, ids })));
+  const hiddenProjects = perPerson ? new Set<string>() : withheldGroups([...projGroups].map(([key, ids]) => ({ key, ids })));
+  const SMALL_PROJECTS = 'Other projects (combined to protect small groups)', SMALL_DEPTS = 'Other departments (combined to protect small groups)';
+  // Leadership-only viewers get project x category cells and department totals separately (a project x department cell could single someone out).
+  const merged = new Map<string, { project: string; department: string | null; category: string; minutes: number }>();
+  const deptTotals = new Map<string, number>();
+  for (const c of cells.values()) {
+    const project = hiddenProjects.has(c.project) ? SMALL_PROJECTS : c.project;
+    const department = perPerson ? c.department : null;
+    const k = `${project}\u0000${department}\u0000${c.category}`;
+    const row = merged.get(k) ?? { project, department, category: c.category, minutes: 0 };
+    row.minutes += c.minutes; merged.set(k, row);
+    const dk = hiddenDepts.has(c.department) ? SMALL_DEPTS : c.department;
+    deptTotals.set(dk, (deptTotals.get(dk) ?? 0) + c.minutes);
+  }
+  const allocation = [...merged.values()].map((r) => ({ ...r, minutes: Math.round(r.minutes) })).sort((x, y) => y.minutes - x.minutes);
+  const allocationByDepartment = [...deptTotals].map(([department, m]) => ({ department, minutes: Math.round(m) }))
+    .filter((r) => r.department !== SMALL_DEPTS || new Set([...deptGroups].filter(([k]) => hiddenDepts.has(k)).flatMap(([, ids]) => [...ids])).size >= MIN_GROUP)
+    .sort((x, y) => y.minutes - x.minutes);
   const blockerPatterns = await many(db, `select cause, count(*)::int open, round(avg(extract(epoch from now() - raised_at) / 3600))::int avg_age_hours
     from blockers where resolved_at is null group by cause order by open desc`);
-  const concentration = await many(db, `select u.name, count(*)::int open_tasks, coalesce(sum(t.estimate_minutes), 0)::int estimate
-    from tasks t join users u on u.id = t.owner_id where t.status not in ('done','cancelled','backlog') group by u.name order by open_tasks desc limit 10`);
+  const workload = await many(db, `select u.id, u.name, coalesce(d.name, 'No department') department, count(t.id)::int open_tasks, coalesce(sum(t.estimate_minutes), 0)::int estimate
+    from users u left join departments d on d.id = u.department_id
+    left join tasks t on t.owner_id = u.id and t.status not in ('done','cancelled','backlog')
+    where u.status = 'active' and not ('customer' = any(u.roles)) and ($1::boolean = false or u.is_founder = false or u.id = $2)
+    group by u.id, u.name, d.name`, [hideFounders, a.id]);
+  // Open work per person (main admin only), alphabetical: a picture of where work sits, not a ranking.
+  const concentration = perPerson ? workload.filter((w) => w.open_tasks > 0).map(({ name, open_tasks, estimate }) => ({ name, open_tasks, estimate }))
+    .sort((x, y) => x.name.localeCompare(y.name)) : [];
+  const wGroups = new Map<string, { ids: Set<string>; open_tasks: number; estimate: number }>();
+  for (const w of workload) { const g = wGroups.get(w.department) ?? { ids: new Set<string>(), open_tasks: 0, estimate: 0 }; g.ids.add(w.id); g.open_tasks += w.open_tasks; g.estimate += w.estimate; wGroups.set(w.department, g); }
+  const hiddenW = perPerson ? new Set<string>() : withheldGroups([...wGroups].map(([key, g]) => ({ key, ids: g.ids })));
+  const workloadByDepartment = [...wGroups].filter(([k]) => !hiddenW.has(k)).map(([department, g]) => ({ department, people: g.ids.size, open_tasks: g.open_tasks, estimate: g.estimate }))
+    .sort((x, y) => x.department.localeCompare(y.department));
+  const hiddenWl = [...wGroups].filter(([k]) => hiddenW.has(k)).map(([, g]) => g);
+  const hiddenPeople = hiddenWl.reduce((n, g) => n + g.ids.size, 0);
+  if (hiddenPeople >= MIN_GROUP) workloadByDepartment.push({ department: SMALL_DEPTS, people: hiddenPeople,
+    open_tasks: hiddenWl.reduce((n, g) => n + g.open_tasks, 0), estimate: hiddenWl.reduce((n, g) => n + g.estimate, 0) });
   const objectives = await many(db, `select o.id, o.title, o.status, o.period_end, u.name owner,
       (select count(*) from milestones m where m.objective_id = o.id)::int milestones,
       (select count(*) from milestones m where m.objective_id = o.id and m.status = 'done')::int milestones_done
@@ -231,8 +311,10 @@ export async function leadershipDelivery(db: Db, a: Actor) {
       from time_entries te join rates r on r.user_id = te.user_id left join tasks t on t.id = te.task_id left join projects p on p.id = t.project_id
       where te.deleted_at is null and te.ended_at is not null and te.started_at >= $1 group by 1, 2 order by cost desc`, [since]);
   }
-  return { projects, milestones, allocation, allocationSince: since, blockerPatterns, workloadConcentration: concentration, objectives, cost,
-    note: 'Declared allocation comes from confirmed time entries; unknown time is not shown as unproductive. Workload concentration lists open work, not performance.' };
+  return { projects, milestones, allocation, allocationByDepartment, allocationSince: since, blockerPatterns, workloadConcentration: concentration, workloadByDepartment,
+    smallGroupsWithheld: !perPerson && (hiddenDepts.size + hiddenProjects.size + hiddenW.size) > 0, objectives, cost,
+    note: 'Declared allocation comes from confirmed time entries (overlaps counted once); unknown time is not shown as unproductive. Workload lists open work, not performance, and is never ranked.'
+      + (perPerson ? '' : ` Groups with fewer than ${MIN_GROUP} people are combined or withheld so individuals cannot be identified.`) };
 }
 
 /** Customer portal: only customer-visible tasks of projects belonging to the viewer's customer. */

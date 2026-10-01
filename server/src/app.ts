@@ -93,7 +93,8 @@ export async function buildApp() {
   app.get('/api/health', async () => {
     const db = await withSystem((db) => one(db, `select now() as now`));
     const q = await withSystem((db) => one(db, `select count(*) filter (where status = 'queued' and run_at <= now())::int ready,
-      count(*) filter (where status = 'dead')::int dead, extract(epoch from now() - min(run_at) filter (where status = 'queued' and run_at <= now()))::int oldest_age_s from jobs`));
+      count(*) filter (where status = 'dead')::int dead, extract(epoch from now() - min(run_at) filter (where status = 'queued' and run_at <= now()))::int oldest_age_s
+      from jobs where status in ('queued','dead')`));
     return { ok: true, db: !!db, queue: q };
   });
 

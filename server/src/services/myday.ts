@@ -8,6 +8,7 @@ import { type Actor, loadVisibleTask, isStaff } from './access.js';
 import { dayCapacity, loadCalendar, localDayBounds, localToday } from './calendar.js';
 import { allocateDay, buildReport } from './analytics.js';
 import { notify } from './notify.js';
+import { emitTaskEvent } from './events.js';
 
 const TASK_COLS = `t.id, t.number, t.title, t.status, t.priority, t.due_date, t.estimate_minutes, t.category, t.owner_id, t.version,
   t.requires_review, t.requires_evidence, t.project_id, p.name project_name, p.key project_key`;
@@ -78,8 +79,13 @@ export async function setPlan(db: Db, a: Actor, date: string, taskIds: string[],
     if (k) await db.query(`update daily_plan_items set position = $2 where id = $1`, [k.id, i + 1]);
     else await db.query(`insert into daily_plan_items (tenant_id, plan_id, task_id, position) values ($1,$2,$3,$4)`, [a.tenantId, plan.id, uniq[i], i + 1]);
   }
-  // Planning a task for today moves Backlog items to Planned (one less click).
-  await db.query(`update tasks set status = 'planned', version = version + 1, updated_at = now() where id = any($1::uuid[]) and status = 'backlog'`, [uniq]);
+  // Planning a task for today moves Backlog items to Planned (one less click) — a real transition: history row and task event.
+  const moved = await many(db, `update tasks set status = 'planned', version = version + 1, updated_at = now() where id = any($1::uuid[]) and status = 'backlog' returning *`, [uniq]);
+  for (const row of moved) {
+    await db.query(`insert into task_state_history (tenant_id, task_id, from_status, to_status, actor_id, reason) values ($1,$2,'backlog','planned',$3,'Added to My Day plan')`,
+      [a.tenantId, row.id, a.id]);
+    await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: row, from: 'backlog', to: 'planned' });
+  }
   await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'plan.set', resourceType: 'daily_plan', resourceId: plan.id,
     details: { date, count: uniq.length, removed: removed.length }, reason: removed.length ? reason ?? 'Replanned' : null });
   return plan;
@@ -96,9 +102,10 @@ export async function startTimer(db: Db, a: Actor, taskId: string | null, catego
   if (taskId) {
     const t = await one(db, `select * from tasks where id = $1`, [taskId]);
     if (t && ['planned', 'backlog'].includes(t.status) && t.owner_id === a.id) {
-      await db.query(`update tasks set status = 'in_progress', started_at = coalesce(started_at, now()), version = version + 1, updated_at = now() where id = $1`, [taskId]);
+      const moved = await one(db, `update tasks set status = 'in_progress', started_at = coalesce(started_at, now()), version = version + 1, updated_at = now() where id = $1 returning *`, [taskId]);
       await db.query(`insert into task_state_history (tenant_id, task_id, from_status, to_status, actor_id, reason) values ($1,$2,$3,'in_progress',$4,'Timer started')`,
         [a.tenantId, taskId, t.status, a.id]);
+      await emitTaskEvent(db, a, { type: 'task.status_changed', tenantId: a.tenantId, actorId: a.id, task: moved, from: t.status, to: 'in_progress' });
     }
   }
   return row;

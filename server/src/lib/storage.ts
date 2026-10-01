@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
@@ -18,4 +18,8 @@ export async function readStored(file: { storage_key: string; sha256: string }) 
   const data = await readFile(join(config.storageDir, file.storage_key));
   if (sha256(data) !== file.sha256) throw new Error('Stored file failed integrity check');
   return data;
+}
+/** Remove a stored object from disk (after its row is deleted). A file that is already gone is fine. */
+export async function removeStored(storageKey: string) {
+  await rm(join(config.storageDir, storageKey), { force: true });
 }

@@ -38,7 +38,7 @@ export async function integrationRoutes(app: FastifyInstance) {
       where connection_id = $1 order by received_at desc limit 100`, [c.id]);
   }));
   app.post('/api/integrations/events/:id/reprocess', async (req) => tx(req, async (db, a) => { await reprocessEvent(db, a, (req.params as any).id); return { ok: true }; }));
-  app.post('/api/integrations/:id/ics', async (req) => tx(req, async (db, a) => {
+  app.post('/api/integrations/:id/ics', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req) => tx(req, async (db, a) => {
     const { ics } = z.object({ ics: z.string().min(10).max(5_000_000) }).parse(req.body);
     return importIcs(db, a, (req.params as any).id, ics);
   }));

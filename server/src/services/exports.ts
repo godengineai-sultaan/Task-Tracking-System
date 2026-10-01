@@ -76,6 +76,12 @@ export async function generateExport(db: Db, exportId: string) {
 }
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
+/** The export job gave up: record why, so the request shows as failed instead of queued. */
+export async function markExportFailed(db: Db, exportId: string, error: string) {
+  await db.query(`update exports set status = 'failed', error = $2, completed_at = now() where id = $1 and status <> 'ready'`,
+    [exportId, `The report could not be generated: ${error}`.slice(0, 1000)]);
+}
+
 // ---------- CSV ----------
 export function csvCell(v: unknown) {
   let s = v === null || v === undefined ? '' : String(v);
@@ -147,7 +153,7 @@ export function toPdf(report: string, d: any, a: Actor, brand?: PdfBrand): Promi
       h2('Bottlenecks');
       if (!d.blockers.length) p('No blockers recorded.');
       d.blockers.slice(0, 20).forEach((b: any) => p(`• ${b.task}: ${b.reason} [${b.cause}] waiting on ${b.waitingOn || '—'}${b.resolvedAt ? ' (resolved)' : ''}`));
-      if (d.trend) { h2('Trend vs previous period'); p(`Commitment completion ${pctv(d.trend.plannedCommitmentCompletion.previous)} to ${pctv(d.trend.plannedCommitmentCompletion.current)}; coverage ${pctv(d.trend.loggingCoverage.previous)} to ${pctv(d.trend.loggingCoverage.current)}; blocked ${hm(d.trend.blockedMinutes.previous)} to ${hm(d.trend.blockedMinutes.current)}.`); p(d.trend.note, '#6b7280'); }
+      if (d.trend && d.trend.status !== 'not_applicable') { h2('Trend vs previous period'); p(`Commitment completion ${pctv(d.trend.plannedCommitmentCompletion.previous)} to ${pctv(d.trend.plannedCommitmentCompletion.current)}; coverage ${pctv(d.trend.loggingCoverage.previous)} to ${pctv(d.trend.loggingCoverage.current)}; blocked ${hm(d.trend.blockedMinutes.previous)} to ${hm(d.trend.blockedMinutes.current)}.`); p(d.trend.note, '#6b7280'); }
       h2('Recommendations');
       if (!d.recommendations.length) p('No actions suggested.');
       d.recommendations.forEach((r: any) => p(`> ${r.text}`));

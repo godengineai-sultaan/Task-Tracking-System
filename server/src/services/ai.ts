@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import * as z from 'zod/v4';
 import type { Db } from '../lib/db.js';
-import { one } from '../lib/db.js';
+import { one, withTenant } from '../lib/db.js';
 import { config } from '../lib/config.js';
 import { audit } from '../lib/audit.js';
 import { AppError, badRequest, forbidden } from '../lib/errors.js';
@@ -61,14 +61,19 @@ function getClient() {
   return client;
 }
 
-async function run<T>(db: Db, a: Actor, feature: 'task_draft' | 'recap_draft', schema: z.ZodType<T>, userContent: string, sourceRefs: object[]) {
+/**
+ * The model call runs with no database transaction open (a slow provider must not hold a pool connection); the outcome is
+ * recorded afterwards in its own transaction, so failed runs stay in the accountability log too.
+ */
+async function run<T>(a: Actor, feature: 'task_draft' | 'recap_draft', schema: z.ZodType<T>, userContent: string, sourceRefs: object[]) {
   if (!isStaff(a)) throw forbidden();
   const st = aiStatus(a);
   if (!st.available) throw new AppError(503, 'ai_unavailable', st.note);
   const p = PROMPTS[feature];
   const started = Date.now();
+  let response: any, parsed: T | null;
   try {
-    const response = await getClient().messages.parse({
+    response = await getClient().messages.parse({
       model: config.aiModel,
       max_tokens: 4000,
       system: p.system,
@@ -76,29 +81,36 @@ async function run<T>(db: Db, a: Actor, feature: 'task_draft' | 'recap_draft', s
       messages: [{ role: 'user', content: userContent }],
     });
     if (response.stop_reason === 'refusal') throw new Error('The model declined this request');
-    const parsed = response.parsed_output as T | null;
+    parsed = response.parsed_output as T | null;
     if (!parsed) throw new Error(`No structured output (stop_reason: ${response.stop_reason})`);
-    const row = await one(db, `insert into ai_runs (tenant_id, user_id, feature, prompt_version, model, source_refs, output, status, latency_ms, input_tokens, output_tokens)
-      values ($1,$2,$3,$4,$5,$6,$7,'succeeded',$8,$9,$10) returning id`,
-      [a.tenantId, a.id, feature, p.version, response.model, JSON.stringify(sourceRefs), parsed, Date.now() - started, response.usage.input_tokens, response.usage.output_tokens]);
-    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: `ai.${feature}`, resourceType: 'ai_run', resourceId: row.id, details: { prompt: p.version, model: response.model } });
-    return { runId: row.id as string, draft: parsed, promptVersion: p.version, model: response.model, sources: sourceRefs };
   } catch (e: any) {
-    await db.query(`insert into ai_runs (tenant_id, user_id, feature, prompt_version, model, source_refs, status, error, latency_ms)
-      values ($1,$2,$3,$4,$5,$6,'failed',$7,$8)`, [a.tenantId, a.id, feature, p.version, config.aiModel, JSON.stringify(sourceRefs), String(e?.message ?? e).slice(0, 500), Date.now() - started]);
+    await withTenant(a.tenantId, (db) => db.query(`insert into ai_runs (tenant_id, user_id, feature, prompt_version, model, source_refs, status, error, latency_ms)
+      values ($1,$2,$3,$4,$5,$6,'failed',$7,$8)`, [a.tenantId, a.id, feature, p.version, config.aiModel, JSON.stringify(sourceRefs), String(e?.message ?? e).slice(0, 500), Date.now() - started]));
     if (e instanceof AppError) throw e;
     const status = e instanceof Anthropic.RateLimitError ? 429 : e instanceof Anthropic.APIError ? 502 : 502;
     throw new AppError(status, 'ai_failed', `AI draft failed: ${e?.message ?? 'unknown error'}. You can continue without it.`);
   }
+  const row = await withTenant(a.tenantId, async (db) => {
+    const r = await one(db, `insert into ai_runs (tenant_id, user_id, feature, prompt_version, model, source_refs, output, status, latency_ms, input_tokens, output_tokens)
+      values ($1,$2,$3,$4,$5,$6,$7,'succeeded',$8,$9,$10) returning id`,
+      [a.tenantId, a.id, feature, p.version, response.model, JSON.stringify(sourceRefs), parsed, Date.now() - started, response.usage.input_tokens, response.usage.output_tokens]);
+    await audit(db, { tenantId: a.tenantId, actorId: a.id, action: `ai.${feature}`, resourceType: 'ai_run', resourceId: r.id, details: { prompt: p.version, model: response.model } });
+    return r;
+  });
+  return { runId: row.id as string, draft: parsed!, promptVersion: p.version, model: response.model as string, sources: sourceRefs };
 }
 
-export async function draftTask(db: Db, a: Actor, note: string, today: string) {
+export async function draftTask(a: Actor, note: string, today: string) {
   if (!note?.trim() || note.length > 4000) throw badRequest('Provide a note of up to 4000 characters');
-  return run(db, a, 'task_draft', TaskDraft, `Today is ${today}.\n<note>\n${note}\n</note>`, [{ type: 'note', chars: note.length }]);
+  return run(a, 'task_draft', TaskDraft, `Today is ${today}.\n<note>\n${note}\n</note>`, [{ type: 'note', chars: note.length }]);
 }
 
-export async function draftRecap(db: Db, a: Actor, date: string) {
-  const r = await buildReport(db, a.id, 'day', date, date);
+export async function draftRecap(a: Actor, date: string) {
+  if (!isStaff(a)) throw forbidden();
+  const st = aiStatus(a);
+  if (!st.available) throw new AppError(503, 'ai_unavailable', st.note);
+  // Facts are read in a short transaction of their own; the model call below runs with none open.
+  const r = await withTenant(a.tenantId, (db) => buildReport(db, a.id, 'day', date, date));
   const d: any = r.days[0];
   const facts = {
     date, availableMinutes: d.capacity.availableMinutes, confirmedMinutes: d.time.explainedMinutes, unknownMinutes: d.time.unknownMinutes, byCategory: d.time.byCategory,
@@ -108,7 +120,7 @@ export async function draftRecap(db: Db, a: Actor, date: string) {
     scopeChanges: d.scopeChanges.map((s: any) => ({ task_id: s.taskId, title: s.title, reason: s.reason })),
   };
   const ids = new Set<string>([...facts.intendedOutcomes, ...facts.accepted, ...facts.blockers, ...facts.scopeChanges].map((x: any) => x.task_id));
-  const out = await run(db, a, 'recap_draft', RecapDraft, `<records>\n${JSON.stringify(facts)}\n</records>`, [...ids].map((id) => ({ type: 'task', id })));
+  const out = await run(a, 'recap_draft', RecapDraft, `<records>\n${JSON.stringify(facts)}\n</records>`, [...ids].map((id) => ({ type: 'task', id })));
   // Drop any citation that is not one of the provided records.
   out.draft.cited_task_ids = out.draft.cited_task_ids.filter((id) => ids.has(id));
   return out;

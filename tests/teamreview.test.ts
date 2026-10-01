@@ -16,6 +16,8 @@ const allKeys = (v: any, out = new Set<string>()): Set<string> => {
 
 beforeAll(async () => {
   org = await makeOrg();
+  // These people have worked here for a while: their records start before the periods reviewed below.
+  await withOwner((db) => db.query(`update users set created_at = now() - interval '1 year' where tenant_id = $1`, [org.tenantId]));
   [admin, mgr, emp, emp2, outsider, founder] = await Promise.all(['admin', 'manager', 'emp', 'emp2', 'outsider', 'founder'].map((k) => login(org, k)));
   week = DateTime.now().setZone(org.tz).minus({ days: 7 }).startOf('week').toISODate()!;
   day = (n: number) => DateTime.fromISO(week).plus({ days: n }).toISODate()!;

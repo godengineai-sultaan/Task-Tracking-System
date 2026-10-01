@@ -11,7 +11,7 @@ import { many, one } from '../../lib/db.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { type Actor, has } from '../access.js';
 import { allocateDay } from '../analytics.js';
-import { dayCapacity, eachDate, localToday, type CalendarData } from '../calendar.js';
+import { dayCapacity, eachDate, loadCalendars, localToday, type CalendarData } from '../calendar.js';
 import { registerExportReport } from '../exports.js';
 import { buildObservations, insightsCsv } from './orgdashRules.js';
 
@@ -44,8 +44,9 @@ export const INSIGHT_DEFINITIONS = {
   reworkRate: { label: 'Rework rate', direction: 'down', definition: 'Accepted outcomes that were reopened or had changes requested before acceptance, divided by accepted outcomes.' },
   wip: { label: 'Work in progress', direction: 'neutral', definition: 'Tasks In Progress, In Review or Blocked at the end of each week, from the recorded status history (attributed to the current owner).' },
   meetingShare: { label: 'Meeting load', direction: 'neutral', definition: 'Confirmed meeting time inside scheduled hours divided by available time.' },
-  focusShare: { label: 'Focus time', direction: 'neutral', definition: `Confirmed task time in uninterrupted blocks of at least ${FOCUS_BLOCK_MIN} minutes (no overlapping meeting) inside scheduled hours, divided by available time. A lower bound: unrecorded time is not counted either way.` },
-  estimateAccuracy: { label: 'Estimate accuracy', direction: 'neutral', definition: 'For accepted outcomes with an estimate and confirmed task time: total confirmed time divided by total estimate (1.0x = as estimated). Coverage shows how many accepted outcomes qualified.' },
+  // Named differently from the personal Trends "Focus time" (one task, short gaps tolerated): this counts any task time without a break or meeting.
+  focusShare: { label: 'Uninterrupted task time', direction: 'neutral', definition: `Confirmed task time (on any tasks) in unbroken stretches of at least ${FOCUS_BLOCK_MIN} minutes with no overlapping meeting, inside scheduled hours, divided by available time. Unlike personal Trends focus time, switching between tasks does not break a stretch, and any gap does. A lower bound: unrecorded time is not counted either way.` },
+  estimateAccuracy: { label: 'Estimate accuracy', direction: 'neutral', definition: 'For accepted outcomes with an estimate and confirmed task time from their owner: the owner\'s confirmed time on the task (overlaps counted once) divided by the estimate, totalled (1.0x = as estimated). Collaborators\' time is not included. Coverage shows how many accepted outcomes qualified.' },
   workload: { label: 'Workload', direction: 'neutral', definition: `Estimated minutes of open owned work (not Backlog) that is undated or due within each person's next ${HORIZON_WORKING_DAYS} working days, divided by their available minutes in that horizon. This is load, not performance.` },
 } as const;
 
@@ -219,32 +220,15 @@ async function loadUsers(db: Db, ids: string[]) {
     from users u join tenants tn on tn.id = u.tenant_id left join departments d on d.id = u.department_id where u.id = any($1::uuid[])`, [ids]);
 }
 
-async function loadCalendars(db: Db, users: any[], from: string, to: string) {
-  const ids = users.map((u) => u.id);
-  const [schedules, holidays, leave] = await Promise.all([
-    many(db, `select user_id, weekday, start_minute, end_minute, break_minutes from work_schedules where user_id is null or user_id = any($1::uuid[])`, [ids]),
-    many(db, `select date::text as date, name from holidays where date between $1 and $2`, [from, to]),
-    many(db, `select user_id, start_date::text as start_date, end_date::text as end_date, portion, kind from leave_entries
-      where user_id = any($1::uuid[]) and start_date <= $3 and end_date >= $2`, [ids, from, to]),
-  ]);
-  const hol = new Map(holidays.map((h) => [h.date, h.name]));
-  const def = schedules.filter((s) => !s.user_id);
-  const cals = new Map<string, CalendarData>();
-  for (const u of users) {
-    const own = schedules.filter((s) => s.user_id === u.id);
-    cals.set(u.id, { timezone: u.tz, schedule: new Map((own.length ? own : def).map((r) => [r.weekday, r])), holidays: hol, leave: leave.filter((l) => l.user_id === u.id) });
-  }
-  return cals;
-}
-
-async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData>, p: ReturnType<typeof resolvePeriod>, tz: string, today: string, now: number, snapshotKeys: string[], projectId: string | null): Promise<Raw> {
+async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData & { scheduleKey: string }>, p: ReturnType<typeof resolvePeriod>, tz: string, today: string, now: number, snapshotKeys: string[], projectId: string | null): Promise<Raw> {
   const ids = users.map((u) => u.id);
   const from = p.prevStart, to = p.end;
   const t0 = localMidnight(tz, from), t1 = Math.min(localMidnight(tz, addDays(to, 1)), now);
   const dayLimit = to < today ? to : addDays(today, -1);
   const margin = 86400000 * 2;
-  const snapshotAts = snapshotKeys.map((k) => new Date(Math.min(localMidnight(tz, addDays(k, 1)), now)));
-  const [entries, recaps, plans, accepted, deadlines, blockers, wipRows] = await Promise.all([
+  const snapshots = snapshotKeys.map((k) => ({ key: k, at: Math.min(localMidnight(tz, addDays(k, 1)), now) })).sort((x, y) => x.at - y.at);
+  const firstSnap = new Date(snapshots[0]?.at ?? now), lastSnap = new Date(snapshots[snapshots.length - 1]?.at ?? now);
+  const [entries, recaps, plans, accepted, deadlines, blockers, wipBase, wipChanges, starts] = await Promise.all([
     many(db, `select id, user_id, category, source, started_at, ended_at, created_at from time_entries
       where user_id = any($1::uuid[]) and deleted_at is null and started_at < $3 and coalesce(ended_at, now()) > $2 order by started_at`,
       [ids, new Date(t0 - margin), new Date(localMidnight(tz, addDays(to, 1)) + margin)]),
@@ -257,10 +241,7 @@ async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData>, p:
       join users u on u.id = dp.user_id join tasks t on t.id = dpi.task_id
       where dp.user_id = any($1::uuid[]) and dp.date between $2 and $3 and ($5::uuid is null or t.project_id = $5)
       group by dp.user_id, dp.date`, [ids, from, to, tz, projectId]),
-    many(db, `select t.owner_id, t.category, t.estimate_minutes, t.started_at, t.accepted_at,
-        coalesce((select sum(extract(epoch from (te.ended_at - te.started_at))) / 60 from time_entries te
-          where te.task_id = t.id and te.deleted_at is null and te.ended_at is not null), 0)::float8 actual_minutes,
-        (select count(*) from time_entries te where te.task_id = t.id and te.deleted_at is null and te.ended_at is not null)::int entries,
+    many(db, `select t.id, t.owner_id, t.category, t.estimate_minutes, t.started_at, t.accepted_at,
         (exists (select 1 from task_state_history h where h.task_id = t.id and h.from_status in ('done','in_review')
             and h.to_status in ('in_progress','planned','backlog') and h.at <= t.accepted_at)
           or exists (select 1 from task_reviews r where r.task_id = t.id and r.decision = 'changes_requested' and r.created_at <= t.accepted_at)) reworked
@@ -276,16 +257,33 @@ async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData>, p:
     many(db, `select t.owner_id, b.cause, b.raised_at, b.resolved_at from blockers b join tasks t on t.id = b.task_id
       where t.owner_id = any($1::uuid[]) and b.raised_at < $3 and coalesce(b.resolved_at, now()) > $2
         and ($4::uuid is null or t.project_id = $4)`, [ids, new Date(t0), new Date(t1), projectId]),
-    many(db, `select w.key, s.owner_id,
-        count(*) filter (where s.to_status in ('in_progress','in_review','blocked'))::int wip,
-        count(*) filter (where s.to_status = 'blocked')::int blocked, count(*) filter (where s.to_status = 'in_review')::int in_review
-      from unnest($2::text[], $3::timestamptz[]) as w(key, at)
-      cross join lateral (
-        select distinct on (h.task_id) h.task_id, t.owner_id, h.to_status from task_state_history h join tasks t on t.id = h.task_id
-        where t.owner_id = any($1::uuid[]) and h.at < w.at and ($4::uuid is null or t.project_id = $4)
-        order by h.task_id, h.at desc, h.id desc) s
-      group by w.key, s.owner_id`, [ids, snapshotKeys, snapshotAts, projectId]),
+    // Work in progress at each week end in one ordered pass: each task's status before the first snapshot, then the changes since
+    // (instead of re-scanning and re-sorting all history once per snapshot).
+    many(db, `select distinct on (h.task_id) h.task_id, t.owner_id, h.to_status from task_state_history h join tasks t on t.id = h.task_id
+      where t.owner_id = any($1::uuid[]) and h.at < $2 and ($3::uuid is null or t.project_id = $3) order by h.task_id, h.at desc, h.id desc`, [ids, firstSnap, projectId]),
+    many(db, `select h.task_id, t.owner_id, h.to_status, h.at from task_state_history h join tasks t on t.id = h.task_id
+      where t.owner_id = any($1::uuid[]) and h.at >= $2 and h.at < $3 and ($4::uuid is null or t.project_id = $4) order by h.at, h.id`, [ids, firstSnap, lastSnap, projectId]),
+    // Days before a person's records begin (account, time, plan or recap) are not working days to compare: they are not "unknown time".
+    many(db, `select u.id, least((u.created_at at time zone coalesce(u.timezone, tn.timezone))::date,
+        (select (min(te.started_at) at time zone coalesce(u.timezone, tn.timezone))::date from time_entries te where te.user_id = u.id and te.deleted_at is null),
+        (select min(dp.date) from daily_plans dp where dp.user_id = u.id), (select min(dr.date) from daily_reviews dr where dr.user_id = u.id))::text records_start
+      from users u join tenants tn on tn.id = u.tenant_id where u.id = any($1::uuid[])`, [ids]),
   ]);
+  // Estimate actuals: the owner's own confirmed time on each accepted task, overlaps merged (as personal Trends), in one grouped query.
+  const ownerTime = accepted.length ? await many(db, `select te.task_id, te.started_at, te.ended_at from time_entries te join tasks t on t.id = te.task_id
+    where te.task_id = any($1::uuid[]) and te.user_id = t.owner_id and te.deleted_at is null and te.ended_at is not null`, [accepted.map((t) => t.id)]) : [];
+  const timeBy = new Map<string, Iv[]>();
+  for (const e of ownerTime) { const l = timeBy.get(e.task_id) ?? []; l.push([e.started_at.getTime(), e.ended_at.getTime()]); timeBy.set(e.task_id, l); }
+  const recordsStart = new Map(starts.map((r) => [r.id as string, r.records_start as string]));
+  // Most people share the organization timezone and default schedule: compute each day's capacity once per (timezone, schedule).
+  const capCache = new Map<string, ReturnType<typeof dayCapacity>>(), midCache = new Map<string, number>();
+  const midnight = (z: string, d: string) => { const k = `${z}|${d}`; let v = midCache.get(k); if (v === undefined) { v = localMidnight(z, d); midCache.set(k, v); } return v; };
+  const capacityOf = (cal: CalendarData & { scheduleKey: string }, d: string) => {
+    if (cal.leave.length) return dayCapacity(cal, d);
+    const k = `${cal.timezone}|${cal.scheduleKey}|${d}`;
+    let v = capCache.get(k); if (!v) { v = dayCapacity(cal, d); capCache.set(k, v); }
+    return v;
+  };
 
   const recapSet = new Set(recaps.map((r) => `${r.user_id}|${r.date}`));
   const planMap = new Map(plans.map((r) => [`${r.user_id}|${r.date}`, r]));
@@ -297,10 +295,11 @@ async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData>, p:
     for (const u of users) {
       const cal = cals.get(u.id)!;
       const ues = byUser.get(u.id) ?? [];
+      const startsOn = recordsStart.get(u.id) ?? from;
       for (const d of eachDate(from, dayLimit)) {
-        const cap = dayCapacity(cal, d);
-        if (cap.availableMinutes <= 0) { personDays.push({ userId: u.id, date: d, working: false, available: 0, explained: 0, byCat: zero(), focus: 0, recap: false, intended: 0, acceptedPlanned: 0 }); continue; }
-        const ds = localMidnight(u.tz, d), de = localMidnight(u.tz, addDays(d, 1));
+        const cap = capacityOf(cal, d);
+        if (cap.availableMinutes <= 0 || d < startsOn) { personDays.push({ userId: u.id, date: d, working: false, available: 0, explained: 0, byCat: zero(), focus: 0, recap: false, intended: 0, acceptedPlanned: 0 }); continue; }
+        const ds = midnight(u.tz, d), de = midnight(u.tz, addDays(d, 1));
         const dayEntries = ues.filter((e) => e.started_at.getTime() < de && (e.ended_at ? e.ended_at.getTime() : now) > ds);
         const alloc = allocateDay(dayEntries, cap, ds, de, now);
         const plan = planMap.get(`${u.id}|${d}`);
@@ -311,11 +310,22 @@ async function loadRaw(db: Db, users: any[], cals: Map<string, CalendarData>, p:
     }
   }
   const wip = new Map(snapshotKeys.map((k) => [k, new Map<string, { wip: number; blocked: number; inReview: number }>()]));
-  for (const r of wipRows) wip.get(r.key)!.set(r.owner_id, { wip: r.wip, blocked: r.blocked, inReview: r.in_review });
+  const state = new Map<string, { owner: string; status: string }>(wipBase.map((r) => [r.task_id, { owner: r.owner_id, status: r.to_status }]));
+  let ci = 0;
+  for (const snap of snapshots) {
+    while (ci < wipChanges.length && wipChanges[ci].at.getTime() < snap.at) { const c = wipChanges[ci++]; state.set(c.task_id, { owner: c.owner_id, status: c.to_status }); }
+    const per = wip.get(snap.key)!;
+    for (const { owner, status } of state.values()) {
+      if (!['in_progress', 'in_review', 'blocked'].includes(status)) continue;
+      const v = per.get(owner) ?? { wip: 0, blocked: 0, inReview: 0 };
+      v.wip++; if (status === 'blocked') v.blocked++; if (status === 'in_review') v.inReview++;
+      per.set(owner, v);
+    }
+  }
   return {
     now, personDays, wip,
     accepted: accepted.map((t) => ({ ownerId: t.owner_id, at: t.accepted_at.getTime(), category: t.category, startedAt: t.started_at ? t.started_at.getTime() : null,
-      estimate: t.estimate_minutes, actual: t.actual_minutes, entries: t.entries, reworked: t.reworked })),
+      estimate: t.estimate_minutes, actual: union(timeBy.get(t.id) ?? []).reduce((m, [a, b]) => m + (b - a) / 60000, 0), entries: (timeBy.get(t.id) ?? []).length, reworked: t.reworked })),
     deadlines: deadlines.map((r) => ({ ownerId: r.owner_id, date: r.date, met: r.met, late: r.late, overdue: r.overdue, open: r.open })),
     blockers: blockers.map((b) => ({ ownerId: b.owner_id, cause: b.cause, raised: b.raised_at.getTime(), resolved: b.resolved_at ? b.resolved_at.getTime() : null })),
   };

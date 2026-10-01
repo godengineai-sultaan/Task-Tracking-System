@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { tx } from '../app.js';
+import { actorOf, tx } from '../app.js';
 import { many, one } from '../lib/db.js';
 import { badRequest } from '../lib/errors.js';
 import { assertCanViewPerson, requireStaff } from '../services/access.js';
@@ -85,8 +85,9 @@ export async function myDayRoutes(app: FastifyInstance) {
   app.get('/api/suggestions', async (req) => tx(req, (db, a) => many(db, `select * from suggestions where user_id = $1 and status = 'open' order by created_at desc`, [a.id])));
 
   // Optional AI drafts (proposals only)
-  app.post('/api/ai/task-draft', async (req) => tx(req, (db, a) => draftTask(db, a, z.object({ note: z.string() }).parse(req.body).note, localToday(a.timezone))));
-  app.post('/api/ai/recap-draft', async (req) => tx(req, (db, a) => draftRecap(db, a, z.object({ date }).parse(req.body).date)));
+  // No transaction around the model call: the drafts open their own short transactions before and after it.
+  app.post('/api/ai/task-draft', async (req) => { const a = actorOf(req); return draftTask(a, z.object({ note: z.string() }).parse(req.body).note, localToday(a.timezone)); });
+  app.post('/api/ai/recap-draft', async (req) => draftRecap(actorOf(req), z.object({ date }).parse(req.body).date));
   app.post('/api/ai/runs/:id/decision', async (req) => tx(req, async (db, a) => {
     await recordDecision(db, a, (req.params as any).id, z.object({ decision: z.enum(['accepted', 'edited', 'rejected']) }).parse(req.body).decision);
     return { ok: true };

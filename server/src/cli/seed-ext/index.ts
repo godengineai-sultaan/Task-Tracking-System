@@ -1,7 +1,7 @@
 import type { SeedCtx } from './types.js';
 import planning from './planning.js';
 import templates from './templates.js';
-import automation from './automation.js';
+import automation, { seedAutomationHistory } from './automation.js';
 import escalation from './escalation.js';
 import teamreview from './teamreview.js';
 import objectives from './objectives.js';
@@ -23,6 +23,7 @@ export async function seedExtensions(ctx: SeedCtx) {
   await templates(ctx);
   await automation(ctx);
   await escalation(ctx);
+  await seedAutomationHistory(ctx); // names a task the escalation fixtures blocked
   await teamreview(ctx);
   await objectives(ctx);
   await whatif(ctx);

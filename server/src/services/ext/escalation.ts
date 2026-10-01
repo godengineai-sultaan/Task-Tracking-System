@@ -6,7 +6,7 @@ import { audit } from '../../lib/audit.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { notify } from '../notify.js';
 import { type Actor, assertContribute, canContribute, has, isStaff, loadVisibleTask } from '../access.js';
-import { type CalendarData, dayCapacity, loadCalendar, localDayBounds, localToday } from '../calendar.js';
+import { type CalendarData, dayCapacity, loadCalendarsFor, localDayBounds, localToday } from '../calendar.js';
 
 /**
  * Smart blocker escalation. Ages are counted in the blocker owner's working days (their schedule,
@@ -166,7 +166,7 @@ async function calendarsFor(db: Db, rows: any[], today?: string) {
   const cals = new Map<string, CalendarData>();
   const from = DateTime.fromJSDate(rows.reduce((m, r) => (r.raised_at < m ? r.raised_at : m), new Date())).minus({ days: 2 }).toISODate()!;
   const to = DateTime.fromISO(today ?? DateTime.utc().toISODate()!).plus({ days: 200 }).toISODate()!;
-  for (const ownerId of new Set(rows.map((r) => r.owner_id))) cals.set(ownerId, await loadCalendar(db, ownerId, from, to));
+  for (const [id, cal] of await loadCalendarsFor(db, [...new Set(rows.map((r) => r.owner_id as string))], from, to)) cals.set(id, cal);
   return cals;
 }
 

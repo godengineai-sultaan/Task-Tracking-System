@@ -7,7 +7,7 @@ import { audit, verifyAuditChain } from '../lib/audit.js';
 import { newToken, sha256 } from '../lib/crypto.js';
 import { enqueue } from '../lib/jobs.js';
 import { badRequest, forbidden, notFound } from '../lib/errors.js';
-import { ALL_ROLES, type Actor, has, require as requireRole } from '../services/access.js';
+import { ALL_ROLES, type Actor, canViewPersonRecords, has, require as requireRole, requireStaff, reviewableUserIds } from '../services/access.js';
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -70,6 +70,7 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     const u = await one(db, `update users set roles = coalesce($2,roles), title = coalesce($3,title), department_id = case when $5 then $4 else department_id end,
         role_profile_id = case when $7 then $6 else role_profile_id end, customer_id = case when $9 then $8 else customer_id end, is_founder = coalesce($10,is_founder),
+        deactivated_at = case when $11::text = 'deactivated' and status <> 'deactivated' then now() else deactivated_at end,
         status = coalesce($11,status), timezone = case when $13 then $12 else timezone end where id = $1 returning id, roles, status`,
       [id, b.roles ?? null, b.title ?? null, b.departmentId ?? null, 'departmentId' in b, b.roleProfileId ?? null, 'roleProfileId' in b, b.customerId ?? null, 'customerId' in b,
        b.isFounder ?? null, b.status ?? null, b.timezone ?? null, 'timezone' in b]);
@@ -90,6 +91,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const exists = await one(db, `select status from users where lower(email) = lower($1)`, [b.email]);
     if (exists?.status === 'active') throw badRequest('That person already has an active account');
     const token = newToken(24);
+    // One open invitation per person: issuing a new link retires earlier ones.
+    await db.query(`update invitations set revoked_at = now() where lower(email) = lower($1) and accepted_at is null and revoked_at is null`, [b.email]);
     const t = await one(db, `select slug from tenants where id = $1`, [a.tenantId]);
     const inv = await one(db, `insert into invitations (tenant_id, email, name, roles, department_id, token_hash, expires_at, created_by)
       values ($1,$2,$3,$4,$5,$6, now() + interval '7 days', $7) returning id, email, expires_at`, [a.tenantId, b.email, b.name, b.roles, b.departmentId ?? null, sha256(token), a.id]);
@@ -106,7 +109,12 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ----- Simple reference data -----
   const simple = (table: 'departments' | 'customers', label: string) => {
-    app.get(`/api/admin/${table}`, async (req) => tx(req, (db) => many(db, `select * from ${table} order by name`)));
+    app.get(`/api/admin/${table}`, async (req) => tx(req, (db, a) => {
+      requireStaff(a);
+      // Client organizations are listed only to the roles that set up projects for them.
+      if (table === 'customers') requireRole(a, 'system_admin', 'manager', 'leadership');
+      return many(db, `select * from ${table} order by name`);
+    }));
     app.post(`/api/admin/${table}`, async (req) => tx(req, async (db, a) => {
       sysAdmin(a);
       const { name } = z.object({ name: z.string().min(1).max(120) }).parse(req.body);
@@ -118,7 +126,7 @@ export async function adminRoutes(app: FastifyInstance) {
   simple('departments', 'department');
   simple('customers', 'customer');
 
-  app.get('/api/admin/role-profiles', async (req) => tx(req, (db) => many(db, `select * from role_profiles order by name`)));
+  app.get('/api/admin/role-profiles', async (req) => tx(req, (db, a) => { requireStaff(a); return many(db, `select * from role_profiles order by name`); }));
   const rpSchema = z.object({ name: z.string().min(1).max(80), description: z.string().max(500).default(''), commitmentTarget: z.number().min(0).max(1),
     coverageTarget: z.number().min(0).max(1), judgeByClosedTasks: z.boolean(), outcomeGuidance: z.string().max(1000).default('') });
   app.post('/api/admin/role-profiles', async (req) => tx(req, async (db, a) => {
@@ -137,9 +145,9 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
 
   // ----- Teams -----
-  app.get('/api/admin/teams', async (req) => tx(req, (db) => many(db, `select t.*, u.name manager_name, d.name department_name,
+  app.get('/api/admin/teams', async (req) => tx(req, (db, a) => { requireStaff(a); return many(db, `select t.*, u.name manager_name, d.name department_name,
     coalesce((select json_agg(json_build_object('id', mu.id, 'name', mu.name) order by mu.name) from team_members m join users mu on mu.id = m.user_id where m.team_id = t.id), '[]') members
-    from teams t left join users u on u.id = t.manager_id left join departments d on d.id = t.department_id order by t.name`)));
+    from teams t left join users u on u.id = t.manager_id left join departments d on d.id = t.department_id order by t.name`); }));
   app.post('/api/admin/teams', async (req) => tx(req, async (db, a) => {
     sysAdmin(a);
     const b = z.object({ name: z.string().min(1).max(120), managerId: uuid.nullable().optional(), departmentId: uuid.nullable().optional() }).parse(req.body);
@@ -177,6 +185,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/api/calendar/schedule', async (req) => tx(req, async (db, a) => {
     const { userId } = z.object({ userId: uuid.optional() }).parse(req.query);
     const uid = userId ?? a.id;
+    requireStaff(a);
+    // Someone else's working hours: system admins (who edit schedules), or whoever may see that person's records.
+    if (uid !== a.id && !has(a, 'system_admin') && !(await canViewPersonRecords(db, a, uid))) throw forbidden();
     const own = await many(db, `select * from work_schedules where user_id = $1 order by weekday`, [uid]);
     const def = await many(db, `select * from work_schedules where user_id is null order by weekday`);
     return { userId: uid, usesDefault: own.length === 0, schedule: own.length ? own : def, tenantDefault: def };
@@ -193,7 +204,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'schedule.update', resourceType: 'work_schedule', resourceId: b.userId ?? 'tenant_default', details: { days: b.days.length } });
     return { ok: true };
   }));
-  app.get('/api/calendar/holidays', async (req) => tx(req, (db) => many(db, `select * from holidays order by date`)));
+  app.get('/api/calendar/holidays', async (req) => tx(req, (db, a) => { requireStaff(a); return many(db, `select * from holidays order by date`); }));
   app.post('/api/calendar/holidays', async (req) => tx(req, async (db, a) => {
     sysAdmin(a);
     const b = z.object({ date, name: z.string().min(1).max(120) }).parse(req.body);
@@ -209,8 +220,10 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
   app.get('/api/calendar/leave', async (req) => tx(req, async (db, a) => {
     const { userId } = z.object({ userId: uuid.optional() }).parse(req.query);
-    if (userId && userId !== a.id && !has(a, 'system_admin') && !a.managedUserIds.includes(userId) && !has(a, 'routine_admin')) throw forbidden();
-    const scope = has(a, 'system_admin') || has(a, 'routine_admin') ? null : [a.id, ...a.managedUserIds];
+    // System admins record and remove anyone's leave, so they see every entry. Routine admins see the people whose records they
+    // may review (the founder-visibility policy applies); managers see their team.
+    const scope = has(a, 'system_admin') ? null : has(a, 'routine_admin') ? await reviewableUserIds(db, a) : [a.id, ...a.managedUserIds];
+    if (userId && userId !== a.id && scope && !scope.includes(userId)) throw forbidden();
     return many(db, `select l.*, u.name user_name from leave_entries l join users u on u.id = l.user_id
       where ($1::uuid is null or l.user_id = $1) and ($2::uuid[] is null or l.user_id = any($2::uuid[])) order by l.start_date desc limit 200`, [userId ?? null, scope]);
   }));
@@ -334,9 +347,26 @@ export async function adminRoutes(app: FastifyInstance) {
         leave_entries: 'select * from leave_entries', capacity_allocations: 'select * from capacity_allocations', manager_reviews: 'select * from manager_reviews',
         recurring_templates: 'select * from recurring_templates', report_versions: 'select id, user_id, period_kind, period_start, period_end, version, status, definitions_version, reason, generated_at from report_versions',
         integration_connections: 'select id, user_id, kind, name, status, settings, last_sync_at, created_at from integration_connections',
+        // Feature areas
+        planning_preferences: 'select * from planning_preferences',
+        task_templates: 'select * from task_templates', task_template_items: 'select * from task_template_items',
+        task_template_versions: 'select * from task_template_versions', task_template_applications: 'select * from task_template_applications',
+        automation_rules: 'select * from automation_rules', automation_runs: 'select * from automation_runs',
+        blocker_escalations: 'select * from blocker_escalations', blocker_nudges: 'select * from blocker_nudges', weekly_reviews: 'select * from weekly_reviews',
+        objective_key_results: 'select * from objective_key_results', objective_checkins: 'select * from objective_checkins', objective_status_history: 'select * from objective_status_history',
+        whatif_scenarios: 'select * from whatif_scenarios',
+        project_budgets: has(a, 'cost_viewer') ? 'select * from project_budgets'
+          : 'select id, project_id, billing_type, currency, budget_hours, start_date, end_date, alert_thresholds, notes, version, created_by, updated_by, created_at, updated_at from project_budgets',
+        project_budget_alerts: has(a, 'cost_viewer') ? 'select * from project_budget_alerts' : `select * from project_budget_alerts where kind in ('hours','forecast_hours')`,
+        tenant_branding: 'select * from tenant_branding', client_updates: 'select * from client_updates',
+        calendar_subscriptions: 'select id, user_id, connection_id, url_host, status, last_fetch_at, last_success_at, last_status, last_error, consecutive_failures, created_at, updated_at from calendar_subscriptions',
+        calendar_feed_tokens: 'select id, user_id, created_by, created_at, revoked_at, last_used_at from calendar_feed_tokens',
+        holiday_imports: 'select * from holiday_imports',
         audit_events: 'select * from audit_events order by id',
       };
-      const out: Record<string, unknown> = { exportedAt: new Date().toISOString(), schema: 'task-tracking-export-v1', excluded: ['password hashes', 'MFA secrets', 'integration secrets', 'sessions', 'cost rates', 'file contents (download separately)'] };
+      const out: Record<string, unknown> = { exportedAt: new Date().toISOString(), schema: 'task-tracking-export-v1', excluded: ['password hashes', 'MFA secrets', 'integration secrets', 'sessions', 'cost rates',
+        'calendar subscription addresses (they are credentials; only the host is included)', 'calendar feed tokens', 'file contents (download separately)',
+        ...(has(a, 'cost_viewer') ? [] : ['budget amounts, bill rates and money alerts (cost viewers only)'])] };
       for (const [k, sql] of Object.entries(tables)) out[k] = await many(db, sql, k === 'tenant' ? [a.tenantId] : []);
       await audit(db, { tenantId: a.tenantId, actorId: a.id, action: 'tenant.data_export', resourceType: 'tenant', resourceId: a.tenantId });
       return out;

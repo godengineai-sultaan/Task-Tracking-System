@@ -114,6 +114,14 @@ export async function planManualSync(db: Db, a: Actor) {
   return planFor(s);
 }
 
+/** Scheduled sync, step 1: the plan for an active subscription of an active person (null when there is nothing to do). */
+export async function planScheduledSync(db: Db, subscriptionId: string): Promise<SyncPlan | null> {
+  const s = await one(db, `select s.*, c.status connection_status, u.status user_status from calendar_subscriptions s
+    join integration_connections c on c.id = s.connection_id join users u on u.id = s.user_id where s.id = $1`, [subscriptionId]);
+  if (!s || s.status !== 'active' || ['paused', 'revoked'].includes(s.connection_status) || s.user_status !== 'active') return null;
+  return planFor(s);
+}
+
 /** "Sync now", step 3 (in a new transaction): apply the fetched result. */
 export async function finishManualSync(db: Db, a: Actor, plan: SyncPlan, fetched: Fetched) {
   requireStaff(a);

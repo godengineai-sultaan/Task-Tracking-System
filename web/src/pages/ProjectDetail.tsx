@@ -41,7 +41,7 @@ export default function ProjectDetail() {
                 <div className="text-[12px] text-ink-3">{m.due_date ? `Due ${fmtDate(m.due_date)}` : 'No date'} · {m.done}/{m.tasks} tasks{m.objective_title && ` · ${m.objective_title}`}</div></li>))}</ul>
             <form className="mt-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); addMs.mutate(); }}><Input aria-label="Milestone name" className="h-8" placeholder="New milestone" value={ms.name} onChange={(e) => setMs({ ...ms, name: e.target.value })} />
               <Input aria-label="Milestone due" type="date" className="h-8 w-36" value={ms.dueDate} onChange={(e) => setMs({ ...ms, dueDate: e.target.value })} /><Button size="sm" type="submit" aria-label="Add milestone" disabled={!ms.name} icon={<Plus className="size-3.5" />} /></form>
-            {(objectives.data ?? []).length > 0 && <Select aria-label="Link milestone to objective" className="mt-2 h-8" value={ms.objectiveId} onChange={(e) => setMs({ ...ms, objectiveId: e.target.value })}>
+            {(roles.leadership || roles.sysAdmin) && (objectives.data ?? []).length > 0 && <Select aria-label="Link milestone to objective" className="mt-2 h-8" value={ms.objectiveId} onChange={(e) => setMs({ ...ms, objectiveId: e.target.value })}>
               <option value="">No linked objective</option>{objectives.data.map((o: any) => <option key={o.id} value={o.id}>{o.title}</option>)}</Select>}
           </Card>
           <Card title="Members">

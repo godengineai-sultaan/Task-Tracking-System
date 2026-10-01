@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import type { Db } from '../lib/db.js';
 import { many, one } from '../lib/db.js';
-import { dayCapacity, eachDate, loadCalendar, localDayBounds, localToday, type DayCapacity } from './calendar.js';
+import { dayCapacity, eachDate, loadCalendars, localDayBounds, localToday, type DayCapacity } from './calendar.js';
 
 export const DEFINITIONS_VERSION = 'metrics-v1';
 export const METRIC_DEFINITIONS = {
@@ -27,26 +27,33 @@ type Label = 'on_track' | 'needs_attention' | 'insufficient_data' | 'not_applica
 
 interface Ctx {
   userId: string; tz: string; today: string;
+  /** First local date with any record for this person (account, time, plan or recap). Earlier days are not comparable working days. */
+  recordsStart: string;
   profile: { name: string; commitment_target: number; coverage_target: number; judge_by_closed_tasks: boolean; outcome_guidance: string };
   coverageThreshold: number;
 }
 
-async function loadCtx(db: Db, userId: string): Promise<Ctx & { user: any }> {
-  const u = await one(db, `select u.id, u.name, u.title, u.is_founder, coalesce(u.timezone, t.timezone) tz, t.settings,
+async function loadCtxs(db: Db, userIds: string[]): Promise<Map<string, Ctx & { user: any }>> {
+  const rows = await many(db, `select u.id, u.name, u.title, u.is_founder, coalesce(u.timezone, t.timezone) tz, t.settings,
       rp.name rp_name, rp.commitment_target, rp.coverage_target, rp.judge_by_closed_tasks, rp.outcome_guidance,
-      d.name department
+      d.name department,
+      least((u.created_at at time zone coalesce(u.timezone, t.timezone))::date,
+        (select (min(te.started_at) at time zone coalesce(u.timezone, t.timezone))::date from time_entries te where te.user_id = u.id and te.deleted_at is null),
+        (select min(dp.date) from daily_plans dp where dp.user_id = u.id), (select min(dr.date) from daily_reviews dr where dr.user_id = u.id))::text records_start
     from users u join tenants t on t.id = u.tenant_id left join role_profiles rp on rp.id = u.role_profile_id
-    left join departments d on d.id = u.department_id where u.id = $1`, [userId]);
-  if (!u) throw new Error('user not found');
-  return {
+    left join departments d on d.id = u.department_id where u.id = any($1::uuid[])`, [userIds]);
+  const out = new Map<string, Ctx & { user: any }>();
+  for (const u of rows) out.set(u.id, {
     user: { id: u.id, name: u.name, title: u.title, department: u.department, isFounder: u.is_founder },
-    userId, tz: u.tz, today: localToday(u.tz),
+    userId: u.id, tz: u.tz, today: localToday(u.tz), recordsStart: u.records_start,
     profile: {
       name: u.rp_name ?? 'Default', commitment_target: u.commitment_target ?? 0.6, coverage_target: u.coverage_target ?? (u.settings?.coverage_threshold ?? 0.5),
       judge_by_closed_tasks: u.judge_by_closed_tasks ?? true, outcome_guidance: u.outcome_guidance ?? '',
     },
     coverageThreshold: u.coverage_target ?? u.settings?.coverage_threshold ?? 0.5,
-  };
+  });
+  if (userIds.some((id) => !out.has(id))) throw new Error('user not found');
+  return out;
 }
 
 const ms = (iso: string | Date) => (typeof iso === 'string' ? Date.parse(iso) : iso.getTime());
@@ -102,53 +109,125 @@ export function allocateDay(entries: any[], cap: DayCapacity, dayStart: number, 
   };
 }
 
-function statusAt(history: any[], taskId: string, t: number): string | null {
+/**
+ * One person's entries as non-overlapping segments, each credited to the single entry that wins by source precedence
+ * (then earliest recorded) — the same "overlaps are counted once" rule as allocateDay. Running entries end at `now`.
+ */
+export function primaryEntrySegments<E extends { started_at: any; ended_at: any; source: string; created_at: any }>(entries: E[], now: number) {
+  const ivs = entries.map((e) => ({ e, a: ms(e.started_at), b: e.ended_at ? ms(e.ended_at) : now })).filter((x) => x.b > x.a).sort((x, y) => x.a - y.a);
+  const pts = [...new Set(ivs.flatMap((x) => [x.a, x.b]))].sort((x, y) => x - y);
+  const rank = (x: (typeof ivs)[number]) => [SOURCE_PRECEDENCE[x.e.source] ?? 9, ms(x.e.created_at)];
+  const out: { e: E; a: number; b: number }[] = [];
+  let next = 0; let active: typeof ivs = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    while (next < ivs.length && ivs[next].a <= a) active.push(ivs[next++]);
+    active = active.filter((x) => x.b > a);
+    if (!active.length) continue;
+    const win = active.reduce((best, x) => { const [r1, c1] = rank(x), [r2, c2] = rank(best); return r1 < r2 || (r1 === r2 && c1 < c2) ? x : best; });
+    const last = out[out.length - 1];
+    if (last && last.e === win.e && last.b === a) last.b = b; else out.push({ e: win.e, a, b });
+  }
+  return out;
+}
+
+function statusAt(history: Map<string, any[]>, taskId: string, t: number): string | null {
   let s: string | null = null;
-  for (const h of history) { if (h.task_id !== taskId) continue; if (ms(h.at) <= t) s = h.to_status; else break; }
+  for (const h of history.get(taskId) ?? []) { if (ms(h.at) <= t) s = h.to_status; else break; }
   return s;
 }
+const groupBy = <T,>(rows: T[], key: (r: T) => string) => {
+  const m = new Map<string, T[]>();
+  for (const r of rows) { const k = key(r); const l = m.get(k); if (l) l.push(r); else m.set(k, [r]); }
+  return m;
+};
+const tms = (v: any) => (v instanceof Date ? v.getTime() : Date.parse(v));
 
 /** Build a report for any period. kind 'day' => start == end. */
 export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' | 'month' | 'custom', start: string, end: string, opts: { trend?: boolean } = {}) {
-  const ctx = await loadCtx(db, userId);
+  return (await buildReports(db, [userId], kind, start, end, opts)).get(userId)!;
+}
+/** The previous period's reports, for trend comparison (typed loosely: only the summaries are read). */
+async function previousReports(db: Db, ids: string[], start: string, end: string): Promise<Map<string, any>> {
+  return buildReports(db, ids, 'custom', start, end, { trend: false });
+}
+
+/**
+ * Reports for several people over the same period with one set of queries (team review, daily routine table) instead of
+ * a round of ~20 queries per person. Each person's figures are exactly what buildReport gives for them alone.
+ */
+export async function buildReports(db: Db, userIds: string[], kind: 'day' | 'week' | 'month' | 'custom', start: string, end: string, opts: { trend?: boolean } = {}) {
+  const ids = [...new Set(userIds)];
   const dates = eachDate(start, end);
   if (dates.length === 0) throw new Error('Empty period');
-  const periodStart = localDayBounds(ctx.tz, start).start, periodEnd = localDayBounds(ctx.tz, end).end;
+  const ctxs = ids.length ? await loadCtxs(db, ids) : new Map<string, Ctx & { user: any }>();
   const now = Date.now();
-  const cal = await loadCalendar(db, userId, start, end);
+  // Each person's local period bounds; the queries read the widest window and rows are then filtered per person.
+  const bounds = new Map(ids.map((id) => { const c = ctxs.get(id)!; const ps = localDayBounds(c.tz, start).start, pe = localDayBounds(c.tz, end).end; return [id, { ps, pe, t0: Date.parse(ps), t1: Date.parse(pe) }]; }));
+  const all = [...bounds.values()];
+  const wideStart = new Date(Math.min(...all.map((b) => b.t0), now)).toISOString(), wideEnd = new Date(Math.max(...all.map((b) => b.t1), 0)).toISOString();
+  const cals = await loadCalendars(db, ids.map((id) => ({ id, tz: ctxs.get(id)!.tz })), start, end);
 
-  const [entries, plans, reviews, blockers, dueTasks, acceptedTasks, mgrReviews, suggestions] = await Promise.all([
+  const [entries, plans, reviews, blockers, dueTasks, acceptedTasks, mgrReviews, suggestions] = !ids.length ? [[], [], [], [], [], [], [], []] : await Promise.all([
     many(db, `select te.*, t.title task_title from time_entries te left join tasks t on t.id = te.task_id
-      where te.user_id = $1 and te.deleted_at is null and te.started_at < $3 and coalesce(te.ended_at, now()) > $2 order by te.started_at`,
-      [userId, periodStart, periodEnd]),
-    many(db, `select dp.date, dpi.task_id, dpi.position, dpi.removed_at, dpi.removed_reason, dpi.added_at, t.title, t.status, t.estimate_minutes,
+      where te.user_id = any($1::uuid[]) and te.deleted_at is null and te.started_at < $3 and coalesce(te.ended_at, now()) > $2 order by te.started_at`,
+      [ids, wideStart, wideEnd]),
+    many(db, `select dp.user_id, dp.date, dpi.task_id, dpi.position, dpi.removed_at, dpi.removed_reason, dpi.added_at, t.title, t.status, t.estimate_minutes,
         t.requires_review, t.project_id, p.name project_name
       from daily_plans dp join daily_plan_items dpi on dpi.plan_id = dp.id join tasks t on t.id = dpi.task_id left join projects p on p.id = t.project_id
-      where dp.user_id = $1 and dp.date between $2 and $3 order by dp.date, dpi.position`, [userId, start, end]),
-    many(db, `select * from daily_reviews where user_id = $1 and date between $2 and $3`, [userId, start, end]),
-    many(db, `select b.*, t.title task_title, t.status task_status, wu.name waiting_on_name from blockers b join tasks t on t.id = b.task_id
+      where dp.user_id = any($1::uuid[]) and dp.date between $2 and $3 order by dp.date, dpi.position`, [ids, start, end]),
+    many(db, `select * from daily_reviews where user_id = any($1::uuid[]) and date between $2 and $3`, [ids, start, end]),
+    many(db, `select b.*, t.owner_id, t.title task_title, t.status task_status, wu.name waiting_on_name from blockers b join tasks t on t.id = b.task_id
       left join users wu on wu.id = b.waiting_on_user_id
-      where t.owner_id = $1 and b.raised_at < $3 and coalesce(b.resolved_at, now()) > $2 order by b.raised_at`, [userId, periodStart, periodEnd]),
-    many(db, `select t.id, t.title, t.due_date, t.status, t.done_at, t.cancelled_at, t.estimate_minutes, p.name project_name
-      from tasks t left join projects p on p.id = t.project_id where t.owner_id = $1 and t.due_date between $2 and $3`, [userId, start, end]),
-    many(db, `select t.id, t.title, t.accepted_at, t.requires_evidence, t.requires_review, t.category, t.due_date, p.name project_name, p.business_outcome,
+      where t.owner_id = any($1::uuid[]) and b.raised_at < $3 and coalesce(b.resolved_at, now()) > $2 order by b.raised_at`, [ids, wideStart, wideEnd]),
+    many(db, `select t.id, t.owner_id, t.title, t.due_date, t.status, t.done_at, t.cancelled_at, t.estimate_minutes, p.name project_name
+      from tasks t left join projects p on p.id = t.project_id where t.owner_id = any($1::uuid[]) and t.due_date between $2 and $3`, [ids, start, end]),
+    many(db, `select t.id, t.owner_id, t.title, t.accepted_at, t.requires_evidence, t.requires_review, t.category, t.due_date, p.name project_name, p.business_outcome,
         m.name milestone_name, (select count(*) from evidence_links e where e.task_id = t.id)::int evidence_count,
         (select r.reviewer_id from task_reviews r where r.task_id = t.id and r.decision = 'accepted' order by r.created_at desc limit 1) accepted_by
       from tasks t left join projects p on p.id = t.project_id left join milestones m on m.id = t.milestone_id
-      where t.owner_id = $1 and t.status = 'done' and t.accepted_at >= $2 and t.accepted_at < $3 order by t.accepted_at`, [userId, periodStart, periodEnd]),
+      where t.owner_id = any($1::uuid[]) and t.status = 'done' and t.accepted_at >= $2 and t.accepted_at < $3 order by t.accepted_at`, [ids, wideStart, wideEnd]),
     many(db, `select mr.*, u.name reviewer_name from manager_reviews mr join users u on u.id = mr.reviewer_id
-      where mr.subject_user_id = $1 and mr.date between $2 and $3 order by mr.created_at`, [userId, start, end]),
-    many(db, `select * from suggestions where user_id = $1 and kind = 'time_entry' and status = 'open'
-      and (data->>'started_at') >= $2 and (data->>'started_at') < $3`, [userId, periodStart, periodEnd]),
+      where mr.subject_user_id = any($1::uuid[]) and mr.date between $2 and $3 order by mr.created_at`, [ids, start, end]),
+    many(db, `select * from suggestions where user_id = any($1::uuid[]) and kind = 'time_entry' and status = 'open'
+      and (data->>'started_at') >= $2 and (data->>'started_at') < $3`, [ids, wideStart, wideEnd]),
   ]);
+  // Status history is read only for the tasks whose end-of-day status the report shows (planned and due tasks).
   const taskIds = [...new Set([...plans.map((p) => p.task_id), ...dueTasks.map((t) => t.id)])];
-  const history = await many(db, `select h.*, t.title from task_state_history h join tasks t on t.id = h.task_id
-    where (h.task_id = any($1::uuid[]) or (t.owner_id = $2 and h.at >= $3 and h.at < $4)) order by h.at, h.id`, [taskIds, userId, periodStart, periodEnd]);
-  const rework = await many(db, `select h.task_id, t.title, h.from_status, h.to_status, h.reason, h.at from task_state_history h join tasks t on t.id = h.task_id
-    where t.owner_id = $1 and h.at >= $2 and h.at < $3 and h.from_status in ('done','in_review','cancelled') and h.to_status in ('in_progress','planned','backlog')
-    order by h.at`, [userId, periodStart, periodEnd]);
-  const changeRequests = await many(db, `select r.task_id, t.title, r.note, r.created_at from task_reviews r join tasks t on t.id = r.task_id
-    where t.owner_id = $1 and r.decision = 'changes_requested' and r.created_at >= $2 and r.created_at < $3`, [userId, periodStart, periodEnd]);
+  const historyRows = taskIds.length ? await many(db, `select task_id, to_status, at from task_state_history where task_id = any($1::uuid[]) order by at, id`, [taskIds]) : [];
+  const history = groupBy(historyRows, (h: any) => h.task_id);
+  const [reworkRows, changeRows] = !ids.length ? [[], []] : await Promise.all([
+    many(db, `select t.owner_id, h.task_id, t.title, h.from_status, h.to_status, h.reason, h.at from task_state_history h join tasks t on t.id = h.task_id
+      where t.owner_id = any($1::uuid[]) and h.at >= $2 and h.at < $3 and h.from_status in ('done','in_review','cancelled') and h.to_status in ('in_progress','planned','backlog')
+      order by h.at`, [ids, wideStart, wideEnd]),
+    many(db, `select t.owner_id, r.task_id, t.title, r.note, r.created_at from task_reviews r join tasks t on t.id = r.task_id
+      where t.owner_id = any($1::uuid[]) and r.decision = 'changes_requested' and r.created_at >= $2 and r.created_at < $3`, [ids, wideStart, wideEnd]),
+  ]);
+  const pressure = await capacityPressureMany(db, ctxs);
+  let prevs: Map<string, any> | null = null;
+  if (opts.trend !== false && kind !== 'day' && ids.length) {
+    const ps = DateTime.fromISO(start).minus({ days: dates.length }).toISODate()!, pe = DateTime.fromISO(start).minus({ days: 1 }).toISODate()!;
+    prevs = await previousReports(db, ids, ps, pe);
+  }
+  const by = { entries: groupBy(entries, (r: any) => r.user_id), plans: groupBy(plans, (r: any) => r.user_id), reviews: groupBy(reviews, (r: any) => r.user_id),
+    blockers: groupBy(blockers, (r: any) => r.owner_id), due: groupBy(dueTasks, (r: any) => r.owner_id), accepted: groupBy(acceptedTasks, (r: any) => r.owner_id),
+    mgr: groupBy(mgrReviews, (r: any) => r.subject_user_id), suggestions: groupBy(suggestions, (r: any) => r.user_id),
+    rework: groupBy(reworkRows, (r: any) => r.owner_id), changes: groupBy(changeRows, (r: any) => r.owner_id) };
+
+  const computeOne = (userId: string) => {
+  const ctx = ctxs.get(userId)!, cal = cals.get(userId)!;
+  const { ps: periodStart, pe: periodEnd, t0: p0, t1: p1 } = bounds.get(userId)!;
+  const inWindow = (a: any, b: any) => tms(a) < p1 && (b == null ? now : tms(b)) > p0;
+  const entries = (by.entries.get(userId) ?? []).filter((e) => inWindow(e.started_at, e.ended_at));
+  const plans = by.plans.get(userId) ?? [];
+  const reviews = by.reviews.get(userId) ?? [];
+  const blockers = (by.blockers.get(userId) ?? []).filter((b) => inWindow(b.raised_at, b.resolved_at));
+  const dueTasks = by.due.get(userId) ?? [];
+  const acceptedTasks = (by.accepted.get(userId) ?? []).filter((t) => tms(t.accepted_at) >= p0 && tms(t.accepted_at) < p1);
+  const mgrReviews = by.mgr.get(userId) ?? [];
+  const suggestions = (by.suggestions.get(userId) ?? []).filter((x) => Date.parse(x.data.started_at) >= p0 && Date.parse(x.data.started_at) < p1);
+  const rework = (by.rework.get(userId) ?? []).filter((h) => tms(h.at) >= p0 && tms(h.at) < p1);
+  const changeRequests = (by.changes.get(userId) ?? []).filter((r) => tms(r.created_at) >= p0 && tms(r.created_at) < p1);
 
   const reviewByDate = new Map(reviews.map((r) => [r.date, r]));
   const days = dates.map((date) => {
@@ -181,8 +260,10 @@ export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' |
     const review = reviewByDate.get(date);
     const inferred = suggestions.filter((s) => ms(s.data.started_at) >= dayStart && ms(s.data.started_at) < dayEnd)
       .reduce((s, x) => s + minutes(ms(x.data.started_at), ms(x.data.ended_at)), 0);
+    // Blocked time is measured inside the schedule window, which includes the break: cap it at the available time.
+    blockedMinutes = Math.min(blockedMinutes, cap.availableMinutes);
     const day = {
-      date, isToday: date === ctx.today, isFuture: date > ctx.today, capacity: cap,
+      date, isToday: date === ctx.today, isFuture: date > ctx.today, beforeRecords: date < ctx.recordsStart, capacity: cap,
       recap: review ? { status: review.status, dayType: review.day_type, version: review.version, confirmedAt: review.confirmed_at, summary: review.summary,
         blockersNote: review.blockers_note, nextSteps: review.next_steps, contextNote: review.context_note } : null,
       reportState: review?.status === 'manager_reviewed' ? 'manager_reviewed' : review?.status === 'confirmed' ? 'confirmed' : 'provisional',
@@ -198,8 +279,10 @@ export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' |
     return day;
   });
 
-  // Period aggregates
-  const working = days.filter((d) => d.capacity.availableMinutes > 0 && !d.isFuture);
+  // Period aggregates. A period report covers finished days only (today is still in progress: its unlogged hours are not yet
+  // unknown and its open outcomes not yet carried over); the day view keeps today, marked provisional. Days before the person's
+  // records begin are not comparable working days.
+  const working = days.filter((d) => d.capacity.availableMinutes > 0 && !d.isFuture && !d.beforeRecords && (kind === 'day' || !d.isToday));
   const sum = (f: (d: (typeof days)[number]) => number) => working.reduce((s, d) => s + f(d), 0);
   const available = sum((d) => d.capacity.availableMinutes);
   const explained = sum((d) => d.time.explainedMinutes);
@@ -219,7 +302,7 @@ export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' |
   }
   const catTotals = Object.fromEntries(CATS.map((c) => [c, sum((d) => d.time.byCategory[c])]));
   const confirmedDays = working.filter((d) => d.reportState !== 'provisional').length;
-  const capacityPressure = await capacityPressureFor(db, userId, ctx.today, cal);
+  const capacityPressure = pressure.get(userId)!;
   const summary = {
     workingDays: working.length,
     nonWorkingDays: days.filter((d) => d.capacity.availableMinutes === 0).length,
@@ -244,16 +327,25 @@ export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' |
       overdue: deadlines.filter((d) => d.state === 'overdue').length, open: deadlines.filter((d) => d.state === 'open').length },
     capacityPressure,
   };
-  const assessment = kind === 'day' ? days[0].assessment : assessPeriod(summary, ctx, days);
+  // Capacity pressure looks ahead from today: it explains a current or future period, never a finished one.
+  const assessment = kind === 'day' ? days[0].assessment : assessPeriod(summary, ctx, days, end >= ctx.today);
   const recommendations = recommend(summary, days, blockers, ctx, capacityPressure);
 
   let trend: any = null;
   if (opts.trend !== false && kind !== 'day') {
     const len = dates.length;
     const ps = DateTime.fromISO(start).minus({ days: len }).toISODate()!, pe = DateTime.fromISO(start).minus({ days: 1 }).toISODate()!;
-    const prev = await buildReport(db, userId, 'custom', ps, pe, { trend: false });
+    const prev = prevs!.get(userId)!;
     const delta = (a: number | null, b: number | null) => (a === null || b === null ? null : a - b);
-    trend = {
+    if (prev.summary.workingDays === 0) {
+      // Nothing to compare with (e.g. the person's records start in this period): no deltas rather than a jump from zero.
+      const na = (current: number | null) => ({ current, previous: null, delta: null });
+      trend = { previousPeriod: { start: ps, end: pe }, comparableWorkingDays: 0, status: 'not_applicable',
+        plannedCommitmentCompletion: na(summary.plannedCommitmentCompletion), loggingCoverage: na(summary.loggingCoverage), blockedMinutes: na(summary.blockedMinutes),
+        meetingMinutes: na(catTotals.meeting), acceptedOutcomes: na(summary.acceptedOutcomes),
+        note: 'The previous period has no comparable working days for this person, so no change is shown.' };
+    } else trend = {
+      status: 'applicable',
       previousPeriod: { start: ps, end: pe }, comparableWorkingDays: prev.summary.workingDays,
       plannedCommitmentCompletion: { current: summary.plannedCommitmentCompletion, previous: prev.summary.plannedCommitmentCompletion, delta: delta(summary.plannedCommitmentCompletion, prev.summary.plannedCommitmentCompletion) },
       loggingCoverage: { current: summary.loggingCoverage, previous: prev.summary.loggingCoverage, delta: delta(summary.loggingCoverage, prev.summary.loggingCoverage) },
@@ -280,6 +372,10 @@ export async function buildReport(db: Db, userId: string, kind: 'day' | 'week' |
       ...changeRequests.map((r) => ({ taskId: r.task_id, title: r.title, kind: 'changes_requested', reason: r.note, at: r.created_at }))],
     managerReviews: mgrReviews.map((m) => ({ id: m.id, date: m.date, action: m.action, note: m.note, reviewer: m.reviewer_name, at: m.created_at, resolvedAt: m.resolved_at })),
   };
+  };
+  const out = new Map<string, ReturnType<typeof computeOne>>();
+  for (const id of ids) out.set(id, computeOne(id));
+  return out;
 }
 
 function pct(v: number | null) { return v === null ? 'n/a' : `${Math.round(v * 100)}%`; }
@@ -290,6 +386,7 @@ function assessDay(d: any, ctx: Ctx, blockers: any[], dueTasks: any[]): { label:
   const assumptions = [`Role profile: ${ctx.profile.name}`, `Commitment target ${pct(ctx.profile.commitment_target)}${ctx.profile.judge_by_closed_tasks ? '' : ' (not judged by closed-task counts for this role)'}`,
     `Minimum logging coverage to assess: ${pct(ctx.coverageThreshold)}`];
   if (ctx.profile.outcome_guidance) assumptions.push(ctx.profile.outcome_guidance);
+  if (d.beforeRecords) return { label: 'not_applicable', reasons: [`Records for this person begin on ${ctx.recordsStart}; there is nothing to assess before then.`], facts: [], assumptions };
   if (d.capacity.availableMinutes === 0) {
     const why = d.capacity.status === 'holiday' ? `Holiday: ${d.capacity.holiday}` : d.capacity.status === 'leave' ? `On ${d.capacity.leave.kind}` : 'Not a scheduled working day';
     return { label: 'not_applicable', reasons: [why + ' — zero available capacity, ratios are not applicable.'], facts: [], assumptions };
@@ -332,7 +429,7 @@ function assessDay(d: any, ctx: Ctx, blockers: any[], dueTasks: any[]): { label:
   return { label: reasons.length ? 'needs_attention' : 'on_track', reasons: reasons.length ? reasons : ['Intended outcomes and commitments are progressing with sufficient recorded evidence.'], facts, assumptions };
 }
 
-function assessPeriod(s: any, ctx: Ctx, days: any[]): { label: Label; reasons: string[]; facts: string[]; assumptions: string[] } {
+function assessPeriod(s: any, ctx: Ctx, days: any[], includesToday: boolean): { label: Label; reasons: string[]; facts: string[]; assumptions: string[] } {
   const assumptions = [`Role profile: ${ctx.profile.name}`, `Commitment target ${pct(ctx.profile.commitment_target)}`, `Minimum logging coverage ${pct(ctx.coverageThreshold)}`, 'At least half of working days need a confirmed recap'];
   const facts = [`${s.workingDays} working day(s), ${s.confirmedRecaps} confirmed recap(s), ${s.missingRecaps} missing`,
     `${s.acceptedPlannedOutcomes}/${s.intendedOutcomes} intended outcomes accepted (${pct(s.plannedCommitmentCompletion)})`,
@@ -345,21 +442,36 @@ function assessPeriod(s: any, ctx: Ctx, days: any[]): { label: Label; reasons: s
   if (ctx.profile.judge_by_closed_tasks && s.plannedCommitmentCompletion !== null && s.plannedCommitmentCompletion < ctx.profile.commitment_target)
     reasons.push(`Planned completion ${pct(s.plannedCommitmentCompletion)} below ${pct(ctx.profile.commitment_target)} target.`);
   if (s.deadlines.overdue) reasons.push(`${s.deadlines.overdue} commitment(s) overdue.`);
-  if (s.capacityPressure.ratio !== null && s.capacityPressure.ratio > 1.25) reasons.push(`Upcoming estimated work is ${pct(s.capacityPressure.ratio)} of available capacity.`);
+  if (includesToday && s.capacityPressure.ratio !== null && s.capacityPressure.ratio > 1.25) reasons.push(`Upcoming estimated work is ${pct(s.capacityPressure.ratio)} of available capacity.`);
   return { label: reasons.length ? 'needs_attention' : 'on_track', reasons: reasons.length ? reasons : ['Commitments and deadlines are on track with sufficient confirmed records.'], facts, assumptions };
 }
 
-async function capacityPressureFor(db: Db, userId: string, today: string, _cal: any) {
-  const horizonEnd = DateTime.fromISO(today).plus({ days: 20 }).toISODate()!;
-  const cal = await loadCalendar(db, userId, today, horizonEnd);
-  let avail = 0, wd = 0, lastDate = today;
-  for (const d of eachDate(today, horizonEnd)) { const c = dayCapacity(cal, d); if (c.availableMinutes > 0) { avail += c.availableMinutes; wd++; lastDate = d; } if (wd >= 10) break; }
-  const open = await many(db, `select estimate_minutes from tasks where owner_id = $1 and status not in ('done','cancelled','backlog')
-    and (due_date is null or due_date <= $2)`, [userId, lastDate]);
-  const est = open.filter((t) => t.estimate_minutes);
-  const estMinutes = est.reduce((s, t) => s + t.estimate_minutes, 0);
-  return { horizonWorkingDays: wd, availableMinutes: avail, estimatedMinutes: estMinutes, openTasks: open.length,
-    estimateCoverage: open.length ? est.length / open.length : null, ratio: avail > 0 ? estMinutes / avail : null };
+/** Capacity pressure (next 10 working days from each person's own today) for many people with one calendar load and one task query. */
+async function capacityPressureMany(db: Db, ctxs: Map<string, Ctx>) {
+  const out = new Map<string, { horizonWorkingDays: number; availableMinutes: number; estimatedMinutes: number; openTasks: number; estimateCoverage: number | null; ratio: number | null }>();
+  const ids = [...ctxs.keys()];
+  if (!ids.length) return out;
+  const todays = ids.map((id) => ctxs.get(id)!.today).sort();
+  const cals = await loadCalendars(db, ids.map((id) => ({ id, tz: ctxs.get(id)!.tz })), todays[0], DateTime.fromISO(todays[todays.length - 1]).plus({ days: 20 }).toISODate()!);
+  const horizon = new Map<string, { avail: number; wd: number; lastDate: string }>();
+  for (const id of ids) {
+    const today = ctxs.get(id)!.today, cal = cals.get(id)!;
+    let avail = 0, wd = 0, lastDate = today;
+    for (const d of eachDate(today, DateTime.fromISO(today).plus({ days: 20 }).toISODate()!)) { const c = dayCapacity(cal, d); if (c.availableMinutes > 0) { avail += c.availableMinutes; wd++; lastDate = d; } if (wd >= 10) break; }
+    horizon.set(id, { avail, wd, lastDate });
+  }
+  const maxLast = [...horizon.values()].map((h) => h.lastDate).sort().pop()!;
+  const open = groupBy(await many(db, `select owner_id, estimate_minutes, due_date from tasks where owner_id = any($1::uuid[]) and status not in ('done','cancelled','backlog')
+    and (due_date is null or due_date <= $2)`, [ids, maxLast]), (t: any) => t.owner_id);
+  for (const id of ids) {
+    const { avail, wd, lastDate } = horizon.get(id)!;
+    const mine = (open.get(id) ?? []).filter((t) => t.due_date === null || t.due_date <= lastDate);
+    const est = mine.filter((t) => t.estimate_minutes);
+    const estMinutes = est.reduce((s, t) => s + t.estimate_minutes, 0);
+    out.set(id, { horizonWorkingDays: wd, availableMinutes: avail, estimatedMinutes: estMinutes, openTasks: mine.length,
+      estimateCoverage: mine.length ? est.length / mine.length : null, ratio: avail > 0 ? estMinutes / avail : null });
+  }
+  return out;
 }
 
 function recommend(s: any, days: any[], blockers: any[], ctx: Ctx, cp: any) {
