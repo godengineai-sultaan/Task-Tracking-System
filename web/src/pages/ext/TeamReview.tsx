@@ -24,7 +24,9 @@ export default function TeamReview() {
   const set = (o: Record<string, string | null>) => { const n = new URLSearchParams(sp); for (const [k, v] of Object.entries(o)) v ? n.set(k, v) : n.delete(k); setSp(n, { replace: true }); };
   const tab = r.canReview && sp.get('tab') !== 'mine' ? 'team' : 'mine';
   const thisWeek = mondayOf(me.today), lastWeek = addDays(thisWeek, -7);
-  const week = mondayOf(sp.get('week') ?? lastWeek);
+  // A hand-edited or stale ?week= must not crash the page (date helpers throw on invalid dates).
+  const wp = sp.get('week'); const validWeek = !!wp && /^\d{4}-\d{2}-\d{2}$/.test(wp) && !Number.isNaN(Date.parse(`${wp}T12:00:00Z`));
+  const week = mondayOf(validWeek ? wp! : lastWeek);
   const includeMe = sp.get('me') === '1';
   const exp = (format: 'pdf' | 'csv') => downloadExport(api, { format, report: 'team_weekly', params: { date: week, includeMe: includeMe || undefined } }, toast)
     .catch((e) => toast({ tone: 'critical', text: e.message }));
@@ -38,7 +40,7 @@ export default function TeamReview() {
         : <PageHeader eyebrow="Your weeks" title="My weekly reviews" subtitle="Notes from your manager or the main administrator about your recorded weeks. You can respond to each one." />}
       {r.canReview && <div className="mb-4"><Segmented label="Show" value={tab} onChange={(v) => set({ tab: v === 'mine' ? 'mine' : null })}
         options={[{ value: 'team', label: 'Team week' }, { value: 'mine', label: 'My weekly reviews' }]} /></div>}
-      {tab === 'team' ? <TeamWeek week={week} thisWeek={thisWeek} lastWeek={lastWeek} includeMe={includeMe} set={set} sp={sp} /> : <MyWeeklyReviews highlightWeek={sp.get('week') ? mondayOf(sp.get('week')!) : null} />}
+      {tab === 'team' ? <TeamWeek week={week} thisWeek={thisWeek} lastWeek={lastWeek} includeMe={includeMe} set={set} sp={sp} /> : <MyWeeklyReviews highlightWeek={validWeek ? week : null} />}
     </div>
   );
 }

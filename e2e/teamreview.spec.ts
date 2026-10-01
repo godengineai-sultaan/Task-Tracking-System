@@ -69,6 +69,13 @@ test('main admin: company-wide week, filters, table view, export and phone layou
   expect(list).toEqual([...list].sort((a, b) => a.localeCompare(b)));
   expect(list).not.toContain('Asha Rao');
   await expect(page.getByRole('article', { name: 'Meera Iyer' }).getByRole('link', { name: /Follow-up: Agree vendor invoice cut-off/ })).toBeVisible();
+  // While that follow-up task is open, the dialog does not offer a second one (it would orphan the first).
+  await page.getByRole('button', { name: 'Request follow-up for Meera Iyer' }).click();
+  const dlg = page.getByRole('dialog', { name: "Review Meera Iyer's week" });
+  await expect(dlg.getByText(/Follow-up task already open: Agree vendor invoice cut-off/)).toBeVisible();
+  await expect(dlg.getByText(/Also create a follow-up task/)).toHaveCount(0);
+  await dlg.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dlg).toBeHidden();
 
   await page.getByRole('button', { name: /^Not reviewed yet/ }).click();
   await expect(page.getByRole('button', { name: /^Not reviewed yet/ })).toHaveAttribute('aria-pressed', 'true');
@@ -88,6 +95,11 @@ test('main admin: company-wide week, filters, table view, export and phone layou
   await page.getByRole('button', { name: 'CSV' }).click();
   const file = await download;
   expect(file.suggestedFilename()).toMatch(/^team-week-\d{4}-\d{2}-\d{2}\.csv$/);
+
+  // A malformed ?week= falls back to last week instead of crashing the page.
+  await page.goto('/team-review?week=not-a-date');
+  await expect(page.getByRole('heading', { level: 1, name: 'Weekly team review' })).toBeVisible();
+  await expect(names).toHaveCount(7);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/team-review');

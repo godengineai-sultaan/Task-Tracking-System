@@ -142,6 +142,17 @@ describe('weekly team review: lifecycle', () => {
     expect(rows.rowCount).toBe(0);
   });
 
+  it('does not create a second follow-up task (orphaning the first) while one is still open', async () => {
+    const emp2Review = async () => (await mgr.get(`/api/team-review?week=${week}`)).body.people.find((p: any) => p.user.name === 'Emp2').review;
+    const cur = await emp2Review();
+    const dup = await mgr.post('/api/team-review/reviews', { subjectUserId: org.users.emp2, week, action: 'needs_follow_up', note: cur.note, version: cur.version,
+      followUp: { title: 'Another reminder task' } });
+    expect(dup.status).toBe(409);
+    expect(await emp2Review()).toMatchObject({ version: cur.version, followUpTask: { id: cur.followUpTask.id } });
+    const n = await withOwner(async (db) => (await db.query(`select count(*)::int n from tasks where tenant_id = $1 and source_type = 'follow_up'`, [org.tenantId])).rows[0].n);
+    expect(n).toBe(1);
+  });
+
   it('employees see only their own reviews and can respond; the reviewer is notified', async () => {
     const mine = (await emp2.get('/api/team-review/mine')).body;
     expect(mine.map((r: any) => r.id)).toEqual([reviewId]);
@@ -171,6 +182,12 @@ describe('weekly team review: lifecycle', () => {
     const n = (await mgr.get('/api/notifications')).body.filter((x: any) => x.kind === 'weekly_review_follow_up_done');
     expect(n).toHaveLength(1);
     expect(n[0].title).toBe('Follow-up done: Set a daily recap reminder');
+    // Once the earlier follow-up is closed, a new one may be created and linked.
+    const cur = (await mgr.get(`/api/team-review?week=${week}`)).body.people.find((p: any) => p.user.name === 'Emp2').review;
+    const again = await mgr.post('/api/team-review/reviews', { subjectUserId: org.users.emp2, week, action: 'needs_follow_up', version: cur.version, followUp: { title: 'Review the reminder after a week' } });
+    expect(again.status).toBe(200);
+    expect(again.body.followUpTask).toMatchObject({ title: 'Review the reminder after a week', status: 'planned' });
+    expect(again.body.followUpTask.id).not.toBe(r.followUpTask.id);
   });
 
   it('reminds team managers on Monday once per week', async () => {
@@ -188,6 +205,9 @@ describe('weekly team review: export', () => {
     expect((await emp.post('/api/exports', { format: 'csv', report: 'team_weekly', params: { date: week } })).status).toBe(403);
     expect((await founder.post('/api/exports', { format: 'pdf', report: 'team_weekly', params: { date: week } })).status).toBe(403);
     expect((await mgr.post('/api/exports', { format: 'csv', report: 'team_weekly', params: {} })).status).toBe(400);
+    // A week the page would refuse must be refused up front, not left as an export that never finishes.
+    expect((await mgr.post('/api/exports', { format: 'csv', report: 'team_weekly', params: { date: DateTime.now().plus({ days: 14 }).toISODate() } })).status).toBe(400);
+    expect((await mgr.post('/api/exports', { format: 'pdf', report: 'team_weekly', params: { date: '2026-02-30' } })).status).toBe(400);
     await admin.post('/api/team-review/reviews', { subjectUserId: org.users.emp, week, action: 'acknowledge', note: '=HYPERLINK("x")' });
     const m = await mgr.post('/api/exports', { format: 'csv', report: 'team_weekly', params: { date: day(4) } });
     const a = await admin.post('/api/exports', { format: 'csv', report: 'team_weekly', params: { date: week } });
@@ -197,6 +217,8 @@ describe('weekly team review: export', () => {
     for (const [c, id] of [[mgr, m.body.id], [admin, a.body.id], [mgr, pdf.body.id]] as const) expect((await c.get(`/api/exports/${id}`)).body.status).toBe('ready');
     const mCsv = String((await mgr.get(`/api/exports/${m.body.id}/file`)).body);
     expect(mCsv).toMatch(/Alphabetical \(not a ranking\)/);
+    // Every exported assessment carries the facts and assumptions it rests on, not just a label.
+    expect(mCsv).toContain('assessment,assessment_reasons,assessment_facts,assessment_assumptions,');
     const names = mCsv.split('\n').filter((l) => /^(Emp|Emp2|Founder|Manager|Outsider),/.test(l)).map((l) => l.split(',')[0]);
     expect(names).toEqual(['Emp', 'Emp2']);
     expect(mCsv).toContain('Needs follow-up,Agree a daily recap routine.,Will set a 17:30 reminder.');
@@ -211,5 +233,41 @@ describe('weekly team review: export', () => {
     await withOwner((db) => db.query(`update teams set manager_id = $2 where tenant_id = $1`, [org.tenantId, org.users.admin]));
     await drainJobs();
     expect((await mgr.get(`/api/exports/${late.body.id}`)).body.status).toBe('failed');
+  });
+});
+
+describe('weekly team review: founder visibility policy', () => {
+  it('a non-founder main admin neither sees, reviews nor exports founders when the tenant hides them', async () => {
+    const o = await makeOrg({ settings: { founders_visible_to_routine_admin: false } });
+    const adm = await login(o, 'admin');
+    const w = DateTime.now().setZone(o.tz).minus({ days: 7 }).startOf('week').toISODate()!;
+    const r = await adm.get(`/api/team-review?week=${w}&includeMe=1`);
+    expect(r.status).toBe(200);
+    expect(r.body.people.map((p: any) => p.user.name)).toEqual(['Admin', 'Emp', 'Emp2', 'Manager', 'Outsider']);
+    expect((await adm.post('/api/team-review/reviews', { subjectUserId: o.users.founder, week: w, action: 'acknowledge' })).status).toBe(403);
+    const ex = await adm.post('/api/exports', { format: 'csv', report: 'team_weekly', params: { date: w } });
+    await drainJobs();
+    const csv = String((await adm.get(`/api/exports/${ex.body.id}/file`)).body);
+    expect(csv).toMatch(/^Emp2,/m);
+    expect(csv).not.toMatch(/^Founder,/m);
+  });
+});
+
+describe('weekly team review: client accounts', () => {
+  it('a client account added to a team is never listed, reviewed or counted as a team member', async () => {
+    const o = await makeOrg();
+    const m = await login(o, 'manager');
+    const w = DateTime.now().setZone(o.tz).minus({ days: 7 }).startOf('week').toISODate()!;
+    const clientId = await withOwner(async (db) => {
+      const u = (await db.query(`insert into users (tenant_id, email, name, roles) values ($1,$2,'Aaron Client',array['customer']) returning id`, [o.tenantId, `client@${o.tenantId}.test`])).rows[0];
+      await db.query(`insert into team_members (tenant_id, team_id, user_id) select tenant_id, id, $2 from teams where tenant_id = $1`, [o.tenantId, u.id]);
+      return u.id as string;
+    });
+    const r = await m.get(`/api/team-review?week=${w}`);
+    expect(r.body.people.map((p: any) => p.user.name)).toEqual(['Emp', 'Emp2']);
+    expect((await m.post('/api/team-review/reviews', { subjectUserId: clientId, week: w, action: 'acknowledge', note: 'x' })).status).toBe(403);
+    const monday = DateTime.fromISO(w, { zone: o.tz }).plus({ days: 7 }).set({ hour: 10 });
+    expect(await withTenant(o.tenantId, (db) => remindWeeklyReviewers(db, o.tenantId, monday))).toBe(1);
+    expect((await m.get('/api/notifications')).body.find((x: any) => x.kind === 'weekly_review_ready').body).toMatch(/^2 team member/);
   });
 });

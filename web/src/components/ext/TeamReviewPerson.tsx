@@ -219,6 +219,7 @@ export function ReviewModal({ person, week, initial, today, onClose }: { person:
       else toast({ tone: 'critical', text: e.message });
     },
   });
+  const openTask = person?.review?.followUpTask && !['done', 'cancelled'].includes(person.review.followUpTask.status) ? person.review.followUpTask : null;
   const invalid = (action === 'needs_follow_up' && !note.trim() && !(withTask && title.trim())) || (withTask && action === 'needs_follow_up' && !title.trim());
   return (
     <Modal open={!!person} onClose={onClose} title={person ? `Review ${person.user.name}'s week` : 'Review'}
@@ -241,7 +242,8 @@ export function ReviewModal({ person, week, initial, today, onClose }: { person:
           {(id) => <Textarea id={id} data-autofocus rows={4} maxLength={3000} value={note} onChange={(e) => setNote(e.target.value)}
             placeholder={action === 'needs_follow_up' ? 'What needs follow-up, and why?' : 'Optional: what went well, context, next steps'} />}
         </Field>
-        {action === 'needs_follow_up' && (
+        {action === 'needs_follow_up' && openTask && <p className="text-[12px] text-ink-3">Follow-up task already open: {openTask.title}. Close it before creating another.</p>}
+        {action === 'needs_follow_up' && !openTask && (
           <div className="space-y-3 rounded-lg bg-surface-2 p-3">
             <Checkbox checked={withTask} onChange={setWithTask} label={`Also create a follow-up task for ${name}`} />
             {withTask && <div className="grid gap-3 sm:grid-cols-[1fr_11rem]">

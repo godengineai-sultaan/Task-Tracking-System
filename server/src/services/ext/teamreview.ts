@@ -34,7 +34,9 @@ export function isWeeklyReviewer(a: Actor) { return isStaff(a) && (has(a, 'routi
 
 async function reviewScope(db: Db, a: Actor) {
   if (!isWeeklyReviewer(a)) throw forbidden('Weekly team review is for team managers and the main administrator. Your own weekly reviews are under "My weekly reviews".');
-  return reviewableUserIds(db, a);
+  // Team membership alone never makes a client (customer) account reviewable as staff.
+  const rows = await many(db, `select id from users where id = any($1::uuid[]) and not ('customer' = any(roles))`, [await reviewableUserIds(db, a)]);
+  return rows.map((r) => r.id as string);
 }
 const authorityFor = (a: Actor, subjectId: string) => (a.managedUserIds.includes(subjectId) ? 'team_manager' : 'routine_admin');
 
@@ -150,6 +152,11 @@ export async function recordWeeklyReview(db: Db, a: Actor, i: WeeklyReviewInput)
   const note = i.note === undefined ? (existing?.note ?? '') : i.note.trim();
   if (i.followUp && status !== 'needs_follow_up') throw badRequest('A follow-up task can only be created with a follow-up request');
   if (status === 'needs_follow_up' && !note && !i.followUp) throw badRequest('Say what needs follow-up: add a note or a follow-up task');
+  if (i.followUp && existing?.follow_up_task_id) {
+    // One linked follow-up at a time: a second task would silently unlink the first, which stays assigned to the employee.
+    const prev = await one(db, `select status from tasks where id = $1`, [existing.follow_up_task_id]);
+    if (prev && prev.status !== 'done' && prev.status !== 'cancelled') throw conflict('This review already has an open follow-up task. Update or close that task instead of creating another.');
+  }
   let row: any;
   if (!existing) {
     row = await one(db, `insert into weekly_reviews (tenant_id, reviewer_id, subject_user_id, week_start, status, note) values ($1,$2,$3,$4,$5,$6)
@@ -204,7 +211,7 @@ export async function remindWeeklyReviewers(db: Db, tenantId: string, at: DateTi
   const link = `/team-review?week=${weekStart}`;
   const rows = await many(db, `select tm_mgr.manager_id, count(distinct tm.user_id)::int pending
     from teams tm_mgr join team_members tm on tm.team_id = tm_mgr.id join users u on u.id = tm.user_id join users m on m.id = tm_mgr.manager_id
-    where u.status = 'active' and m.status = 'active' and tm.user_id <> tm_mgr.manager_id
+    where u.status = 'active' and m.status = 'active' and tm.user_id <> tm_mgr.manager_id and not ('customer' = any(u.roles))
       and not exists (select 1 from weekly_reviews wr where wr.reviewer_id = tm_mgr.manager_id and wr.subject_user_id = tm.user_id and wr.week_start = $1)
       and not exists (select 1 from notifications n where n.user_id = tm_mgr.manager_id and n.kind = 'weekly_review_ready' and n.link = $2)
     group by tm_mgr.manager_id`, [weekStart, link]);
@@ -225,19 +232,20 @@ export function teamWeekCsv(d: Awaited<ReturnType<typeof teamWeek>>) {
   const rows: unknown[][] = [
     ['Team weekly review', `${d.week.start} to ${d.week.end}`], ['Scope', d.scope], ['Order', 'Alphabetical (not a ranking)'], ['Note', d.note],
     ['Definitions', d.definitions.version], ['Generated', d.generatedAt], [],
-    ['employee', 'department', 'assessment', 'assessment_reasons', 'intended_outcomes', 'accepted_planned', 'planned_completion', 'accepted_outcomes', 'carryovers',
+    ['employee', 'department', 'assessment', 'assessment_reasons', 'assessment_facts', 'assessment_assumptions', 'intended_outcomes', 'accepted_planned', 'planned_completion', 'accepted_outcomes', 'carryovers',
       'available_min', 'confirmed_min', 'unknown_min', 'logging_coverage', 'blocked_min', 'open_blockers', 'deadlines_met', 'deadlines_late', 'deadlines_overdue',
       'recaps_confirmed', 'recaps_required', 'recaps_missing', 'your_review', 'your_note', 'employee_response', 'top_recommendations'],
   ];
   for (const p of d.people) {
-    rows.push([p.user.name, p.user.department ?? '', LABEL[p.assessment.label] ?? p.assessment.label, p.assessment.reasons.join(' | '), p.outcomes.intended, p.outcomes.acceptedPlanned,
+    rows.push([p.user.name, p.user.department ?? '', LABEL[p.assessment.label] ?? p.assessment.label, p.assessment.reasons.join(' | '), p.assessment.facts.join(' | '),
+      p.assessment.assumptions.join(' | '), p.outcomes.intended, p.outcomes.acceptedPlanned,
       pctv(p.outcomes.plannedCompletion), p.outcomes.accepted, p.outcomes.carryovers, p.time.availableMinutes, p.time.confirmedMinutes, p.time.unknownMinutes,
       p.time.availableMinutes ? pctv(p.time.loggingCoverage) : 'N/A', p.time.blockedMinutes, p.blockers.open, p.deadlines.met, p.deadlines.late, p.deadlines.overdue,
       p.recaps.confirmed, p.recaps.required, p.recaps.missing, p.review ? STATUS_LABEL[p.review.status] : '', p.review?.note ?? '', p.review?.employeeResponse ?? '',
       p.recommendations.map((r: any) => r.text).join(' | ')]);
   }
   const t = d.totals;
-  rows.push([], ['Team totals', '', '', '', t.outcomes.intended, t.outcomes.acceptedPlanned, pctv(t.outcomes.plannedCompletion), t.outcomes.accepted, t.outcomes.carryovers,
+  rows.push([], ['Team totals', '', '', '', '', '', t.outcomes.intended, t.outcomes.acceptedPlanned, pctv(t.outcomes.plannedCompletion), t.outcomes.accepted, t.outcomes.carryovers,
     t.time.availableMinutes, t.time.confirmedMinutes, t.time.unknownMinutes, pctv(t.time.loggingCoverage), t.time.blockedMinutes, t.openBlockers, t.deadlines.met, t.deadlines.late,
     t.deadlines.overdue, t.recaps.confirmed, t.recaps.required, t.recaps.missing, `${t.reviewedByYou} reviewed`, '', '', '']);
   return rows.map((r) => r.map(csvCell).join(',')).join('\n') + '\n';
@@ -282,6 +290,8 @@ export function registerTeamWeeklyExport() {
     async authorize(db, a, p) {
       if (!p.date && !p.start) throw badRequest('date is required (any date in the week)');
       await reviewScope(db, a);
+      // Same week rules as the page, checked here so an impossible or future week is refused instead of failing in the worker forever.
+      if (weekOf(p.date ?? p.start).start > localToday(a.timezone)) throw badRequest('That week has not started yet, so there is nothing recorded to review.');
     },
     async build(db, a, p) {
       const data = await teamWeek(db, a, { week: p.date ?? p.start, includeMe: p.includeMe === true || p.includeMe === 'true' });
