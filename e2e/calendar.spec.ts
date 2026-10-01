@@ -59,7 +59,8 @@ test('holidays: import from an uploaded file with preview, then re-import is a n
   await dlg.getByRole('button', { name: 'Preview' }).click();
   await expect(dlg.getByRole('cell', { name: 'E2E Founders Day', exact: true })).toBeVisible();
   await expect(dlg.getByRole('cell', { name: 'E2E Harvest Day', exact: true })).toBeVisible();
-  await expect(dlg.getByText(/1 timed event\(s\) skipped/)).toBeVisible();
+  await expect(dlg.getByText(/1 timed event skipped/)).toBeVisible();
+  await expect(dlg.getByText(/2 new, 0 already holidays/)).toBeVisible();
   await expect(dlg.getByText('E2E timed party')).toHaveCount(0);
   await noSeriousAxe(page);
   await dlg.getByRole('button', { name: 'Import 2 holidays' }).click();
@@ -90,6 +91,7 @@ test('calendar pages fit a 390px phone screen', async ({ browser }) => {
     await page.waitForLoadState('networkidle');
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, path).toBeLessThanOrEqual(0);
+    await noSeriousAxe(page); // admin view: includes the scrollable signed-delivery example
   }
   await ctx.close();
 });
@@ -103,4 +105,99 @@ test('calendar subscription: a private address is refused with a clear message a
   await expect(page.getByText(/private, local or reserved address/).first()).toBeVisible();
   const state = await page.evaluate(() => fetch('/api/calendar/subscription', { headers: { 'x-requested-with': 'fetch' } }).then((r) => r.json()));
   expect(state.subscription).toBeNull();
+});
+
+const VIEWS = [{ w: 1440, h: 900, scheme: 'light' }, { w: 1440, h: 900, scheme: 'dark' }, { w: 390, h: 844, scheme: 'light' }, { w: 390, h: 844, scheme: 'dark' }] as const;
+
+test('integrations calendar views: axe clean in light/dark at 1440 and 390, keyboard focus kept, dialogs close on Escape', async ({ page }) => {
+  await signIn(page, 'rahul'); // seeded active subscription
+  for (const v of VIEWS) {
+    await page.setViewportSize({ width: v.w, height: v.h });
+    await page.emulateMedia({ colorScheme: v.scheme });
+    await page.goto('/integrations');
+    await expect(page.getByRole('region', { name: 'Subscribe by address' }).getByText('Active · hourly')).toBeVisible();
+    await noSeriousAxe(page);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), `${v.w} ${v.scheme}`).toBeLessThanOrEqual(0);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const sec = page.getByRole('region', { name: 'Subscribe by address' });
+  await sec.getByRole('button', { name: 'Change address' }).click();
+  await expect(sec.getByLabel('Secret address in iCal format')).toBeFocused();
+  await sec.getByLabel('Secret address in iCal format').fill('http://calendar.example.com/a.ics');
+  await sec.getByRole('button', { name: 'Save new address' }).click();
+  await expect(sec.getByRole('alert')).toContainText('https');
+  await noSeriousAxe(page);
+  await sec.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sec.getByText('calendar.northwind.example')).toBeVisible();
+
+  await sec.getByRole('button', { name: 'Remove' }).click();
+  const dlg = page.getByRole('dialog', { name: 'Remove calendar subscription?' });
+  await expect(dlg.getByRole('button', { name: 'Cancel' })).toBeFocused(); // the safe choice has focus
+  await noSeriousAxe(page);
+  await page.keyboard.press('Escape');
+  await expect(dlg).toHaveCount(0);
+  await expect(sec.getByRole('button', { name: 'Remove' })).toBeFocused();
+  await expect(sec.getByText('Active · hourly')).toBeVisible(); // nothing removed
+
+  // Pausing the whole calendar connection is reflected in the subscription status at once.
+  const card = page.locator('section', { has: page.getByRole('heading', { name: 'My work calendar' }) }).first();
+  await card.getByRole('button', { name: 'Pause calendar' }).click();
+  await expect(sec.getByText('Calendar paused')).toBeVisible();
+  await expect(sec.getByRole('button', { name: 'Sync now' })).toBeDisabled();
+  await card.getByRole('button', { name: 'Resume calendar' }).click();
+  await expect(sec.getByText('Active · hourly')).toBeVisible();
+});
+
+test('calendar page and holiday import wizard: axe clean in light/dark at 1440 and 390, keyboard-only', async ({ page }) => {
+  await signIn(page, 'asha');
+  for (const v of VIEWS) {
+    await page.setViewportSize({ width: v.w, height: v.h });
+    await page.emulateMedia({ colorScheme: v.scheme });
+    await page.goto('/calendar');
+    const card = page.locator('section', { has: page.getByRole('heading', { name: 'Holidays', exact: true }) });
+    await expect(card.getByText('Recent imports')).toBeVisible();
+    await noSeriousAxe(page);
+    // Keyboard only: open the wizard, check the first step, close with Escape and land back on the trigger.
+    await card.getByRole('button', { name: 'Import' }).focus();
+    await page.keyboard.press('Enter');
+    const dlg = page.getByRole('dialog', { name: 'Import holidays' });
+    await expect(dlg.getByLabel('Calendar file (.ics)')).toBeFocused();
+    await noSeriousAxe(page);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), `${v.w} ${v.scheme}`).toBeLessThanOrEqual(0);
+    await page.keyboard.press('Escape');
+    await expect(dlg).toHaveCount(0);
+    await expect(card.getByRole('button', { name: 'Import' })).toBeFocused();
+  }
+  // A refused address is explained next to the field.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator('section', { has: page.getByRole('heading', { name: 'Holidays', exact: true }) }).getByRole('button', { name: 'Import' }).click();
+  const dlg = page.getByRole('dialog', { name: 'Import holidays' });
+  await dlg.getByRole('radio', { name: 'From https address' }).click();
+  await dlg.getByLabel('Calendar address').fill('https://192.168.1.10/holidays.ics');
+  await dlg.getByRole('button', { name: 'Preview' }).click();
+  await expect(dlg.getByRole('alert')).toContainText('private, local or reserved address');
+  await expect(dlg.getByLabel('Calendar address')).toHaveAttribute('aria-invalid', 'true');
+  await noSeriousAxe(page);
+});
+
+test('calendar feed: the address gets focus when created and the confirm dialogs start on Cancel', async ({ page }) => {
+  await signIn(page, 'meera');
+  await page.goto('/integrations');
+  const card = page.locator('section', { has: page.getByRole('heading', { name: 'Calendar feed' }) });
+  await card.getByRole('button', { name: 'Create feed address' }).click();
+  await expect(card.getByLabel('Your feed address')).toBeFocused();
+  await card.getByRole('button', { name: 'Revoke' }).click();
+  const dlg = page.getByRole('dialog', { name: 'Revoke feed?' });
+  await expect(dlg.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await noSeriousAxe(page);
+  await dlg.getByRole('button', { name: 'Revoke', exact: true }).click();
+  await expect(card.getByRole('button', { name: 'Create feed address' })).toBeFocused();
+});
+
+test('client accounts are sent to their portal instead of staff calendar pages', async ({ page }) => {
+  await signIn(page, 'lena', 'globex.example');
+  for (const path of ['/integrations', '/calendar']) {
+    await page.goto(path);
+    await expect(page).toHaveURL(/\/portal$/);
+  }
 });

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Navigate } from 'react-router';
 import { Trash2 } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate } from '../lib/format';
@@ -15,6 +16,7 @@ export default function CalendarPage() {
   const me = useMe(); const r = useRoles();
   const [target, setTarget] = useState<string>(me.user.id);
   const people = useQuery({ queryKey: ['people'], queryFn: () => api.get('/api/people'), enabled: r.canReview || r.sysAdmin });
+  if (r.customer) return <Navigate to="/portal" replace />;
   return (
     <div>
       <PageHeader title="Calendar & leave" subtitle="Working schedules, holidays and leave define available capacity. Leave days show as Not Applicable in reports — never as zero productivity." />
@@ -80,7 +82,7 @@ function Leave({ people }: { people: any[] }) {
       <Button className="mt-3" variant="primary" loading={add.isPending} onClick={() => add.mutate()}>Record leave</Button>
       <ul className="mt-4 divide-y divide-line border-t border-line">{(q.data ?? []).map((l: any) => (
         <li key={l.id} className="flex items-center gap-2 py-2 text-[13px]"><span className="flex-1"><b>{l.user_name}</b> · {fmtDate(l.start_date)}{l.end_date !== l.start_date && ` – ${fmtDate(l.end_date)}`} <Badge>{l.kind}</Badge>{l.portion !== 'full' && <Badge tone="info">{l.portion === 'half_am' ? 'AM' : 'PM'}</Badge>}</span>
-          <IconButton label="Delete leave" onClick={() => del.mutate(l.id)}><Trash2 className="size-3.5" /></IconButton></li>))}</ul>
+          <IconButton label="Delete leave" onClick={() => confirm(`Delete ${l.user_name}'s ${l.kind} from ${fmtDate(l.start_date)}? Capacity and reports recompute.`) && del.mutate(l.id)}><Trash2 className="size-3.5" /></IconButton></li>))}</ul>
     </Card>
   );
 }
@@ -90,13 +92,13 @@ function Holidays({ canEdit }: { canEdit: boolean }) {
   const q = useQuery({ queryKey: ['holidays'], queryFn: () => api.get('/api/calendar/holidays') });
   const [f, setF] = useState({ date: '', name: '' });
   const add = useMutation({ mutationFn: () => api.post('/api/calendar/holidays', f), onSuccess: () => { setF({ date: '', name: '' }); qc.invalidateQueries(); }, onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
-  const del = useMutation({ mutationFn: (id: string) => api.del(`/api/calendar/holidays/${id}`), onSuccess: () => qc.invalidateQueries() });
+  const del = useMutation({ mutationFn: (id: string) => api.del(`/api/calendar/holidays/${id}`), onSuccess: () => qc.invalidateQueries(), onError: (e: any) => toast({ tone: 'critical', text: e.message }) });
   return (
     <Card title="Holidays" subtitle="Organization-wide non-working days." actions={canEdit && <HolidayImport />}>
       {q.isLoading ? <Skeleton className="h-24" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} />
         : (q.data ?? []).length === 0 && <p className="py-2 text-[13px] text-ink-3">No holidays yet.{canEdit && ' Add one below or import a calendar file.'}</p>}
       <ul className="divide-y divide-line">{(q.data ?? []).map((h: any) => <li key={h.id} className="flex items-center py-2 text-[13px]"><span className="w-32 tabular text-ink-2">{fmtDate(h.date, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span><span className="flex-1">{h.name}</span>
-        {canEdit && <IconButton label="Delete holiday" onClick={() => del.mutate(h.id)}><Trash2 className="size-3.5" /></IconButton>}</li>)}</ul>
+        {canEdit && <IconButton label={`Delete holiday ${h.name}`} onClick={() => confirm(`Delete the holiday ${h.name}? It becomes a working day for everyone.`) && del.mutate(h.id)}><Trash2 className="size-3.5" /></IconButton>}</li>)}</ul>
       {canEdit && <form className="mt-3 flex gap-2" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}><Input aria-label="Holiday date" type="date" className="h-8 w-40" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} />
         <Input aria-label="Holiday name" className="h-8" placeholder="Name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /><Button size="sm" type="submit" disabled={!f.date || !f.name}>Add</Button></form>}
       {canEdit && <RecentHolidayImports />}

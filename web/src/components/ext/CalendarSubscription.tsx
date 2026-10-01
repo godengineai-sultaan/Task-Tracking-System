@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link2, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { api } from '../../lib/api';
@@ -23,7 +23,8 @@ export function CalendarSubscription() {
   const [url, setUrl] = useState(''); const [editing, setEditing] = useState(false); const [confirmRemove, setConfirmRemove] = useState(false);
   const apply = (d: State) => { qc.setQueryData(['calendar-subscription'], d); qc.invalidateQueries({ queryKey: ['integrations'] }); qc.invalidateQueries({ queryKey: ['suggestions'] }); };
   const onError = (e: any) => toast({ tone: 'critical', text: e.message });
-  const save = useMutation({ mutationFn: () => api.put<State>('/api/calendar/subscription', { url: url.trim() }), onError,
+  // Refusals (not https, private address, unreachable) are shown under the field, not only in a toast.
+  const save = useMutation({ mutationFn: () => api.put<State>('/api/calendar/subscription', { url: url.trim() }),
     onSuccess: (d) => {
       apply(d); setUrl(''); setEditing(false);
       toast(d.subscription?.lastStatus === 'error' ? { tone: 'critical', text: `Saved, but the first check failed: ${d.subscription.lastError}` } : { tone: 'good', text: 'Calendar subscribed. It is checked every hour.' });
@@ -34,6 +35,15 @@ export function CalendarSubscription() {
   const remove = useMutation({ mutationFn: () => api.del<State>('/api/calendar/subscription'), onError,
     onSuccess: (d) => { apply(d); setConfirmRemove(false); toast({ tone: 'good', text: 'Subscription removed. The stored address was deleted.' }); } });
 
+  // Keep keyboard focus in place when the form and the status view swap (subscribe, change, cancel, remove).
+  const showForm = !q.data?.subscription || editing;
+  const inputRef = useRef<HTMLInputElement>(null); const statusRef = useRef<HTMLDivElement>(null); const prevShowForm = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (q.isLoading || q.error) return;
+    if (prevShowForm.current !== null && prevShowForm.current !== showForm) (showForm ? inputRef : statusRef).current?.focus();
+    prevShowForm.current = showForm;
+  }, [showForm, q.isLoading, q.error]);
+
   if (q.isLoading) return <Skeleton className="h-24" />;
   if (q.error) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const s = q.data?.subscription ?? null;
@@ -41,12 +51,13 @@ export function CalendarSubscription() {
 
   const form = (
     <form className="grid gap-2" onSubmit={(e) => { e.preventDefault(); if (url.trim()) save.mutate(); }}>
-      <Field label="Secret address in iCal format" hint={<>Google Calendar: Settings › your calendar › Integrate calendar. Outlook: Settings › Shared calendars › Publish a calendar › ICS link. Must start with https://. Stored encrypted; only the host is shown here.</>}>
-        {(id) => <Input id={id} type="url" inputMode="url" autoComplete="off" spellCheck={false} placeholder="https://calendar.example.com/…/basic.ics" value={url} onChange={(e) => setUrl(e.target.value)} />}
+      <Field label="Secret address in iCal format" error={(save.error as any)?.message ?? null} hint={<>Google Calendar: Settings › your calendar › Integrate calendar. Outlook: Settings › Shared calendars › Publish a calendar › ICS link. Must start with https://. Stored encrypted; only the host is shown here.</>}>
+        {(id) => <Input ref={inputRef} id={id} type="url" inputMode="url" autoComplete="off" spellCheck={false} placeholder="https://calendar.example.com/…/basic.ics" aria-invalid={save.isError || undefined}
+          value={url} onChange={(e) => { setUrl(e.target.value); if (save.isError) save.reset(); }} />}
       </Field>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" variant="primary" size="sm" icon={<Link2 className="size-3.5" aria-hidden />} loading={save.isPending} disabled={!url.trim()}>{s ? 'Save new address' : 'Subscribe'}</Button>
-        {s && <Button type="button" size="sm" variant="ghost" onClick={() => { setEditing(false); setUrl(''); }}>Cancel</Button>}
+        {s && <Button type="button" size="sm" variant="ghost" onClick={() => { setEditing(false); setUrl(''); save.reset(); }}>Cancel</Button>}
       </div>
     </form>
   );
@@ -56,7 +67,7 @@ export function CalendarSubscription() {
       <h3 id="cal-sub-h" className="text-[13.5px] font-semibold text-ink">Subscribe by address</h3>
       <p className="mt-0.5 mb-3 text-[12.5px] text-ink-3">Checked every hour. Meetings from the last 7 days become suggestions in My Day after they end; nothing is recorded until you confirm it.</p>
       {!s || editing ? form : (
-        <div className="grid gap-3">
+        <div ref={statusRef} tabIndex={-1} className="grid gap-3 rounded-lg">
           <div className="flex flex-wrap items-center gap-2 text-[13px]">
             <Badge tone={s.status === 'paused' || connPaused ? 'neutral' : s.lastStatus === 'error' ? 'critical' : 'good'}>
               {s.status === 'paused' ? 'Paused' : connPaused ? 'Calendar paused' : s.lastStatus === 'error' ? 'Sync failing' : 'Active · hourly'}</Badge>
@@ -79,7 +90,7 @@ export function CalendarSubscription() {
         </div>
       )}
       <Modal open={confirmRemove} onClose={() => setConfirmRemove(false)} title="Remove calendar subscription?"
-        footer={<><Button variant="ghost" onClick={() => setConfirmRemove(false)}>Cancel</Button><Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate()}>Remove</Button></>}>
+        footer={<><Button variant="ghost" data-autofocus onClick={() => setConfirmRemove(false)}>Cancel</Button><Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate()}>Remove</Button></>}>
         <p className="text-[13px] text-ink-2">The stored address is deleted and hourly checks stop. Meetings you already confirmed stay recorded; open suggestions stay until you decide on them.</p>
       </Modal>
     </section>

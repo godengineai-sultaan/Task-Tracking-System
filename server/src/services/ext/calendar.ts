@@ -214,7 +214,7 @@ export function parseHolidayIcs(text: string, now = new Date()) {
     }
   }
   const warnings: string[] = [];
-  if (timed) warnings.push(`${timed} timed event(s) skipped: holidays are imported only from all-day entries.`);
+  if (timed) warnings.push(`${timed} timed event${timed === 1 ? '' : 's'} skipped: holidays are imported only from all-day entries.`);
   if (outside) warnings.push(`${outside} entr${outside === 1 ? 'y' : 'ies'} outside ${from.getFullYear()}–${to.getFullYear()} skipped.`);
   if (tooLong) warnings.push(`${tooLong} entr${tooLong === 1 ? 'y' : 'ies'} longer than ${MAX_HOLIDAY_DAYS} days skipped.`);
   if (cancelled) warnings.push(`${cancelled} cancelled entr${cancelled === 1 ? 'y' : 'ies'} skipped.`);

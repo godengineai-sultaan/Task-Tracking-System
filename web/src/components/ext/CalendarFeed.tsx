@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, CalendarClock, Copy, Link2, RotateCw } from 'lucide-react';
 import { api } from '../../lib/api';
@@ -18,15 +18,24 @@ export function CalendarFeedCard({ className }: { className?: string }) {
     onSuccess: (r) => { setFresh(r.url); setConfirm(null); qc.invalidateQueries({ queryKey: ['calendar-feed'] }); toast({ tone: 'good', text: q.data?.active ? 'New feed address created. The old one no longer works.' : 'Feed address created' }); } });
   const revoke = useMutation({ mutationFn: () => api.del<FeedState>('/api/calendar/feed'), onError,
     onSuccess: (d) => { setFresh(null); setConfirm(null); qc.setQueryData(['calendar-feed'], d); toast({ tone: 'good', text: 'Feed revoked. Calendar apps can no longer read it.' }); } });
+  // Move focus to what replaced the clicked control: the new address after create/rotate, the create button after revoke.
+  const addrRef = useRef<HTMLInputElement>(null); const createRef = useRef<HTMLButtonElement>(null); const wasActive = useRef<boolean | null>(null);
+  useEffect(() => { if (fresh) { addrRef.current?.focus(); addrRef.current?.select(); } }, [fresh]);
+  const active = q.data?.active;
+  useEffect(() => {
+    if (active === undefined) return;
+    if (wasActive.current && !active) createRef.current?.focus();
+    wasActive.current = active;
+  }, [active]);
   const copy = () => fresh && navigator.clipboard?.writeText(fresh).then(() => toast({ tone: 'good', text: 'Feed address copied' }), () => toast({ tone: 'info', text: 'Select the address and copy it manually' }));
 
   return (
     <Card className={className} title={<span className="flex items-center gap-2"><CalendarClock className="size-4" aria-hidden />Calendar feed</span>}
       subtitle="Add your work to Google, Outlook or Apple Calendar as a read-only subscription.">
-      <ul className="mb-3 grid gap-1 text-[13px] text-ink-2">
-        <li>• Your open task due dates (title and a link only)</li>
-        <li>• Today's intended outcomes</li>
-        <li>• Your leave (shown as Leave, Training or Out of office)</li>
+      <ul className="mb-3 grid list-disc gap-1 pl-5 text-[13px] text-ink-2">
+        <li>Your open task due dates (title and a link only)</li>
+        <li>Today's intended outcomes</li>
+        <li>Your leave (shown as Leave, Training or Out of office)</li>
       </ul>
       <p className="mb-3 text-[12.5px] text-ink-3">Never includes task descriptions, comments or anyone else's data.</p>
       {q.isLoading ? <Skeleton className="h-16" /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : <>
@@ -34,7 +43,7 @@ export function CalendarFeedCard({ className }: { className?: string }) {
           <div className="mb-3 grid gap-2">
             <Field label="Your feed address">{(id) => (
               <div className="flex gap-2">
-                <Input id={id} readOnly value={fresh} className="min-w-0 flex-1 font-mono text-[12px]" onFocus={(e) => e.target.select()} />
+                <Input ref={addrRef} id={id} readOnly value={fresh} className="min-w-0 flex-1 font-mono text-[12px]" onFocus={(e) => e.target.select()} />
                 <Button icon={<Copy className="size-3.5" aria-hidden />} onClick={copy}>Copy</Button>
               </div>)}
             </Field>
@@ -54,11 +63,11 @@ export function CalendarFeedCard({ className }: { className?: string }) {
             </div>
           </div>
         ) : (
-          <Button variant="primary" icon={<Link2 className="size-4" aria-hidden />} loading={rotate.isPending} onClick={() => rotate.mutate()}>Create feed address</Button>
+          <Button ref={createRef} variant="primary" icon={<Link2 className="size-4" aria-hidden />} loading={rotate.isPending} onClick={() => rotate.mutate()}>Create feed address</Button>
         )}
       </>}
       <Modal open={!!confirm} onClose={() => setConfirm(null)} title={confirm === 'rotate' ? 'Rotate feed address?' : 'Revoke feed?'}
-        footer={<><Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
+        footer={<><Button variant="ghost" data-autofocus onClick={() => setConfirm(null)}>Cancel</Button>
           {confirm === 'rotate'
             ? <Button variant="primary" loading={rotate.isPending} onClick={() => rotate.mutate()}>Rotate</Button>
             : <Button variant="danger" loading={revoke.isPending} onClick={() => revoke.mutate()}>Revoke</Button>}</>}>
