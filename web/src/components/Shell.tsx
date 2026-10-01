@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { Command } from 'cmdk';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -67,7 +67,7 @@ export function Shell() {
         <BrandMark />
         <div className="min-w-0"><div className="truncate text-[13px] font-semibold">{me.tenant.name}</div><div className="text-[11px] capitalize text-ink-3">{me.tenant.plan} plan</div></div>
       </div>
-      {!r.customer && <button onClick={() => setCapture(true)} className="mx-1 flex h-9 items-center gap-2 rounded-lg bg-accent px-3 text-sm font-medium text-on-accent shadow-sm hover:brightness-110">
+      {!r.customer && <button onClick={() => { setMobileNav(false); setCapture(true); }} className="mx-1 flex h-9 items-center gap-2 rounded-lg bg-accent px-3 text-sm font-medium text-on-accent shadow-sm hover:brightness-110">
         <Plus className="size-4" aria-hidden />Quick capture<span className="ml-auto"><Kbd>Q</Kbd></span></button>}
       {items.map((g) => {
         const vis = g.items.filter((i) => i.show);
@@ -95,7 +95,7 @@ export function Shell() {
   return (
     <div className="flex h-full">
       <aside className="hidden w-60 shrink-0 border-r border-line bg-surface lg:sticky lg:top-0 lg:block lg:h-screen">{sidebar}</aside>
-      {mobileNav && <div className="fixed inset-0 z-40 bg-black/30 lg:hidden" onClick={() => setMobileNav(false)}><aside className="h-full w-72 bg-surface shadow-2xl" onClick={(e) => e.stopPropagation()}>{sidebar}</aside></div>}
+      {mobileNav && <MobileDrawer onClose={() => setMobileNav(false)}>{sidebar}</MobileDrawer>}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-line bg-surface/90 px-3 backdrop-blur sm:px-5">
           <IconButton label="Open navigation" className="lg:hidden" onClick={() => setMobileNav(true)}><Menu className="size-5" /></IconButton>
@@ -144,6 +144,30 @@ function BottomNav({ onCapture, onMore, moreOpen }: { onCapture: () => void; onM
           <span className="flex h-7 w-12 items-center justify-center"><Menu className="size-5" aria-hidden /></span>More</button></li>
       </ul>
     </nav>
+  );
+}
+
+/** The full navigation as a modal panel on phones and tablets (from More or the menu button): focus moves in, stays in, Escape closes, focus returns. */
+function MobileDrawer({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null;
+    (ref.current?.querySelector<HTMLElement>('a[aria-current="page"]') ?? ref.current?.querySelector<HTMLElement>('a, button'))?.focus();
+    const h = (e: KeyboardEvent) => {
+      if (document.querySelectorAll('[aria-modal="true"]').length > 1) return; // a dialog opened on top (e.g. quick capture) handles its own keys
+      if (e.key === 'Escape') { onClose(); return; }
+      const f = ref.current ? [...ref.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')] : [];
+      if (e.key !== 'Tab' || !f.length) return;
+      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    };
+    window.addEventListener('keydown', h);
+    return () => { window.removeEventListener('keydown', h); if (prev?.isConnected) prev.focus(); };
+  }, []);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/30 lg:hidden" onClick={onClose}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="Navigation" className="h-full w-72 max-w-[85vw] bg-surface pb-[env(safe-area-inset-bottom)] shadow-2xl" onClick={(e) => e.stopPropagation()}>{children}</div>
+    </div>
   );
 }
 

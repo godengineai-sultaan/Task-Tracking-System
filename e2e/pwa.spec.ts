@@ -7,7 +7,7 @@ const api = (page: Page, method: string, url: string, body?: unknown) => page.ev
   return { status: r.status, body: await r.json().catch(() => null) };
 }, [method, url, body] as const);
 const axeSerious = async (page: Page) => (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze()).violations
-  .filter((v) => ['serious', 'critical'].includes(v.impact ?? '')).map((v) => `${v.id}: ${v.help}`);
+  .filter((v) => ['serious', 'critical'].includes(v.impact ?? '')).map((v) => `${v.id}: ${v.help} (${v.nodes.slice(0, 3).map((n) => `${n.target.join(' ')} ${n.failureSummary ?? ''}`).join(' | ')})`);
 /** A stand-in Web Speech API recogniser that "hears" one phrase (no microphone in CI). */
 const fakeSpeech = () => {
   class FakeRecognition {
@@ -74,12 +74,14 @@ test('offline capture queues on the device and syncs exactly once after reconnec
   await page.keyboard.press('q');
   await page.getByLabel('Describe the task in one line').fill(`${title} today 15m`);
   await expect(page.getByText(/This capture is kept on this device/)).toBeVisible();
+  expect(await axeSerious(page)).toEqual([]); // the quick-capture dialog in its offline state
   await page.getByRole('button', { name: 'Save offline' }).click();
   await expect(page.getByText(/Saved on this device/)).toBeVisible();
   await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
   // Still offline after a while: nothing is lost or sent.
   await page.waitForTimeout(500);
   await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sync now' })).toHaveCount(0); // no dead control while offline
   expect(await axeSerious(page)).toEqual([]);
 
   const posts: string[] = [];
@@ -154,6 +156,8 @@ test('client accounts get no offline capture on the fallback page', async ({ pag
   await expect.poll(() => page.evaluate(async () => localStorage.getItem('tt-outbox-user') === null && !!navigator.serviceWorker.controller
     && !!(await caches.match('/offline.html')))).toBe(true);
   await context.setOffline(true);
+  await expect(page.getByText('Reconnect to see the latest project updates.')).toBeVisible(); // clients have no quick capture to offer
+  await expect(page.getByText(/Quick capture still works/)).toHaveCount(0);
   await page.goto('/portal');
   await expect(page.getByRole('heading', { name: "You're offline" })).toBeVisible();
   await expect(page.getByLabel(/Capture a task/)).toBeHidden();
@@ -184,9 +188,22 @@ test.describe('outbox safety', () => {
       return page.getByText('1 capture needs attention').isVisible();
     }, { timeout: 20_000 }).toBe(true);
     await page.getByRole('button', { name: 'Review', exact: true }).click();
-    await expect(page.getByLabel('Capture text')).toHaveValue(bad);
-    await page.getByRole('button', { name: 'Discard' }).click();
+    const field = page.getByRole('list', { name: 'Captures that need attention' }).getByRole('textbox');
+    await expect(field).toHaveValue(bad);
+    await expect(field).toHaveAccessibleDescription(/could not create this capture/);
+    expect(await axeSerious(page)).toEqual([]);
+    // Discarding deletes the text for good, so it asks first; Keep returns focus to Discard.
+    await page.getByRole('button', { name: 'Discard', exact: true }).click();
+    await expect(page.getByText('Delete this capture from this device?')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Keep' })).toBeFocused();
+    expect(await axeSerious(page)).toEqual([]);
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('button', { name: 'Discard', exact: true })).toBeFocused();
+    expect(await outboxCount(page)).toBe(1);
+    await page.getByRole('button', { name: 'Discard', exact: true }).click();
+    await page.getByRole('button', { name: 'Discard capture' }).click();
     await expect(page.getByText('needs attention')).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Connection and sync status' })).toBeFocused(); // focus is not dropped to the page body
     expect(await outboxCount(page)).toBe(0);
     expect(await exactMatches(page, bad)).toBe(0);
   });
@@ -229,6 +246,15 @@ test('mobile bottom navigation at 390px', async ({ browser }) => {
   await expect(bar.getByRole('link', { name: 'Tasks' })).toHaveAttribute('aria-current', 'page');
   await bar.getByRole('link', { name: 'Recap' }).click();
   await expect(page).toHaveURL(/\/recap$/);
+  // More opens the full navigation as a dialog: focus moves in, Escape closes it and returns focus.
+  await bar.getByRole('button', { name: 'More' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Navigation' });
+  await expect(drawer.getByRole('link', { name: 'Daily recap' })).toBeFocused();
+  await expect(bar.getByRole('button', { name: 'More' })).toHaveAttribute('aria-expanded', 'true');
+  expect(await axeSerious(page)).toEqual([]);
+  await page.keyboard.press('Escape');
+  await expect(drawer).toHaveCount(0);
+  await expect(bar.getByRole('button', { name: 'More' })).toBeFocused();
   await bar.getByRole('button', { name: 'More' }).click();
   await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Projects' }).click();
   await expect(page).toHaveURL(/\/projects$/);
@@ -273,6 +299,13 @@ test('voice capture: hidden unless enabled by the organization and supported by 
     await expect(p2.getByLabel('Describe the task in one line')).toHaveValue('Call the venue about seating tomorrow 15m');
     await expect(p2.getByText('Will create')).toBeVisible();
     await expect(p2.getByText('Call the venue about seating', { exact: true })).toBeVisible();
+    expect(await axeSerious(p2)).toEqual([]);
+    // Browser speech recognition needs its online service: offline, the microphone and its notice go away and the offline note explains.
+    await ctx.setOffline(true);
+    await expect(p2.getByRole('button', { name: 'Dictate with voice' })).toHaveCount(0);
+    await expect(p2.getByText(/this app never receives or stores audio/)).toHaveCount(0);
+    await expect(p2.getByText(/This capture is kept on this device/)).toBeVisible();
+    await ctx.setOffline(false);
     await ctx.close();
 
     // Enabled but the browser has no speech recognition: no button.
@@ -288,4 +321,54 @@ test('voice capture: hidden unless enabled by the organization and supported by 
   } finally {
     await api(page, 'PATCH', '/api/admin/tenant', { settings: { voice_capture_enabled: false } });
   }
+});
+
+test('update prompt: a newer deployment offers Reload or Later', async ({ page }) => {
+  await signIn(page, 'priya');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  // Pretend the server now serves a newer build (different hashed entry script).
+  await page.route(/\/$/, async (r) => {
+    const res = await r.fetch();
+    await r.fulfill({ response: res, body: (await res.text()).replace(/\/assets\/index-[^"]+\.js/, '/assets/index-NEWBUILD.js') });
+  });
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  const status = page.getByRole('region', { name: 'Connection and sync status' });
+  await expect(status.getByText('A new version of the app is available.')).toBeVisible();
+  await expect(status.getByRole('button', { name: 'Reload' })).toBeVisible();
+  expect(await axeSerious(page)).toEqual([]);
+  await status.getByRole('button', { name: 'Later' }).click();
+  await expect(page.getByText('A new version of the app is available.')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Connection and sync status' })).toHaveCount(0); // no empty landmark left behind
+});
+
+test('phone in dark mode: offline capture from the bottom bar, then the offline page', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme: 'dark' });
+  const page = await ctx.newPage();
+  await signIn(page, 'sara');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expect.poll(() => page.evaluate(async () => !!navigator.serviceWorker.controller && !!(await caches.match('/offline.html')))).toBe(true);
+  await ctx.setOffline(true);
+  await expect(page.getByText("You're offline.")).toBeVisible();
+  const bar = page.getByRole('navigation', { name: 'Mobile' });
+  await bar.getByRole('button', { name: 'Quick capture' }).click();
+  await expect(page.getByText(/This capture is kept on this device/)).toBeVisible(); // said up front, before anything is typed
+  await page.getByLabel('Describe the task in one line').fill(`Phone capture ${Date.now().toString(36)}`);
+  expect(await axeSerious(page)).toEqual([]);
+  await page.getByRole('button', { name: 'Save offline' }).click();
+  await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
+  await expect(bar.getByRole('button', { name: 'Quick capture' })).toContainText('1');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  expect(await axeSerious(page)).toEqual([]);
+
+  await page.goto('/tasks');
+  await expect(page.getByRole('heading', { name: "You're offline" })).toBeVisible();
+  await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
+  await page.getByRole('button', { name: 'Save on this device' }).click(); // empty: the browser asks for text instead of saving nothing
+  await expect(page.getByLabel(/Capture a task/)).toBeFocused();
+  await expect(page.getByText('1 capture waiting to sync')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  expect(await axeSerious(page)).toEqual([]);
+  await ctx.setOffline(false);
+  await expect(page.getByText('1 offline capture synced')).toBeVisible();
+  await ctx.close();
 });

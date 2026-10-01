@@ -56,10 +56,12 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
   const canCreate = offline ? !!text.trim() && !aiDraft : (aiDraft ? !!aiDraft.title : !!text.trim() && !!title) && !create.isPending;
   const submit = () => { if (offline) void saveOffline(); else create.mutate(); };
   const voice = useVoice(open && !!me.tenant.settings?.voice_capture_enabled, (t) => { setText(t); setAiDraft(null); });
+  // Speech recognition needs the browser's online speech service: no microphone while offline (unless already listening, so it can be stopped).
+  const mic = voice.available && (!offline || voice.listening);
   return (
     <Modal open={open} onClose={onClose} title="Quick capture" width="max-w-xl"
       footer={<>
-        <div className="mr-auto hidden items-center gap-1 text-[12px] text-ink-3 sm:flex"><Kbd>Enter</Kbd> create · <Kbd>Esc</Kbd> close</div>
+        <div className="mr-auto hidden items-center gap-1 text-[12px] text-ink-3 sm:flex"><Kbd>Enter</Kbd> {offline ? 'save' : 'create'} · <Kbd>Esc</Kbd> close</div>
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         <Button variant="primary" disabled={!canCreate} loading={create.isPending} onClick={submit}>{offline ? 'Save offline' : 'Create task'}</Button>
       </>}>
@@ -68,18 +70,18 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
         <input id="qc" data-autofocus autoComplete="off" value={text} onChange={(e) => { setText(e.target.value); setAiDraft(null); }}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && canCreate) { e.preventDefault(); submit(); } }}
           placeholder="Prepare laptop PO draft today — 30 min #OPS !high"
-          className={cx('h-11 w-full rounded-lg bg-surface-2 px-3 text-[15px] ring-1 ring-inset ring-line focus:outline-none focus:ring-2 focus:ring-accent', voice.available && 'pr-12')} />
-        {voice.available && <IconButton label={offline ? 'Voice capture needs a connection' : voice.listening ? 'Stop dictation' : 'Dictate with voice'} aria-pressed={voice.listening}
-          disabled={offline} onClick={voice.listening ? voice.stop : voice.start}
-          className={cx('absolute right-1.5 top-1.5 disabled:opacity-50', voice.listening && 'bg-critical-soft text-critical-ink')}>
+          className={cx('h-11 w-full rounded-lg bg-surface-2 px-3 text-[15px] ring-1 ring-inset ring-line focus:outline-none focus:ring-2 focus:ring-accent', mic && 'pr-12')} />
+        {mic && <IconButton label={voice.listening ? 'Stop dictation' : 'Dictate with voice'}
+          onClick={voice.listening ? voice.stop : voice.start}
+          className={cx('absolute right-1.5 top-1.5', voice.listening && 'bg-critical-soft text-critical-ink')}>
           {voice.listening ? <Square className="size-4" /> : <Mic className="size-4" />}</IconButton>}
       </div>
-      {voice.available && <p className="mt-1.5 flex gap-1.5 text-[12px] text-ink-3"><Mic className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      {mic && <p className="mt-1.5 flex gap-1.5 text-[12px] text-ink-3"><Mic className="mt-0.5 size-3.5 shrink-0" aria-hidden />
         <span>Voice is opt-in. Your browser's speech service turns speech into text (it may send the audio to the browser maker to transcribe). Only the transcript is used and you confirm it below; this app never receives or stores audio.</span></p>}
       {(voice.listening || voice.error) && <p role="status" aria-live="polite" className={cx('mt-1 text-[12px] font-medium', voice.error ? 'text-critical-ink' : 'text-accent-ink')}>
         {voice.error || 'Listening… speak your task, then review it.'}</p>}
       <p className="mt-1.5 text-[12px] text-ink-3">Shortcuts: <code>today</code>/<code>tomorrow</code>/<code>fri</code>/<code>2026-10-09</code>, <code>30m</code>/<code>2h</code>, <code>#KEY</code> project, <code>!high</code>, <code>@name</code> owner, <code>/finance</code> category.</p>
-      {offline && text.trim() && (
+      {offline && (
         <div className="mt-3"><Callout tone="neutral" icon={<WifiOff className="size-4" />}>You're offline. This capture is kept on this device and created when you reconnect.
           Shortcuts like <code>today</code>, <code>30m</code> and <code>#KEY</code> are applied then, using the day you captured it.</Callout></div>
       )}
@@ -103,7 +105,7 @@ export function QuickCapture({ open, onClose, defaults }: { open: boolean; onClo
       <details className="mt-4 rounded-lg ring-1 ring-line">
         <summary className="cursor-pointer select-none px-3 py-2 text-[13px] font-medium text-ink-2"><Sparkles className="mr-1 inline size-3.5" aria-hidden />Draft from a longer note (optional AI)</summary>
         <div className="space-y-2 px-3 pb-3">
-          {!me.ai.available ? <Callout tone="neutral">{me.ai.note}</Callout> : <>
+          {!me.ai.available ? <Callout tone="neutral">{me.ai.note}</Callout> : offline ? <Callout tone="neutral">Drafting from a note needs a connection. The one-line capture above works offline.</Callout> : <>
             <Textarea rows={3} value={aiNote} onChange={(e) => setAiNote(e.target.value)} placeholder="Paste a short note or message. The draft is a proposal — you review it before anything is saved." />
             <Button size="sm" loading={ai.isPending} disabled={!aiNote.trim()} onClick={() => ai.mutate()} icon={<Sparkles className="size-3.5" />}>Draft task</Button>
           </>}
