@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarDays, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
+import { CalendarDays, CalendarRange, CheckCircle2, ClipboardList, Clock, MessageSquareWarning, Pause, Play, Plus, Sparkles, Target, X } from 'lucide-react';
 import { api, qs } from '../lib/api';
 import { fmtDate, fmtTime, hm, minutesSince, relDue } from '../lib/format';
 import { useMe } from '../lib/session';
@@ -9,6 +9,7 @@ import { Badge, Button, Callout, Card, Empty, ErrorState, IconButton, PageHeader
 import { StatusControl, ReasonDialog } from '../components/TaskStatus';
 import { AllocationBar, EntryModal, EntryRow, useTicker } from '../components/time';
 import { TaskDrawer } from './TaskDetail';
+import { NudgeSettings, SuggestDayDialog, WeeklySummaryDrawer } from '../components/ext/PlanningAssistant';
 
 export default function MyDay() {
   const me = useMe(); const qc = useQueryClient(); const toast = useToast();
@@ -17,6 +18,8 @@ export default function MyDay() {
   const [drawer, setDrawer] = useState<string | null>(null);
   const [removing, setRemoving] = useState<any>(null);
   const [entryModal, setEntryModal] = useState<{ entry?: any } | null>(null);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [weeklyOpen, setWeeklyOpen] = useState(false);
   useTicker(30000);
   const plan = useMutation({
     mutationFn: (body: { taskIds: string[]; reason?: string }) => api.put('/api/my-day/plan', { ...body, elapsedMs: q.data?.intendedOutcomes?.length ? undefined : Date.now() - openedAt.current }),
@@ -53,8 +56,8 @@ export default function MyDay() {
     <div>
       <PageHeader eyebrow={d.isToday ? 'Today' : 'Day'} title={fmtDate(d.date, { weekday: 'long', day: 'numeric', month: 'long' })}
         subtitle={<span className="inline-flex items-center gap-1.5"><CalendarDays className="size-4" aria-hidden />{capLabel}</span>}
-        actions={<Link to="/recap"><Button variant={recapState && recapState !== 'draft' ? 'secondary' : 'primary'} icon={recapState && recapState !== 'draft' ? <CheckCircle2 className="size-4" /> : <ClipboardList className="size-4" />}>
-          {recapState === 'confirmed' || recapState === 'manager_reviewed' ? 'Recap confirmed' : 'End-of-day recap'}</Button></Link>} />
+        actions={<><Button icon={<CalendarRange className="size-4" />} onClick={() => setWeeklyOpen(true)}>Weekly summary</Button><Link to="/recap"><Button variant={recapState && recapState !== 'draft' ? 'secondary' : 'primary'} icon={recapState && recapState !== 'draft' ? <CheckCircle2 className="size-4" /> : <ClipboardList className="size-4" />}>
+          {recapState === 'confirmed' || recapState === 'manager_reviewed' ? 'Recap confirmed' : 'End-of-day recap'}</Button></Link></>} />
 
       {d.pendingClarifications.length > 0 && (
         <div className="mb-4"><Callout tone="warning" icon={<MessageSquareWarning className="mt-0.5 size-4 shrink-0" />}>
@@ -65,7 +68,8 @@ export default function MyDay() {
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
           <Card title={<span className="flex items-center gap-2"><Target className="size-4 text-accent" aria-hidden />Intended outcomes</span>}
-            subtitle="Up to three outcomes that would make today a success." actions={<span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span>} padded={false}>
+            subtitle="Up to three outcomes that would make today a success." padded={false}
+            actions={<><Button size="sm" variant="subtle" icon={<Sparkles className="size-3.5 text-accent" />} onClick={() => setSuggestOpen(true)}>Suggest my day</Button><span className="text-[12px] text-ink-3 tabular">{ids.length}/3</span></>}>
             <ol className="divide-y divide-line">
               {d.intendedOutcomes.map((t: any, i: number) => (
                 <li key={t.id} className="group flex items-center gap-3 px-4 py-3">
@@ -173,8 +177,11 @@ export default function MyDay() {
               </ul>
             </Card>
           )}
+          <NudgeSettings />
         </div>
       </div>
+      <SuggestDayDialog open={suggestOpen} onClose={() => setSuggestOpen(false)} date={d.date} today={d.today} onApply={(taskIds) => plan.mutateAsync({ taskIds })} />
+      <WeeklySummaryDrawer open={weeklyOpen} onClose={() => setWeeklyOpen(false)} today={d.today} />
       <TaskDrawer id={drawer} onClose={() => setDrawer(null)} />
       <ReasonDialog open={!!removing} title={`Remove "${removing?.title ?? ''}" from today`} label="Why are you replanning? (visible as a scope change)" loading={plan.isPending}
         onClose={() => setRemoving(null)} onSubmit={(reason) => plan.mutate({ taskIds: ids.filter((x) => x !== removing.id), reason })} />
