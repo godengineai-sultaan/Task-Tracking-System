@@ -8,13 +8,15 @@ import { badRequest, forbidden } from '../lib/errors.js';
 import { type Actor, assertCanViewPerson, has, loadActor } from './access.js';
 import { buildReport } from './analytics.js';
 import { leadershipDelivery, routineTable } from './oversight.js';
+import { drawPdfBrandHeader, loadPdfBrand, type PdfBrand } from './ext/clientbrand-brand.js';
 
 /** Extension point: feature areas register additional export report types (authorized + rendered server-side). */
 export interface ExportReportDef {
   authorize(db: Db, a: Actor, params: any): Promise<void>;
   build(db: Db, a: Actor, params: any): Promise<{ data: any; name: string }>;
   csv?(data: any): string;
-  pdf?(data: any, a: Actor): Promise<Buffer>;
+  /** `brand` (organization name, accent, raster logo) is supplied so the report can call drawPdfBrandHeader(doc, brand). */
+  pdf?(data: any, a: Actor, brand?: PdfBrand): Promise<Buffer>;
 }
 const extraReports = new Map<string, ExportReportDef>();
 export function registerExportReport(name: string, def: ExportReportDef) { extraReports.set(name, def); }
@@ -60,7 +62,7 @@ export async function generateExport(db: Db, exportId: string) {
   const ext = extraReports.get(ex.report);
   if (ext) {
     const built = await ext.build(db, a, ex.params);
-    const buf = ex.format === 'csv' ? Buffer.from(ext.csv!(built.data), 'utf8') : await ext.pdf!(built.data, a);
+    const buf = ex.format === 'csv' ? Buffer.from(ext.csv!(built.data), 'utf8') : await ext.pdf!(built.data, a, await loadPdfBrand(db, ex.tenant_id));
     const file = await storeFile(db, ex.tenant_id, buf, `${built.name}.${ex.format}`, ex.format === 'csv' ? 'text/csv' : 'application/pdf', 'export', a.id);
     await db.query(`update exports set status = 'ready', file_id = $2, completed_at = now() where id = $1`, [exportId, file.id]);
     return;
@@ -68,7 +70,7 @@ export async function generateExport(db: Db, exportId: string) {
   if (ex.report === 'individual') { data = await buildReport(db, p.userId!, p.kind ?? 'custom', p.start!, p.end!); name = `report-${slug(data.subject.name)}-${p.start}-to-${p.end}`; }
   else if (ex.report === 'team_daily') { data = await routineTable(db, a, { date: p.date!, departmentId: p.departmentId, projectId: p.projectId }); name = `daily-routine-${p.date}`; }
   else { data = await leadershipDelivery(db, a); name = `delivery-${new Date().toISOString().slice(0, 10)}`; }
-  const buf = ex.format === 'csv' ? Buffer.from(toCsv(ex.report, data), 'utf8') : await toPdf(ex.report, data, a);
+  const buf = ex.format === 'csv' ? Buffer.from(toCsv(ex.report, data), 'utf8') : await toPdf(ex.report, data, a, await loadPdfBrand(db, ex.tenant_id));
   const file = await storeFile(db, ex.tenant_id, buf, `${name}.${ex.format}`, ex.format === 'csv' ? 'text/csv' : 'application/pdf', 'export', a.id);
   await db.query(`update exports set status = 'ready', file_id = $2, completed_at = now() where id = $1`, [exportId, file.id]);
 }
@@ -113,11 +115,12 @@ export function toCsv(report: string, d: any) {
 
 // ---------- PDF ----------
 const hm = (m: number) => `${Math.floor(m / 60)}h ${Math.round(m % 60)}m`;
-export function toPdf(report: string, d: any, a: Actor): Promise<Buffer> {
+export function toPdf(report: string, d: any, a: Actor, brand?: PdfBrand): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 48, info: { Title: 'Task Tracking report', Author: 'Task Tracking and Productivity' } });
     const chunks: Buffer[] = [];
     doc.on('data', (c) => chunks.push(c)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
+    if (brand) drawPdfBrandHeader(doc, brand);
     const h1 = (t: string) => doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(t).moveDown(0.3);
     const h2 = (t: string) => { doc.moveDown(0.6).font('Helvetica-Bold').fontSize(12).fillColor('#111827').text(t).moveDown(0.2); };
     const p = (t: string, color = '#374151') => doc.font('Helvetica').fontSize(9.5).fillColor(color).text(t, { lineGap: 2 });
