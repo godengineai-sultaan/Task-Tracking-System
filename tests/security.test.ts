@@ -8,7 +8,7 @@ beforeAll(async () => {
   A = await makeOrg(); B = await makeOrg({ settings: { founders_visible_to_routine_admin: false } });
   [aEmp, aAdmin, aMgr, aOut, bEmp, bAdmin] = await Promise.all([login(A, 'emp'), login(A, 'admin'), login(A, 'manager'), login(A, 'outsider'), login(B, 'emp'), login(B, 'admin')]);
   secretTask = (await aEmp.post('/api/tasks', { title: 'Tenant A confidential deliverable' })).body;
-  await aEmp.post(`/api/tasks/${secretTask.id}/evidence`, { label: 'Offer letter', sourceModule: 'documents', sourceReference: 'DOC-9', restricted: true });
+  await aEmp.post(`/api/tasks/${secretTask.id}/evidence`, { label: 'Signed contract', sourceModule: 'HR drive', sourceReference: 'HR-9', restricted: true });
   await aEmp.post('/api/recap/confirm', { date: pastWorkday(A.tz, 1).toISODate(), summary: 'A work' });
 });
 
@@ -50,10 +50,10 @@ describe('role scoping', () => {
   });
   it('admin task visibility does not reveal restricted evidence', async () => {
     const asAdmin = (await aAdmin.get(`/api/tasks/${secretTask.id}`)).body;
-    expect(asAdmin.evidence[0]).toMatchObject({ hidden: true, label: 'Restricted reference' });
+    expect(asAdmin.evidence[0]).toMatchObject({ hidden: true, label: 'Confidential reference' });
     expect(asAdmin.evidence[0].source_reference).toBeUndefined();
     const asOwner = (await aEmp.get(`/api/tasks/${secretTask.id}`)).body;
-    expect(asOwner.evidence[0].source_reference).toBe('DOC-9');
+    expect(asOwner.evidence[0].source_reference).toBe('HR-9');
   });
   it('managers cannot edit an employee recap or time entry', async () => {
     const e = (await aEmp.post('/api/time-entries', { category: 'admin', startedAt: new Date(Date.now() - 3600e3).toISOString(), endedAt: new Date(Date.now() - 1800e3).toISOString() })).body.entry;

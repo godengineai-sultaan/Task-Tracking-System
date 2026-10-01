@@ -6,8 +6,7 @@ import { fmtDateTime } from '../lib/format';
 import { useRoles } from '../lib/session';
 import { Badge, Button, Callout, Card, ErrorState, Field, Input, Modal, PageHeader, Select, Skeleton, useToast } from '../components/ui';
 
-const KIND: Record<string, string> = { ics_calendar: 'Calendar (ICS file)', issues: 'Issue tracker', helpdesk: 'Helpdesk', code: 'Code host', module_approvals: 'Request Approval System',
-  module_documents: 'Document Generator', module_kyc: 'KYC / documents', module_vault: 'Password vault (metadata only)' };
+const KIND: Record<string, string> = { ics_calendar: 'Calendar (ICS file)', issues: 'Issue tracker', helpdesk: 'Helpdesk', code: 'Code host' };
 
 export default function Integrations() {
   const r = useRoles(); const qc = useQueryClient(); const toast = useToast();
@@ -39,12 +38,13 @@ export default function Integrations() {
 X-Timestamp: <unix seconds>
 X-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
 
-{ "event_id": "...", "event_type": "approval.approved",
+{ "event_id": "...", "event_type": "issue.assigned",
   "schema_version": "1.0", "tenant_id": "<org id>",
-  "resource_id": "REQ-1", "resource_version": "2",
+  "resource_id": "ISS-42", "resource_version": "2",
   "occurred_at": "...", "correlation_id": "...",
-  "payload": { /* references only — never secrets */ } }`}</pre>
-          <p className="mt-2 text-[12px] text-ink-3">Repeated deliveries are de-duplicated; a re-sent approval updates nothing and creates no duplicate task. Payloads containing password/token/secret fields are rejected and not stored.</p>
+  "payload": { "title": "...", "issue_ref": "ISS-42",
+               "assignee_email": "...", "url": "..." } }`}</pre>
+          <p className="mt-2 text-[12px] text-ink-3">Repeated deliveries are de-duplicated; related events (e.g. many commits on one issue) are grouped into one suggestion. Payloads containing password/token/secret fields are rejected and not stored.</p>
         </Card>
         {r.sysAdmin && <Card className="lg:col-span-2" title={<span className="flex items-center gap-2"><Plug className="size-4" aria-hidden />Organization connections</span>} actions={<Button size="sm" variant="primary" onClick={() => setNewOpen(true)}>Add connection</Button>} padded={false}>
           <ul className="divide-y divide-line">{org.length === 0 && <li className="px-4 py-4 text-[13px] text-ink-3">No organization connections.</li>}{org.map((c: any) => (
@@ -70,13 +70,12 @@ X-Signature: sha256=HMAC_SHA256(secret, "<timestamp>.<raw body>")
 }
 
 function NewConnection({ open, onClose, onCreate, loading }: { open: boolean; onClose: () => void; onCreate: (b: any) => void; loading: boolean }) {
-  const [kind, setKind] = useState('module_approvals'); const [name, setName] = useState('');
+  const [kind, setKind] = useState('issues'); const [name, setName] = useState('');
   return (
     <Modal open={open} onClose={onClose} title="Add organization connection" footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!name} loading={loading} onClick={() => onCreate({ kind, name })}>Create</Button></>}>
       <div className="grid gap-3">
         <Field label="Type">{(id) => <Select id={id} value={kind} onChange={(e) => setKind(e.target.value)}>{Object.entries(KIND).filter(([k]) => k !== 'ics_calendar').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>}</Field>
         <Field label="Name">{(id) => <Input id={id} value={name} onChange={(e) => setName(e.target.value)} />}</Field>
-        {kind === 'module_vault' && <Callout tone="neutral">Vault events create metadata-only tasks (system name, credential reference, due date). Any payload containing a secret value or secret-like field is rejected and never stored.</Callout>}
         {['issues', 'helpdesk', 'code'].includes(kind) && <Callout tone="neutral">Events become suggestions for the assignee. Related events (e.g. many commits) are grouped under one suggestion; nothing is created without confirmation.</Callout>}
       </div>
     </Modal>

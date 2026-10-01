@@ -123,7 +123,7 @@ export async function taskRoutes(app: FastifyInstance) {
         where te.task_id = $1 and te.deleted_at is null order by te.started_at desc limit 50`, [t.id]),
     ]);
     const visibleEvidence = evidence.map((e) => canSeeRestrictedEvidence(a, e, t) ? e
-      : { id: e.id, kind: e.kind, label: 'Restricted reference', restricted: true, source_module: e.source_module, created_at: e.created_at, hidden: true });
+      : { id: e.id, kind: e.kind, label: 'Confidential reference', restricted: true, created_at: e.created_at, hidden: true });
     const { project_owner_id, project_customer_id, ...task } = t;
     return { task, owner, reviewer, project, milestone, checklist, dependencies: deps, dependents, collaborators, evidence: visibleEvidence, blockers, comments,
       history, reviews, time, canEdit: await canEditCheck(db, a, t) };

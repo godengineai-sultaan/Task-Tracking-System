@@ -54,8 +54,6 @@ export function TaskDetailView({ id, onClose }: { id: string; onClose: () => voi
 
       {openBlocker && <div className="mt-4"><BlockerCard b={openBlocker} canEdit={can} /></div>}
       {isReviewer && <div className="mt-4"><ReviewPanel taskId={t.id} /></div>}
-      {t.source_ref?.module === 'vault' && <div className="mt-4"><Callout tone="neutral" icon={<Lock className="mt-0.5 size-4 shrink-0" />}>Metadata-only task from the password vault. Perform the action in the vault using reference <b>{t.source_ref.credential_ref}</b>; no secret is stored here.</Callout></div>}
-      {t.source_ref?.module === 'approvals' && <div className="mt-4"><Callout tone="info">Created from approved request <b>{t.source_ref.request_ref}</b> (scope {t.source_ref.approved_scope_ref}). Complete within the approved scope.</Callout></div>}
 
       <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 text-[13px] sm:grid-cols-3">
         <Prop label="Owner"><div className="flex items-center gap-1.5"><Avatar name={d.owner.name} size={20} />{d.owner.name}
@@ -107,7 +105,7 @@ export function TaskDetailView({ id, onClose }: { id: string; onClose: () => voi
   );
 }
 
-const sourceLabel = (s: string) => ({ quick_capture: 'Quick capture', recurring: 'Recurring', integration: 'From integration', approval: 'Approved request', document: 'Document', kyc: 'KYC follow-up', offboarding: 'Offboarding / rotation', follow_up: 'Review follow-up', ai_draft: 'AI draft (reviewed)' } as any)[s] ?? s;
+const sourceLabel = (s: string) => ({ quick_capture: 'Quick capture', recurring: 'Recurring', integration: 'From integration', follow_up: 'Review follow-up', ai_draft: 'AI draft (reviewed)' } as any)[s] ?? s;
 function Prop({ label, children }: { label: string; children: React.ReactNode }) {
   return <div className="min-w-0"><dt className="mb-1 text-[12px] text-ink-3">{label}</dt><dd>{children}</dd></div>;
 }
@@ -188,11 +186,11 @@ function Checklist({ taskId, items, can }: { taskId: string; items: any[]; can: 
 function Evidence({ task, items, can }: { task: any; items: any[]; can: boolean }) {
   const qc = useQueryClient(); const toast = useToast(); const me = useMe();
   const [mode, setMode] = useState<null | 'link' | 'file' | 'ref'>(null);
-  const [label, setLabel] = useState(''); const [url, setUrl] = useState(''); const [file, setFile] = useState<File | null>(null); const [ref, setRef] = useState(''); const [mod, setMod] = useState('documents');
+  const [label, setLabel] = useState(''); const [url, setUrl] = useState(''); const [file, setFile] = useState<File | null>(null); const [ref, setRef] = useState(''); const [mod, setMod] = useState('');
   const add = useMutation({
     mutationFn: () => {
       if (mode === 'file') { const fd = new FormData(); fd.append('label', label || file!.name); fd.append('file', file!); return api.post(`/api/tasks/${task.id}/evidence`, fd); }
-      if (mode === 'ref') return api.post(`/api/tasks/${task.id}/evidence`, { label, sourceModule: mod, sourceReference: ref, restricted: true });
+      if (mode === 'ref') return api.post(`/api/tasks/${task.id}/evidence`, { label, sourceModule: mod || undefined, sourceReference: ref, restricted: true });
       return api.post(`/api/tasks/${task.id}/evidence`, { label, url });
     },
     onSuccess: () => { qc.invalidateQueries(); setMode(null); setLabel(''); setUrl(''); setFile(null); setRef(''); toast({ tone: 'good', text: 'Evidence added' }); },
@@ -203,32 +201,32 @@ function Evidence({ task, items, can }: { task: any; items: any[]; can: boolean 
     <Section title="Evidence" actions={can && <div className="flex gap-1">
       <Button size="sm" variant="ghost" icon={<Link2 className="size-3.5" />} onClick={() => setMode('link')}>Link</Button>
       <Button size="sm" variant="ghost" icon={<Paperclip className="size-3.5" />} onClick={() => setMode('file')}>File</Button>
-      <Button size="sm" variant="ghost" icon={<Lock className="size-3.5" />} onClick={() => setMode('ref')}>Restricted ref</Button></div>}>
+      <Button size="sm" variant="ghost" icon={<Lock className="size-3.5" />} onClick={() => setMode('ref')}>Confidential ref</Button></div>}>
       {items.length === 0 ? <p className="text-[13px] text-ink-3">{task.requires_evidence ? 'Evidence is required before this can be completed.' : 'No evidence yet.'}</p> : (
         <ul className="divide-y divide-line rounded-lg ring-1 ring-line">{items.map((e) => (
           <li key={e.id} className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
             {e.hidden || e.restricted ? <Lock className="size-4 text-ink-3" aria-hidden /> : e.kind === 'file' ? <FileText className="size-4 text-ink-3" aria-hidden /> : <ExternalLink className="size-4 text-ink-3" aria-hidden />}
             <div className="min-w-0 flex-1">
-              {e.hidden ? <span className="text-ink-2">Restricted reference <span className="text-ink-3">({e.source_module} — source permissions apply)</span></span>
+              {e.hidden ? <span className="text-ink-2">Confidential reference <span className="text-ink-3">(visible only to the owner and the person who added it)</span></span>
                 : e.kind === 'link' ? <a href={e.url} target="_blank" rel="noopener noreferrer" className="truncate text-accent-ink underline">{e.label}</a>
                 : e.kind === 'file' ? <a href={`/api/evidence/${e.id}/file`} className="inline-flex items-center gap-1 text-accent-ink underline">{e.label}<Download className="size-3" /></a>
-                : <span>{e.label} <span className="text-ink-3">· {e.source_module} ref {e.source_reference}</span></span>}
+                : <span>{e.label} <span className="text-ink-3">· {e.source_module ? `${e.source_module} · ` : ''}ref {e.source_reference}</span></span>}
               {!e.hidden && <div className="text-[11px] text-ink-3">{e.added_by_name ?? 'System'} · {fmtDateTime(e.created_at)}</div>}
             </div>
             {e.added_by === me.user.id && task.status !== 'done' && <IconButton label="Withdraw evidence" className="size-7" onClick={() => del.mutate(e.id)}><Trash2 className="size-3.5" /></IconButton>}
           </li>))}</ul>
       )}
-      <Modal open={!!mode} onClose={() => setMode(null)} title={mode === 'file' ? 'Upload evidence file' : mode === 'ref' ? 'Add restricted reference' : 'Add evidence link'}
+      <Modal open={!!mode} onClose={() => setMode(null)} title={mode === 'file' ? 'Upload evidence file' : mode === 'ref' ? 'Add confidential reference' : 'Add evidence link'}
         footer={<><Button variant="ghost" onClick={() => setMode(null)}>Cancel</Button><Button variant="primary" loading={add.isPending}
           disabled={mode === 'file' ? !file : mode === 'ref' ? !(label && ref) : !(label && url)} onClick={() => add.mutate()}>Add</Button></>}>
         <div className="grid gap-3">
-          {mode === 'ref' && <Callout tone="neutral">A restricted reference stores only a label and an ID from another module (e.g. an offer letter or PO). Its content stays in that module under its own permissions — only you and the task owner see the reference here.</Callout>}
-          <Field label="Label">{(id) => <Input id={id} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={mode === 'ref' ? 'Offer letter (final)' : 'e.g. Pull request #42'} />}</Field>
+          {mode === 'ref' && <Callout tone="neutral">A confidential reference stores only a label and an ID pointing to a document kept elsewhere (e.g. an HR file or contract). The content stays in that system under its own permissions — only you and the task owner see the reference here.</Callout>}
+          <Field label="Label">{(id) => <Input id={id} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={mode === 'ref' ? 'Signed contract (confidential)' : 'e.g. Pull request #42'} />}</Field>
           {mode === 'link' && <Field label="URL">{(id) => <Input id={id} type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://" />}</Field>}
           {mode === 'file' && <Field label="File (max 15 MB, stored privately)">{(id) => <input id={id} type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="text-[13px]" />}</Field>}
           {mode === 'ref' && <div className="grid grid-cols-2 gap-3">
-            <Field label="Source module">{(id) => <Select id={id} value={mod} onChange={(e) => setMod(e.target.value)}><option value="documents">Document Generator</option><option value="approvals">Approvals</option><option value="kyc">KYC / documents</option><option value="hr">HR</option></Select>}</Field>
-            <Field label="Reference ID">{(id) => <Input id={id} value={ref} onChange={(e) => setRef(e.target.value)} placeholder="DOC-123" />}</Field></div>}
+            <Field label="System (optional)">{(id) => <Input id={id} value={mod} onChange={(e) => setMod(e.target.value)} placeholder="e.g. HR drive" />}</Field>
+            <Field label="Reference ID">{(id) => <Input id={id} value={ref} onChange={(e) => setRef(e.target.value)} placeholder="e.g. FILE-123" />}</Field></div>}
         </div>
       </Modal>
     </Section>

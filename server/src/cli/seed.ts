@@ -297,23 +297,12 @@ async function main() {
     if (now > s.plus({ minutes: 60 })) await ins('time_entries', { user_id: U[k], task_id: pool[0].id, category: 'task', started_at: s.toJSDate(), ended_at: s.plus({ minutes: 60 }).toJSDate(), source: 'timer' });
   }
 
-  // ---------- Cross-module examples (metadata only) ----------
-  const appr = await ins('integration_connections', { kind: 'module_approvals', name: 'Request Approval System', secret_enc: encrypt(newToken(32)), created_by: U.asha, last_sync_at: new Date() });
-  const vault = await ins('integration_connections', { kind: 'module_vault', name: 'Password Vault (metadata only)', secret_enc: encrypt(newToken(32)), created_by: U.asha });
-  await ins('integration_connections', { kind: 'module_documents', name: 'Document Generator', secret_enc: encrypt(newToken(32)), created_by: U.asha });
-  await ins('integration_connections', { kind: 'issues', name: 'Issue tracker webhook', secret_enc: encrypt(newToken(32)), created_by: U.asha });
+  // ---------- Work-tool connections and a confidential reference ----------
+  await ins('integration_connections', { kind: 'issues', name: 'Issue tracker webhook', secret_enc: encrypt(newToken(32)), created_by: U.asha, last_sync_at: new Date() });
   const ics = await ins('integration_connections', { kind: 'ics_calendar', name: 'Rahul — work calendar (ICS)', user_id: U.rahul, created_by: U.rahul });
-  const po = await ins('tasks', { project_id: P.OPS.id, title: 'Execute approved purchase: 4 laptops for October joiners', owner_id: U.dev, status: 'planned', priority: 'high', category: 'operations',
-    due_date: today.plus({ days: 4 }).toISODate(), source_type: 'approval', requires_evidence: true, external_key: `approval:${appr.id}:REQ-2026-0142`,
-    source_ref: { module: 'approvals', request_ref: 'REQ-2026-0142', approved_scope_ref: 'SCOPE-0142-v2', resource_version: '2' },
-    acceptance_criteria: 'PO issued within approved amount\nDelivery date confirmed' });
-  await ins('task_state_history', { task_id: po.id, from_status: null, to_status: 'planned', reason: 'Created (approval)' });
-  await ins('evidence_links', { task_id: po.id, kind: 'source_ref', label: 'Purchase order (final, confidential)', source_module: 'documents', source_reference: 'DOC-PO-0142', restricted: true, allowed_user_ids: [U.dev] });
-  const rot = await ins('tasks', { title: 'Remove access to AWS console for departing contractor', owner_id: U.dev, status: 'planned', priority: 'urgent', category: 'operations',
-    due_date: today.plus({ days: 1 }).toISODate(), source_type: 'offboarding', external_key: `vault:${vault.id}:access.offboarding:CRED-77:P-19`,
-    source_ref: { module: 'vault', credential_ref: 'CRED-77', system_name: 'AWS console', person_ref: 'P-19' },
-    description: 'Secure reference: CRED-77. Open the password vault to perform this action — no secret is stored in this task.' });
-  await ins('task_state_history', { task_id: rot.id, from_status: null, to_status: 'planned', reason: 'Created (offboarding)' });
+  const hireTask = tasks.find((t) => t.spec.title === 'VP Engineering shortlist');
+  if (hireTask) await ins('evidence_links', { task_id: hireTask.id, kind: 'source_ref', label: 'Candidate assessment notes (confidential)', source_module: 'HR drive',
+    source_reference: 'HR-FILE-0042', restricted: true, allowed_user_ids: [U.asha], added_by: U.asha });
   const evRow = await ins('integration_events', { connection_id: ics.id, event_id: `demo-standup:${today.set({ hour: 11 }).toUTC().toISO()}`, event_type: 'calendar.event', schema_version: '1.0',
     occurred_at: today.set({ hour: 11 }).toJSDate(), payload: { summary: 'Daily stand-up', start: today.set({ hour: 11 }).toUTC().toISO(), end: today.set({ hour: 11, minute: 30 }).toUTC().toISO() }, status: 'suggested' });
   if (now > today.set({ hour: 11, minute: 30 }))

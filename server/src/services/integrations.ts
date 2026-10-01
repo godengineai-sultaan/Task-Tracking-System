@@ -9,11 +9,11 @@ import { type Actor, has } from './access.js';
 import { createTask } from './tasks.js';
 import { notify } from './notify.js';
 
-export const CONNECTION_KINDS = ['ics_calendar', 'issues', 'helpdesk', 'code', 'module_approvals', 'module_documents', 'module_kyc', 'module_vault'] as const;
+export const CONNECTION_KINDS = ['ics_calendar', 'issues', 'helpdesk', 'code'] as const;
 const PERSONAL_KINDS = new Set(['ics_calendar']);
 export const SCHEMA_VERSION = '1.0';
 
-/** Keys that must never appear in any inbound payload (vault, offboarding and every other module). */
+/** Keys that must never appear in any inbound payload: tools must send references, never secrets or personal identifiers. */
 const FORBIDDEN_KEY = /(pass(word)?|secret|token|api[_-]?key|private[_-]?key|credential[_-]?value|otp|pin|cvv|ssn|aadhaar|pan[_-]?number|passport[_-]?number|salary|compensation)/i;
 const SECRET_VALUE = /(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bghp_[A-Za-z0-9]{30,}\b|\bsk-[A-Za-z0-9-_]{20,}\b|\bxox[bap]-[A-Za-z0-9-]{10,})/;
 export function scanForSecrets(v: unknown, path = 'payload'): string | null {
@@ -93,7 +93,7 @@ async function userByEmail(db: Db, email?: string) {
   return one(db, `select id, name from users where lower(email) = lower($1) and status = 'active' and not ('customer' = any(roles))`, [email]);
 }
 
-/** Durable job: turn a stored event into a task, follow-up, restricted reference or suggestion. Idempotent. */
+/** Durable job: turn a stored work-tool event into a confirm-first suggestion. Idempotent. */
 export async function processEvent(db: Db, eventId: string) {
   const ev = await one(db, `select e.*, c.kind connection_kind, c.user_id connection_user_id from integration_events e
     join integration_connections c on c.id = e.connection_id where e.id = $1`, [eventId]);
@@ -102,59 +102,8 @@ export async function processEvent(db: Db, eventId: string) {
   const tenantId = ev.tenant_id;
   const done = async (status: string, result: string) =>
     db.query(`update integration_events set status = $2, result = $3 where id = $1`, [eventId, status, result]);
-  const keyBase = `${ev.connection_id}:${ev.resource_id ?? p.external_id ?? ev.event_id}`;
 
   switch (ev.connection_kind) {
-    case 'module_approvals': {
-      if (ev.event_type !== 'approval.approved') return done('ignored', `Event type ${ev.event_type} does not create work`);
-      const owner = await userByEmail(db, p.owner_email);
-      if (!owner) return done('ignored', `No active staff member for owner ${p.owner_email ?? '(missing)'}`);
-      const r = await createTask(db, null, tenantId, {
-        title: p.title || `Execute approved ${p.kind ?? 'request'} ${p.request_ref ?? ''}`.trim(), ownerId: owner.id, dueDate: p.due_date ?? null,
-        category: p.kind === 'payment' || p.kind === 'purchase' ? 'finance' : 'operations', sourceType: 'approval', requiresEvidence: true,
-        acceptanceCriteria: (p.completion_conditions ?? []).join('\n'), checklist: p.completion_conditions ?? [],
-        sourceRef: { module: 'approvals', request_ref: p.request_ref, approved_scope_ref: p.approved_scope_ref, resource_version: ev.resource_version },
-        externalKey: `approval:${keyBase}`,
-      }, { authority: 'approved_request', correlationId: ev.correlation_id });
-      return done('applied', r.created ? `Created task ${r.task.id}` : `Already delivered — existing task ${r.task.id} kept (no duplicate)`);
-    }
-    case 'module_documents': {
-      if (ev.event_type !== 'document.finalized') return done('ignored', `Event type ${ev.event_type} not handled`);
-      const task = p.related_request_ref
-        ? await one(db, `select * from tasks where source_ref->>'request_ref' = $1 order by created_at limit 1`, [p.related_request_ref])
-        : null;
-      if (!task) return done('ignored', `No task linked to request ${p.related_request_ref ?? '(none)'}`);
-      const exists = await one(db, `select id from evidence_links where task_id = $1 and source_module = 'documents' and source_reference = $2`, [task.id, p.document_ref]);
-      if (exists) return done('applied', 'Reference already attached');
-      await db.query(`insert into evidence_links (tenant_id, task_id, kind, label, source_module, source_reference, restricted, allowed_user_ids)
-        values ($1,$2,'source_ref',$3,'documents',$4,true,$5)`,
-        [tenantId, task.id, `${p.kind ?? 'Document'} (final, confidential)`, p.document_ref, [task.owner_id]]);
-      return done('applied', `Restricted document reference attached to task ${task.id}`);
-    }
-    case 'module_kyc': {
-      if (ev.event_type !== 'kyc.document_missing') return done('ignored', `Event type ${ev.event_type} not handled`);
-      const owner = await userByEmail(db, p.owner_email);
-      if (!owner) return done('ignored', `No active staff member for owner ${p.owner_email ?? '(missing)'}`);
-      const r = await createTask(db, null, tenantId, {
-        title: `Follow up: ${p.required_item ?? 'missing document'} for ${p.subject_ref ?? 'subject'}`, ownerId: owner.id, dueDate: p.due_date ?? null,
-        category: 'operations', sourceType: 'kyc', sourceRef: { module: 'kyc', subject_ref: p.subject_ref, required_item: p.required_item, status: p.status },
-        externalKey: `kyc:${ev.connection_id}:${p.subject_ref}:${p.required_item}`,
-      }, { authority: 'kyc_module', correlationId: ev.correlation_id });
-      return done('applied', r.created ? `Created follow-up ${r.task.id}` : 'Follow-up already exists (deduplicated)');
-    }
-    case 'module_vault': {
-      if (!['access.offboarding', 'credential.rotation_due'].includes(ev.event_type)) return done('ignored', `Event type ${ev.event_type} not handled`);
-      const owner = await userByEmail(db, p.owner_email);
-      if (!owner) return done('ignored', `No active staff member for owner ${p.owner_email ?? '(missing)'}`);
-      const what = ev.event_type === 'access.offboarding' ? `Remove access to ${p.system_name ?? 'system'} for ${p.person_ref ?? 'departing user'}` : `Rotate credential for ${p.system_name ?? 'system'}`;
-      const r = await createTask(db, null, tenantId, {
-        title: what, ownerId: owner.id, dueDate: p.due_date ?? null, category: 'operations', sourceType: 'offboarding', requiresEvidence: false,
-        description: `Secure reference: ${p.credential_ref ?? 'n/a'}. Open the password vault to perform this action — no secret is stored in this task.`,
-        sourceRef: { module: 'vault', credential_ref: p.credential_ref, system_name: p.system_name, person_ref: p.person_ref },
-        externalKey: `vault:${ev.connection_id}:${ev.event_type}:${p.credential_ref}:${p.person_ref ?? ''}`,
-      }, { authority: 'vault_module', correlationId: ev.correlation_id });
-      return done('applied', r.created ? `Created metadata-only task ${r.task.id}` : 'Task already exists (deduplicated)');
-    }
     case 'issues': case 'helpdesk': case 'code': {
       const owner = await userByEmail(db, p.assignee_email ?? p.author_email);
       if (!owner) return done('ignored', 'No matching staff member — nothing suggested');

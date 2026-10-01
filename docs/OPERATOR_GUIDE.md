@@ -72,7 +72,7 @@ The drill verifies checksums, reconciles row counts and verifies every audit cha
 
 Restores do not replay access changes made after the backup.
 
-## 5. Integration contract for other modules
+## 5. Work-tool integration contract (issues, helpdesk, code host)
 
 `POST /api/inbound/<org-slug>/<connection-id>` with these headers:
 - `X-Timestamp: <unix seconds>` (5-minute window);
@@ -88,10 +88,6 @@ Responses:
 
 | Connection | Event types | Effect |
 |---|---|---|
-| Request Approval System | `approval.approved` | One execution task per approved request (`resource_id`); evidence required; checklist from `completion_conditions` |
-| Document Generator | `document.finalized` | Restricted reference attached to the related approval task (owner-only) |
-| KYC / documents | `kyc.document_missing` | One follow-up per subject and required item |
-| Password vault | `access.offboarding`, `credential.rotation_due` | Metadata-only task (system name, credential reference); no secrets accepted |
 | Issues / helpdesk / code | any | Confirm-first suggestion for the assignee, grouped by external reference |
 | Calendar (ICS upload) | — | Past meetings become confirm-first time suggestions (title and time only; private events masked) |
 
@@ -103,7 +99,7 @@ Responses:
   - Login is rate-limited.
   - Passwords are hashed with scrypt. Optional TOTP MFA.
 - **Files:** private per-tenant directory (mode 700/600), served only through authorized routes, SHA-256 verified on read.
-- **Evidence from other modules:** stored as restricted references (label + ID). Content stays in the source module; task visibility never grants source access.
+- **Confidential references:** stored as a label + ID pointing to a document kept elsewhere (e.g. an HR file). Only the owner and the person who added it can see them; task visibility never grants access to the content.
 - **Exports** are authorized at request time and again when generated. Files belong to the requester. CSV cells are guarded against formula injection.
 - **AI (optional):** off unless the organization enables it *and* `ANTHROPIC_API_KEY` is set.
   - Only the person's own task titles and notes are sent.

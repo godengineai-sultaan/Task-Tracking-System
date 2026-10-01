@@ -7,7 +7,8 @@ A multi-tenant work-tracking application covering:
 - Individual analytics: explainable day, week, month and custom reports with PDF/CSV export.
 - Admin Daily Routine: company-wide drill-down for the main administrator; managers see their own team.
 - Leadership delivery and capacity views, plus a client portal.
-- Signed cross-module integrations.
+- Work-tool connections (calendar file import, issue tracker, helpdesk, code host) that only suggest; nothing is recorded until you confirm.
+- Standalone: this module does not depend on or include features of the other office modules.
 
 Built from `05_Task_and_Productivity_Final_Plan.md` (the scope authority). See `REQUIREMENTS_MATRIX.md` for status per requirement and `PROGRESS.md` for the current state.
 
@@ -76,7 +77,7 @@ npm test
 - role scoping and founder visibility policy;
 - the state machine, optimistic concurrency, recap versioning and report/CSV reconciliation;
 - zero-capacity, leave and overlap handling;
-- signed integration contracts, de-duplication and vault secret rejection;
+- signed work-tool deliveries, de-duplication and secret rejection;
 - ICS privacy, exports, audit tamper detection, MFA, retention and the AI boundary.
 
 ```bash

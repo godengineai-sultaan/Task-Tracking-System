@@ -82,15 +82,12 @@ All listed tests passed on 2026‑10‑01: 47 unit/integration tests and 14 brow
 | 38 | Leadership delivery/capacity views; cost analysis with confidential rates | Leadership page; `cost_rates` visible to `cost_viewer` only | Manual QA | Done (manual QA) |
 | 39 | Customer-scoped projects | Customer role sees only its customer's projects and client-visible tasks | E client portal | Done |
 
-## Integrations (plan "Integration contracts"; prompt)
+## Integrations (work tools only; this module is standalone)
 
 | # | Requirement | Implementation | Verification | Status |
 |---|---|---|---|---|
 | 40 | Shared event envelope, HMAC sender authentication, replay window, tenant match, de-duplication, recorded result | `receiveInbound()`; `integration_events` unique (connection, event_id); durable processing job | I approval contract test | Done |
-| 41 | Approved requests → one execution task (owner, due, scope ref, completion conditions) | `module_approvals` handler, external-key idempotency | I (redelivery creates no duplicate) | Done |
-| 42 | PO/offer document linked as a restricted reference | `module_documents` handler adds restricted `source_ref` evidence (visible to owner only) | I "documents and KYC contracts" | Done |
-| 43 | Missing KYC/document follow-ups | `module_kyc` handler (required item/status refs only; de-duplicated) | I "documents and KYC contracts" | Done |
-| 44 | Credential rotation/offboarding metadata-only; secrets rejected and not stored | `module_vault` handler + `scanForSecrets` on every payload | U scanner; I vault test | Done |
+| 41–44 | ~~Cross-module contracts (approvals, documents, KYC, vault)~~ | **Removed 2026‑10‑01 by owner decision: this module stays standalone.** Migration `002_standalone.sql` drops those connector kinds and task sources | — | Out of scope |
 | 45 | Opt-in calendar import with confirmation and de-duplication; private events masked | ICS upload (title/time only) → suggestions → confirm | I ICS test | Done |
 | 46 | Issues/helpdesk/code suggestions grouped, confirm-first | Aggregated suggestions by external ref; accept creates one task or links evidence | I issues test | Done |
 | 47 | Live Google/Microsoft calendar, GitHub/Jira/helpdesk OAuth connectors | Generic signed webhook + ICS are implemented; OAuth apps are not | — | **Dependency**: OAuth client credentials and provider app registration |

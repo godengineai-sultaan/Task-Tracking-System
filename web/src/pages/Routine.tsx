@@ -72,7 +72,7 @@ export default function Routine() {
                 </tr>))}</tbody>
             </table>)}
         </div>
-        <div className="mt-4"><Callout tone="neutral" icon={<ShieldCheck className="mt-0.5 size-4 shrink-0" />}>This view shows recorded work only — not continuous monitoring. People are not ranked; dissimilar roles are not compared by hours or task counts. Private HR files, calendar descriptions and vault contents stay behind their own permissions.</Callout></div>
+        <div className="mt-4"><Callout tone="neutral" icon={<ShieldCheck className="mt-0.5 size-4 shrink-0" />}>This view shows recorded work only — not continuous monitoring. People are not ranked; dissimilar roles are not compared by hours or task counts. Confidential references and calendar descriptions stay behind their own permissions.</Callout></div>
       </>}
     </div>
   );
