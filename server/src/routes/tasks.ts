@@ -73,7 +73,7 @@ export async function taskRoutes(app: FastifyInstance) {
     const customer = has(a, 'customer');
     return many(db, `select t.id, t.number, t.title, t.status, t.priority, t.category, t.due_date, t.estimate_minutes, t.tags, t.version, t.sort_order,
         t.owner_id, ${customer ? 'null' : 'u.name'} owner_name, t.project_id, p.name project_name, p.key project_key, t.milestone_id, t.requires_review, t.requires_evidence,
-        t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at,
+        t.reopen_count, t.source_type, t.updated_at, t.created_at, t.done_at, t.customer_visible,
         (select count(*) from checklist_items c where c.task_id = t.id)::int checklist_total,
         (select count(*) from checklist_items c where c.task_id = t.id and c.done)::int checklist_done,
         (select count(*) from task_dependencies d join tasks dt on dt.id = d.depends_on_task_id where d.task_id = t.id and dt.status not in ('done','cancelled'))::int open_dependencies,
@@ -91,7 +91,7 @@ export async function taskRoutes(app: FastifyInstance) {
       const plan = await one(db, `select dp.id, (select array_agg(task_id order by position) from daily_plan_items where plan_id = dp.id and removed_at is null) ids
         from daily_plans dp where user_id = $1 and date = $2`, [a.id, today]);
       const ids: string[] = plan?.ids ?? [];
-      if (ids.length >= 3) throw badRequest('Task created, but today already has three intended outcomes — swap one in My Day');
+      if (ids.length >= 3) return { ...r.task, planFull: true };
       await setPlan(db, a, today, [...ids, r.task.id]);
     }
     if (b.captureMs) await db.query(`insert into ux_timings (tenant_id, user_id, flow, duration_ms, date) values ($1,$2,'quick_capture',$3,$4)`, [a.tenantId, a.id, b.captureMs, localToday(a.timezone)]);
