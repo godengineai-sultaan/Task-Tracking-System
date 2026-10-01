@@ -93,10 +93,12 @@ test('individual report: period switch, explainable label and PDF export', async
 
 test('board: keyboard drag moves a card between columns', async ({ page }) => {
   await signIn(page, 'dev');
+  const title = 'Board keyboard move check';
+  const created = await page.request.post('/api/tasks', { headers: { 'x-requested-with': 'fetch' }, data: { title } });
+  expect(created.ok()).toBeTruthy();
   await page.goto('/tasks?view=board&mine=1');
   const planned = page.getByRole('region', { name: 'Planned column' });
-  const card = planned.locator('li').first();
-  const title = (await card.locator('button').first().innerText()).trim();
+  const card = planned.locator('li').filter({ hasText: title }).first();
   await card.focus();
   await page.keyboard.press('Space');
   await page.waitForTimeout(300);
