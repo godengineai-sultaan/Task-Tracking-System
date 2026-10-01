@@ -20,6 +20,16 @@ test('cost viewer sets a budget on a project and sees consumption', async ({ pag
   await expect(card.getByText(/No budget set/)).toBeVisible();
   await card.getByRole('button', { name: 'Set budget' }).click();
   const dialog = page.getByRole('dialog', { name: 'Set budget' });
+  await expect(dialog.getByLabel('Billing')).toBeFocused();
+  // A missing fee is explained inline (no silent disabled button, no request sent)
+  await dialog.getByRole('button', { name: 'Save budget' }).click();
+  await expect(dialog.getByText('Enter the fixed fee')).toBeVisible();
+  await dialog.getByLabel('End date').fill('2026-01-01');
+  await dialog.getByLabel('Start date').fill('2026-02-01');
+  await expect(dialog.getByText('End date is before the start date')).toBeVisible();
+  expect(await axe(page)).toEqual([]);
+  await dialog.getByLabel('Start date').fill('');
+  await dialog.getByLabel('End date').fill('');
   await dialog.getByLabel('Billing').selectOption('fixed_fee');
   await dialog.getByLabel('Fixed fee').fill('200000');
   await dialog.getByLabel('Budget hours').fill('100');
@@ -39,6 +49,23 @@ test('cost viewer sets a budget on a project and sees consumption', async ({ pag
   await card.getByText('How this is calculated').click();
   await expect(card.getByText(/priced at each person's cost rate effective on the entry date/)).toBeVisible();
   expect(await axe(page)).toEqual([]);
+
+  // Keyboard: Escape closes the dialog and returns focus to the button that opened it
+  await card.getByRole('button', { name: 'Edit' }).click();
+  const edit = page.getByRole('dialog', { name: 'Edit budget' });
+  await expect(edit).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Edit' })).toBeFocused();
+  // Removing a budget asks for confirmation with a reason; Escape backs out to the edit dialog
+  await card.getByRole('button', { name: 'Edit' }).click();
+  await edit.getByRole('button', { name: 'Remove' }).click();
+  await expect(page.getByRole('dialog', { name: 'Remove budget' })).toBeVisible();
+  expect(await axe(page)).toEqual([]);
+  await page.keyboard.press('Escape');
+  await expect(edit).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // Portfolio shows it, with filters and sorting
   await page.goto('/profitability');
@@ -71,11 +98,24 @@ test('project owner without cost access sees hours only; employees see nothing',
   expect(await card.innerText()).not.toMatch(/₹|INR|Cost to date|Margin/);
   const api = await getJson(page, `/api/projects/${id}/budget`);
   expect(api.body.money).toBeNull();
+  expect(await axe(page)).toEqual([]);
+
+  // Hours-only portfolio and an explicit hours chip on the Projects list
+  await page.goto('/profitability');
+  await expect(page.getByText(/^Hours-only view/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Totals per currency' })).toHaveCount(0);
+  await expect(page.getByRole('row').filter({ hasText: 'Globex portal v2' })).toBeVisible();
+  expect(await page.locator('main').innerText()).not.toMatch(/₹|INR|Margin/);
+  expect(await axe(page)).toEqual([]);
+  await page.goto('/projects');
+  await expect(page.getByRole('link', { name: /Globex portal v2/ }).getByText(/^Hours \d+%$/)).toBeVisible();
+  expect(await axe(page)).toEqual([]);
 
   await page.context().clearCookies();
   await signIn(page, 'rahul');
   await page.goto('/profitability');
   await expect(page.getByText('Budgets are not shared with you')).toBeVisible();
+  expect(await axe(page)).toEqual([]);
   await page.goto(`/projects/${id}`);
   await expect(page.getByRole('heading', { name: 'Milestones' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Budget', exact: true })).toHaveCount(0);
@@ -95,8 +135,23 @@ test('profitability page fits a phone screen', async ({ browser }) => {
   expect(at('Enterprise pipeline')).toBeGreaterThanOrEqual(0);
   expect(at('Enterprise pipeline')).toBeLessThan(at('Q3 close'));
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  // Currency totals stack on a phone instead of hiding columns behind a sideways scroll
+  const totals = page.getByRole('list', { name: 'Totals per currency' });
+  await expect(totals.getByText('Revenue')).toBeVisible();
+  await expect(totals.getByText('Margin')).toBeVisible();
+  expect(await axe(page)).toEqual([]);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  // Let the theme's colour transitions settle so axe measures final colours
+  await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
+  expect(await axe(page)).toEqual([]);
+  await page.emulateMedia({ colorScheme: 'light' });
   await page.goto(`/projects/${await projectId(page, 'OPS')}`);
   await expect(page.getByRole('heading', { name: 'Budget', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  expect(await axe(page)).toEqual([]);
+  await page.locator('section').filter({ has: page.getByRole('heading', { name: 'Budget', exact: true }) }).getByRole('button', { name: 'Edit' }).click();
+  await expect(page.getByRole('dialog', { name: 'Edit budget' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+  expect(await axe(page)).toEqual([]);
   await ctx.close();
 });

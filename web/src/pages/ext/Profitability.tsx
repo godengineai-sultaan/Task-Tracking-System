@@ -34,11 +34,16 @@ export default function Profitability() {
       return sort.dir === 'asc' ? c : -c;
     });
   }, [q.data, search, status, billing, sort]);
-  const exp = (format: 'csv' | 'pdf') => downloadExport(api, { format, report: 'profitability', params: { ...(status && { status }), ...(billing && { billingType: billing }) } }, toast)
-    .catch((e: any) => toast({ tone: 'critical', text: e.message }));
+  const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
+  const exp = (format: 'csv' | 'pdf') => {
+    setExporting(format);
+    downloadExport(api, { format, report: 'profitability', params: { ...(status && { status }), ...(billing && { billingType: billing }) } }, toast)
+      .catch((e: any) => toast({ tone: 'critical', text: e.message })).finally(() => setExporting(null));
+  };
 
-  const header = <PageHeader title="Profitability" subtitle="Project budgets, burn and margin from confirmed time on each project's tasks."
-    actions={q.data && <><Button icon={<FileDown className="size-4" />} onClick={() => exp('csv')}>CSV</Button><Button icon={<FileDown className="size-4" />} onClick={() => exp('pdf')}>PDF</Button></>} />;
+  const header = <PageHeader title="Profitability" subtitle={`Project budgets, burn${q.data?.access === 'hours' ? '' : ' and margin'} from confirmed time on each project's tasks.`}
+    actions={q.data && <>{(['csv', 'pdf'] as const).map((f) => <Button key={f} icon={<FileDown className="size-4" />} aria-label={`Export ${f.toUpperCase()}`} title={status || billing ? 'Exports projects matching the status and billing filters' : undefined}
+      loading={exporting === f} disabled={!!exporting} onClick={() => exp(f)}>{f.toUpperCase()}</Button>)}</>} />;
   if (q.isLoading) return <div>{header}<Skeleton className="mb-4 h-24" /><Skeleton className="h-72" /></div>;
   if ((q.error as any)?.status === 403) return <div>{header}<Card><Empty icon={<Wallet className="size-5" />} title="Budgets are not shared with you">Budgets are visible to cost viewers, leadership and project owners.</Empty></Card></div>;
   if (q.error) return <div>{header}<ErrorState error={q.error} onRetry={() => q.refetch()} /></div>;
@@ -64,8 +69,17 @@ export default function Profitability() {
         {money && <Stat label="Unpriced hours" value={fmtHours(d.totals.byCurrency.reduce((s: number, t: any) => s + t.unpricedHours, 0))} hint="Hours by people without a cost rate in the budget currency. Excluded from cost, never priced at zero." />}
       </div>
       {money && d.totals.byCurrency.length > 0 && (
-        <Card title="Totals per currency" subtitle="Currencies are never added together. Revenue and margin include only projects with revenue." className="mb-4" padded={false}>
-          <div className="overflow-x-auto">
+        <Card title="Totals per currency" subtitle="Currencies are never added together. Cost covers every project in the currency; revenue and margin only projects with revenue and a measurable cost." className="mb-4" padded={false}>
+          <ul className="divide-y divide-line sm:hidden" aria-label="Totals per currency">{d.totals.byCurrency.map((t: any) => (
+            <li key={t.currency} className="p-4 text-[13px]">
+              <p className="mb-2 font-semibold">{t.currency} <span className="font-normal text-ink-3">· {t.projects} project{t.projects === 1 ? '' : 's'}</span></p>
+              <dl className="grid grid-cols-2 gap-2 text-[12px]">
+                {([['Budget', fmtMoney(t.budgetAmount, t.currency)], ['Cost to date', fmtMoney(t.costToDate, t.currency)], ['Revenue', fmtMoney(t.revenue, t.currency)],
+                  ['Margin', `${fmtMoney(t.margin, t.currency)} (${pct(t.marginPct)})`], ['Unpriced', fmtHours(t.unpricedHours)]] as const).map(([k, v]) => (
+                  <div key={k}><dt className="text-ink-3">{k}</dt><dd className={cx('font-medium tabular-nums', k === 'Margin' && t.margin < 0 && 'text-critical-ink')}>{v}</dd></div>))}
+              </dl>
+            </li>))}</ul>
+          <div className="hidden overflow-x-auto sm:block">
             <table className="w-full min-w-[560px] text-[13px]">
               <thead className="text-left text-[12px] text-ink-3"><tr className="border-b border-line">
                 {['Currency', 'Projects', 'Budget', 'Cost to date', 'Revenue', 'Margin', 'Unpriced'].map((h) => <th key={h} scope="col" className="px-4 py-2 font-medium">{h}</th>)}</tr></thead>
@@ -138,7 +152,7 @@ export default function Profitability() {
                     </td>}
                     <td className="px-4 py-2.5 text-right tabular-nums">
                       {money ? fmtMoney(m.consumptionBasis === 'billable_value' ? m.forecastRevenue : m.forecastCost, cur) : fmtHours(h.forecastAtCompletion)}
-                      <div className="text-[12px] text-ink-3">{money ? `${fmtHours(h.forecastAtCompletion)} · ` : ''}{pct(r.estimates.coverage)} estimated</div>
+                      <div className="text-[12px] text-ink-3">{money ? `${fmtHours(h.forecastAtCompletion)} · ` : ''}{coverageText(r.estimates.coverage)}</div>
                     </td>
                   </tr>);
               })}</tbody>
@@ -150,6 +164,8 @@ export default function Profitability() {
   );
 }
 
+const coverageText = (c: number | null) => (c === null ? 'no open tasks' : `${pct(c)} estimated`);
+
 function MobileRow({ r }: { r: any }) {
   const m = r.money, h = r.hours, cur = m?.currency;
   return (
@@ -160,13 +176,14 @@ function MobileRow({ r }: { r: any }) {
         <BudgetStatus label={r.status.label} className="shrink-0" />
       </div>
       <div className="text-[12px] text-ink-3">{r.budget ? BILLING_LABEL[r.budget.billingType] : 'No budget'}{r.project.ownerName && ` · ${r.project.ownerName}`}{r.status.forecastOver && <span className="text-serious-ink"> · Forecast over</span>}</div>
+      {h.budget === null && <div className="flex justify-between text-[12px] text-ink-2"><span>Hours</span><span className="tabular-nums">{fmtHours(h.toDate)} · {fmtHours(h.burnPerWeek)}/wk burn</span></div>}
       {h.budget !== null && <div><div className="mb-1 flex justify-between text-[12px] text-ink-2"><span>Hours</span><span className="tabular-nums">{fmtHours(h.toDate)} / {fmtHours(h.budget)}</span></div>
         <BurnBar label={`${r.project.key} hours`} value={h.consumption} forecast={h.forecastConsumption} thresholds={r.budget?.alertThresholds} detail={`${fmtHours(h.toDate)} of ${fmtHours(h.budget)}.`} /></div>}
       {m?.budgetAmount != null && <div><div className="mb-1 flex justify-between text-[12px] text-ink-2"><span>{m.consumptionBasis === 'billable_value' ? 'Billable vs cap' : 'Cost vs budget'}</span><span className="tabular-nums">{pct(m.consumption)} of {fmtMoney(m.budgetAmount, cur, true)}</span></div>
         <BurnBar label={`${r.project.key} budget amount`} value={m.consumption} forecast={m.forecastConsumption} thresholds={r.budget?.alertThresholds} detail={`${fmtMoney(m.consumptionBasis === 'billable_value' ? m.revenue : m.costToDate, cur)} of ${fmtMoney(m.budgetAmount, cur)}.`} /></div>}
       <dl className="grid grid-cols-3 gap-2 text-[12px]">
         {m ? <><div><dt className="text-ink-3">Cost</dt><dd className="font-medium tabular-nums">{fmtMoney(m.costToDate, cur, true)}</dd></div>
-          <div><dt className="text-ink-3">Margin</dt><dd className={cx('font-medium tabular-nums', m.margin !== null && m.margin < 0 && 'text-critical-ink')}>{m.margin === null ? '—' : `${fmtMoney(m.margin, cur, true)} (${pct(m.marginPct)})`}</dd></div>
+          <div><dt className="text-ink-3">Margin</dt><dd className={cx('font-medium tabular-nums', m.margin !== null && m.margin < 0 && 'text-critical-ink')}>{m.margin === null ? (r.budget?.billingType === 'internal' ? 'Internal' : '—') : `${fmtMoney(m.margin, cur, true)} (${pct(m.marginPct)})`}</dd></div>
           <div><dt className="text-ink-3">Forecast</dt><dd className="font-medium tabular-nums">{fmtMoney(m.consumptionBasis === 'billable_value' ? m.forecastRevenue : m.forecastCost, cur, true)}</dd></div></>
           : <><div><dt className="text-ink-3">Hours</dt><dd className="font-medium tabular-nums">{fmtHours(h.toDate)}</dd></div>
           <div><dt className="text-ink-3">Burn</dt><dd className="font-medium tabular-nums">{fmtHours(h.burnPerWeek)}/wk</dd></div>

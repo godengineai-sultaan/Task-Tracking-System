@@ -29,7 +29,7 @@ export function BudgetStatus({ label, className }: { label: string; className?: 
 export function BudgetBadge({ b }: { b: { label: string; consumption: number | null; basis: string } }) {
   const s = BUDGET_STATUS[b.label] ?? BUDGET_STATUS.not_measurable;
   return <Badge tone={s.tone} icon={<Wallet className="size-3" aria-hidden />}>
-    <span>Budget {b.consumption === null ? s.label.toLowerCase() : pct(b.consumption)}</span><span className="sr-only">, {s.label}, {b.basis === 'hours' ? 'hours basis' : 'amount and hours basis'}</span>
+    <span>{b.basis === 'hours' ? 'Hours' : 'Budget'} {b.consumption === null ? s.label.toLowerCase() : pct(b.consumption)}</span><span className="sr-only">, {s.label}, {b.basis === 'hours' ? 'hours basis' : 'amount and hours basis'}</span>
   </Badge>;
 }
 
@@ -109,7 +109,7 @@ export function BudgetCard({ projectId }: { projectId: string }) {
               <Def k="Cost burn" v={`${fmtMoney(m.burnPerWeek, m.currency)}/wk`} /></>}
             <Def k="Hours burn" v={`${fmtHours(h.burnPerWeek)}/wk`} />
             <Def k="Forecast hours" v={fmtHours(h.forecastAtCompletion)} />
-            <Def k="Estimate coverage" v={`${pct(d.estimates.coverage)} of ${d.estimates.openTasks} open`} />
+            <Def k="Estimate coverage" v={d.estimates.openTasks ? `${pct(d.estimates.coverage)} of ${d.estimates.openTasks} open` : 'No open tasks'} />
             {(m?.runwayWeeks ?? h.runwayWeeks) !== null && <Def k="Runway at current burn" v={`${(m?.runwayWeeks ?? h.runwayWeeks).toFixed(1)} wk`} />}
           </dl>
           {m && m.unpricedHours > 0 && <Callout tone="warning" icon={<AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />}>
@@ -142,11 +142,28 @@ function BudgetForm({ open, onClose, projectId, budget, currency }: { open: bool
     thresholds: (budget?.alertThresholds ?? [75, 90, 100]).join(', '), notes: budget?.notes ?? '' });
   const [f, setF] = useState(init);
   const [removing, setRemoving] = useState(false);
-  useEffect(() => { if (open) setF(init()); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [tried, setTried] = useState(false);
+  useEffect(() => { if (open) { setF(init()); setTried(false); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const refresh = () => { qc.invalidateQueries({ queryKey: ['budget', projectId] }); qc.invalidateQueries({ queryKey: ['profitability'] }); qc.invalidateQueries({ queryKey: ['budget-badges'] }); };
   const onErr = (e: any) => { if (e.status === 409) refresh(); toast({ tone: 'critical', text: e.message }); };
   const thresholds = f.thresholds.split(/[,\s]+/).filter(Boolean).map(Number);
-  const badThresholds = !thresholds.length || thresholds.some((t: number) => !Number.isInteger(t) || t < 1 || t > 500);
+  const badThresholds = !thresholds.length || thresholds.length > 6 || thresholds.some((t: number) => !Number.isInteger(t) || t < 1 || t > 500);
+  // Same rules as the server; "missing" errors show after a save attempt, format errors as you type.
+  const amount = numOrNull(f.budgetAmount), hours = numOrNull(f.budgetHours), rate = numOrNull(f.billRate);
+  const negative = (v: number | null) => v !== null && !(v >= 0);
+  const missing: Record<string, string | null> = {
+    currency: /^[A-Z]{3}$/.test(f.currency) ? null : 'Use a 3-letter code such as INR or USD',
+    budgetAmount: f.billingType === 'fixed_fee' && !amount ? 'Enter the fixed fee' : amount === null && hours === null ? 'Set an amount, budget hours, or both' : null,
+    billRate: f.billingType === 'time_and_materials' && rate === null ? 'Time & materials needs a bill rate' : null,
+  };
+  const wrong: Record<string, string | null> = {
+    budgetAmount: negative(amount) ? 'Enter 0 or more' : null, budgetHours: negative(hours) ? 'Enter 0 or more' : null,
+    billRate: f.billingType === 'time_and_materials' && negative(rate) ? 'Enter 0 or more' : null,
+    thresholds: badThresholds ? 'Up to 6 whole numbers from 1 to 500, comma-separated' : null,
+    endDate: f.startDate && f.endDate && f.endDate < f.startDate ? 'End date is before the start date' : null,
+  };
+  const err = (k: string) => wrong[k] ?? (tried ? missing[k] ?? null : null);
+  const submit = () => { if ([...Object.values(missing), ...Object.values(wrong)].some(Boolean)) setTried(true); else save.mutate(); };
   const save = useMutation({
     mutationFn: () => api.put(`/api/projects/${projectId}/budget`, { billingType: f.billingType, currency: f.currency, budgetAmount: numOrNull(f.budgetAmount), budgetHours: numOrNull(f.budgetHours),
       billRate: f.billingType === 'time_and_materials' ? numOrNull(f.billRate) : null, startDate: f.startDate || null, endDate: f.endDate || null, alertThresholds: thresholds, notes: f.notes,
@@ -162,17 +179,17 @@ function BudgetForm({ open, onClose, projectId, budget, currency }: { open: bool
       <Modal open={open && !removing} onClose={onClose} title={budget ? 'Edit budget' : 'Set budget'}
         footer={<>{budget && <Button variant="ghost" className="mr-auto text-critical-ink" icon={<Trash2 className="size-4" />} onClick={() => setRemoving(true)}>Remove</Button>}
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={save.isPending} disabled={badThresholds || (!f.budgetAmount && !f.budgetHours)} onClick={() => save.mutate()}>Save budget</Button></>}>
-        <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
+          <Button variant="primary" loading={save.isPending} onClick={submit}>Save budget</Button></>}>
+        <form className="grid gap-3" noValidate onSubmit={(e) => { e.preventDefault(); submit(); }}>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Billing">{(id) => <Select id={id} value={f.billingType} onChange={set('billingType')}>{Object.entries(BILLING_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>}</Field>
-            <Field label="Currency" hint="3-letter code">{(id) => <Input id={id} value={f.currency} maxLength={3} onChange={(e) => setF({ ...f, currency: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })} />}</Field>
-            <Field label={amountLabel} hint={f.billingType === 'fixed_fee' ? 'Revenue = this fee' : 'Optional if you set hours'}>{(id) => <Input id={id} type="number" min={0} step="any" inputMode="decimal" value={f.budgetAmount} onChange={set('budgetAmount')} />}</Field>
-            <Field label="Budget hours" hint="Optional">{(id) => <Input id={id} type="number" min={0} step="any" inputMode="decimal" value={f.budgetHours} onChange={set('budgetHours')} />}</Field>
-            {f.billingType === 'time_and_materials' && <Field label="Bill rate per hour" hint="Revenue = hours x rate">{(id) => <Input id={id} type="number" min={0} step="any" inputMode="decimal" value={f.billRate} onChange={set('billRate')} />}</Field>}
-            <Field label="Alert thresholds (%)" error={badThresholds ? 'Whole numbers 1–500, comma-separated' : null} hint="Alerts once per threshold">{(id) => <Input id={id} value={f.thresholds} onChange={set('thresholds')} />}</Field>
+            <Field label="Currency" hint="3-letter code" error={err('currency')}>{(id) => <Input id={id} aria-invalid={!!err('currency')} value={f.currency} maxLength={3} onChange={(e) => setF({ ...f, currency: e.target.value.toUpperCase().replace(/[^A-Z]/g, '') })} />}</Field>
+            <Field label={amountLabel} hint={f.billingType === 'fixed_fee' ? 'Revenue = this fee' : 'Optional if you set hours'} error={err('budgetAmount')}>{(id) => <Input id={id} aria-invalid={!!err('budgetAmount')} type="number" min={0} step="any" inputMode="decimal" value={f.budgetAmount} onChange={set('budgetAmount')} />}</Field>
+            <Field label="Budget hours" hint="Optional" error={err('budgetHours')}>{(id) => <Input id={id} aria-invalid={!!err('budgetHours')} type="number" min={0} step="any" inputMode="decimal" value={f.budgetHours} onChange={set('budgetHours')} />}</Field>
+            {f.billingType === 'time_and_materials' && <Field label="Bill rate per hour" hint="Revenue = hours x rate" error={err('billRate')}>{(id) => <Input id={id} aria-invalid={!!err('billRate')} type="number" min={0} step="any" inputMode="decimal" value={f.billRate} onChange={set('billRate')} />}</Field>}
+            <Field label="Alert thresholds (%)" error={err('thresholds')} hint="Alerts once per threshold">{(id) => <Input id={id} aria-invalid={!!err('thresholds')} value={f.thresholds} onChange={set('thresholds')} />}</Field>
             <Field label="Start date" hint="Earlier time is excluded">{(id) => <Input id={id} type="date" value={f.startDate} onChange={set('startDate')} />}</Field>
-            <Field label="End date">{(id) => <Input id={id} type="date" value={f.endDate} onChange={set('endDate')} />}</Field>
+            <Field label="End date" error={err('endDate')}>{(id) => <Input id={id} aria-invalid={!!err('endDate')} type="date" value={f.endDate} onChange={set('endDate')} />}</Field>
           </div>
           <Field label="Notes" hint="Visible to cost viewers only">{(id) => <Textarea id={id} rows={2} value={f.notes} onChange={set('notes')} />}</Field>
           <button type="submit" hidden />
