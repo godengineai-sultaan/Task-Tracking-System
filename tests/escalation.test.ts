@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DateTime } from 'luxon';
 import { drainJobs, login, makeOrg, withOwner, type Org } from './helpers.js';
 import { withTenant } from '../server/src/lib/db.js';
 import { enqueue } from '../server/src/lib/jobs.js';
@@ -64,10 +65,23 @@ describe('working-day arithmetic (pure)', () => {
     const a = assessBlocker(cal(), p, { raised_at: RAISED_FRI, next_follow_up: null }, '2026-09-24', [{ level: 'waiting_on', follow_up_date: null, outcome: 'notified' }]);
     expect(a).toMatchObject({ raisedOn: '2026-09-18', ageWorkingDays: 3, currentLevel: 'waiting_on', actsToday: true });
     expect(a.due.map((d) => d.level)).toEqual(['manager']);
-    expect(a.next).toMatchObject({ level: 'admin', afterDays: 5, date: '2026-09-28' });
+    expect(a.next).toMatchObject({ level: 'manager', afterDays: 3, date: '2026-09-24' }); // due today, fires on this tick
+    const afterMgr = assessBlocker(cal(), p, { raised_at: RAISED_FRI, next_follow_up: null }, '2026-09-24',
+      [{ level: 'waiting_on', follow_up_date: null, outcome: 'notified' }, { level: 'manager', follow_up_date: null, outcome: 'notified' }]);
+    expect(afterMgr.next).toMatchObject({ level: 'admin', afterDays: 5, date: '2026-09-28' });
     expect(a.ownerReminderDue).toEqual({ followUpDate: null });
     const weekend = assessBlocker(cal(), p, { raised_at: RAISED_FRI, next_follow_up: null }, '2026-09-26', []);
     expect(weekend.actsToday).toBe(false);
+  });
+  it('reports an already-due step as next, dated to the next day that counts', () => {
+    const p = { ...DEFAULT_POLICY, ...POLICY, adminAfterDays: 6 };
+    const b = { raised_at: RAISED_FRI, next_follow_up: null };
+    // Thursday, nothing fired yet: the person waited on is due today, not the later admin step.
+    expect(assessBlocker(cal(), p, b, '2026-09-24', []).next).toMatchObject({ level: 'waiting_on', date: '2026-09-24' });
+    // Saturday with the manager step due (e.g. the policy changed over the weekend): it fires Monday, not "today".
+    const sat = assessBlocker(cal(), p, b, '2026-09-26', [{ level: 'waiting_on', follow_up_date: null, outcome: 'notified' }]);
+    expect(sat.due.map((d) => d.level)).toEqual(['manager']);
+    expect(sat.next).toMatchObject({ level: 'manager', date: '2026-09-28' });
   });
 });
 
@@ -294,5 +308,97 @@ describe('scheduled jobs', () => {
     await drainJobs();
     const job = await withOwner(async (db) => (await db.query(`select status, last_error from jobs where id = $1`, [id])).rows[0]);
     expect(job).toMatchObject({ status: 'succeeded', last_error: null });
+  });
+});
+
+describe('review regressions', () => {
+  it('a reminder sent yesterday does not swallow the owner reminder for a new follow-up date', async () => {
+    const org = orgB;
+    await setPolicy(adminB, { managerAfterDays: null, adminAfterDays: null });
+    const f = await blocked(emp2B, 'Follow-up after yesterday', { reason: 'Quote', waitingOnText: 'Vendor', nextFollowUp: '2026-09-29' }, RAISED_FRI);
+    const yesterdayLate = DateTime.now().setZone(org.tz).startOf('day').minus({ minutes: 1 }).toJSDate();
+    await withOwner((db) => db.query(`insert into notifications (tenant_id, user_id, kind, title, link, created_at) values ($1,$2,'blocker_reminder','Earlier reminder',$3,$4)`,
+      [org.tenantId, org.users.emp2, `/tasks/${f.taskId}`, yesterdayLate]));
+    await run(org, '2026-09-29');
+    expect((await levels(f.blockerId)).filter((l) => l.level === 'owner')).toMatchObject([{ follow_up_date: '2026-09-29', outcome: 'notified' }]);
+    // A reminder already sent today (e.g. by the legacy job before escalation was turned on) still prevents a duplicate.
+    const g = await blocked(emp2B, 'Reminded earlier today', { reason: 'Quote', waitingOnText: 'Vendor', nextFollowUp: '2026-09-29' }, RAISED_FRI);
+    await withOwner((db) => db.query(`insert into notifications (tenant_id, user_id, kind, title, link) values ($1,$2,'blocker_reminder','Legacy reminder',$3)`,
+      [org.tenantId, org.users.emp2, `/tasks/${g.taskId}`]));
+    await run(org, '2026-09-29');
+    expect((await levels(g.blockerId)).filter((l) => l.level === 'owner')).toMatchObject([{ outcome: 'skipped' }]);
+    expect(await notes(org, org.users.emp2, 'blocker_reminder', g.taskId)).toHaveLength(1);
+  });
+
+  it('the legacy reminder job keeps reminding when the stored policy is not valid (the tick treats it as off)', async () => {
+    const org = orgA;
+    await withOwner((db) => db.query(`update tenants set settings = jsonb_set(settings, '{escalation}', $2::jsonb) where id = $1`,
+      [org.tenantId, JSON.stringify({ enabled: true, remindOwner: true, waitingOnAfterDays: 0, managerAfterDays: null, adminAfterDays: null, quietWhenOwnerOnLeave: true, version: 9 })]));
+    const b = await blocked(empA, 'Invalid policy follow-up', { reason: 'Waiting', waitingOnText: 'Vendor', nextFollowUp: '2026-01-05' });
+    expect(await run(org, '2026-09-29')).toMatchObject({ evaluated: 0 });
+    await withTenant(org.tenantId, (db) => enqueue(db, { tenantId: org.tenantId, kind: 'blockers.remind', payload: {}, idempotencyKey: `test-remind-invalid:${org.tenantId}` }));
+    await drainJobs();
+    expect(await notes(org, org.users.emp, 'blocker_reminder', b.taskId)).toHaveLength(1);
+  });
+
+  it('a colleague who can see the task but does not work on it can read the history but not nudge', async () => {
+    const x = await blocked(empC, 'Company-visible blocker', { reason: 'Need review', waitingOnUserId: orgC.users.emp2 });
+    await withOwner(async (db) => {
+      const p = (await db.query(`insert into projects (tenant_id, key, name, visibility, owner_id) values ($1,'ESC','Company project','company',$2) returning id`, [orgC.tenantId, orgC.users.admin])).rows[0];
+      await db.query(`update tasks set project_id = $2 where id = $1`, [x.taskId, p.id]);
+    });
+    const h = await outsiderC.get(`/api/blockers/${x.blockerId}/escalation`);
+    expect(h.status).toBe(200);
+    expect(h.body.nudge).toMatchObject({ allowed: false, reason: 'Only people working on this task can nudge' });
+    expect((await outsiderC.post(`/api/blockers/${x.blockerId}/nudge`, {})).status).toBe(403);
+    expect(await notes(orgC, orgC.users.emp2, 'blocker_nudge', x.taskId)).toHaveLength(0);
+  });
+
+  describe('founders hidden from main admins; inactive waited-on people', () => {
+    const org = () => orgC;
+    let teamId: string; let former: string;
+    beforeAll(async () => {
+      const o = orgC;
+      await withOwner(async (db) => {
+        await db.query(`update tenants set settings = settings || '{"founders_visible_to_routine_admin": false}'::jsonb where id = $1`, [o.tenantId]);
+        teamId = (await db.query(`select id from teams where tenant_id = $1 and manager_id = $2`, [o.tenantId, o.users.manager])).rows[0].id;
+        await db.query(`insert into team_members (tenant_id, team_id, user_id) values ($1,$2,$3)`, [o.tenantId, teamId, o.users.founder]);
+        former = (await db.query(`insert into users (tenant_id, email, name, password_hash, roles, status) values ($1,$2,'Former','x','{member}','deactivated') returning id`,
+          [o.tenantId, `former@${o.slug}.test`])).rows[0].id;
+      });
+    });
+    afterAll(async () => {
+      const o = orgC;
+      await withOwner(async (db) => {
+        await db.query(`update tenants set settings = settings || '{"founders_visible_to_routine_admin": true}'::jsonb where id = $1`, [o.tenantId]);
+        await db.query(`delete from team_members where team_id = $1 and user_id = $2`, [teamId, o.users.founder]);
+      });
+    });
+    it('hides founder blockers from the company view but not from the founder\'s own team manager', async () => {
+      const fb = await blocked(founderC, 'Founder bank wait', { reason: 'Bank KYC', waitingOnText: 'Bank' }, RAISED_FRI);
+      const company = (await adminC.get('/api/escalation/blockers')).body;
+      expect(company.items.map((i: any) => i.blockerId)).not.toContain(fb.blockerId);
+      const team = await mgrC.get('/api/escalation/blockers');
+      expect(team.status).toBe(200);
+      expect(team.body.items.map((i: any) => i.blockerId)).toContain(fb.blockerId);
+    });
+    it('treats a deactivated waited-on person as outside the app in the aging view and the ladder', async () => {
+      const x = await blocked(empC, 'Waiting on a leaver', { reason: 'Handover notes', waitingOnUserId: former }, RAISED_FRI);
+      const item = (await adminC.get('/api/escalation/blockers')).body.items.find((i: any) => i.blockerId === x.blockerId);
+      expect(item).toMatchObject({ waitingOn: 'Former', waitingOnInternal: false });
+      await setPolicy(adminC, {});
+      await run(org(), '2026-09-28');
+      const w = (await withOwner(async (db) => (await db.query(`select outcome, note from blocker_escalations where blocker_id = $1 and level = 'waiting_on'`, [x.blockerId])).rows))[0];
+      expect(w.outcome).toBe('skipped');
+      expect(w.note).toMatch(/Former is a client or no longer active/);
+    });
+    it('does not tell non-founder main admins about a founder\'s blocker, and says why', async () => {
+      const fb = (await withOwner(async (db) => (await db.query(`select b.id, b.task_id from blockers b join tasks t on t.id = b.task_id where t.tenant_id = $1 and t.title = 'Founder bank wait'`, [orgC.tenantId])).rows))[0];
+      const ls = await withOwner(async (db) => (await db.query(`select level, outcome, note, recipient_ids from blocker_escalations where blocker_id = $1`, [fb.id])).rows);
+      expect(ls.find((l) => l.level === 'admin')).toMatchObject({ outcome: 'skipped', recipient_ids: [] });
+      expect(ls.find((l) => l.level === 'admin')!.note).toMatch(/Founders' records are not visible to main admins/);
+      expect(ls.find((l) => l.level === 'manager')).toMatchObject({ outcome: 'notified', recipient_ids: [orgC.users.manager] });
+      expect(await notes(orgC, orgC.users.admin, 'blocker_escalation', fb.task_id)).toHaveLength(0);
+    });
   });
 });

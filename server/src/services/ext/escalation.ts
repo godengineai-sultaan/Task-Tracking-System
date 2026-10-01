@@ -6,7 +6,7 @@ import { audit } from '../../lib/audit.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { notify } from '../notify.js';
 import { type Actor, assertContribute, canContribute, has, isStaff, loadVisibleTask } from '../access.js';
-import { type CalendarData, dayCapacity, loadCalendar, localToday } from '../calendar.js';
+import { type CalendarData, dayCapacity, loadCalendar, localDayBounds, localToday } from '../calendar.js';
 
 /**
  * Smart blocker escalation. Ages are counted in the blocker owner's working days (their schedule,
@@ -139,7 +139,9 @@ export function assessBlocker(cal: CalendarData, p: EscalationPolicy, b: { raise
   const pending = steps.filter((s) => !done.has(s.level));
   const due = pending.filter((s) => age >= s.afterDays);
   const upcoming = pending.find((s) => age < s.afterDays) ?? null;
-  const next = upcoming ? { ...upcoming, date: dateAfterWorkingDays(cal, raisedOn, upcoming.afterDays, quiet) } : due[0] ? { ...due[0], date: today } : null;
+  // A step that is already due comes first; it fires today only on a day that counts, otherwise on the next one.
+  const next = due[0] ? { ...due[0], date: actsToday ? today : dateAfterWorkingDays(cal, today, 1, quiet) }
+    : upcoming ? { ...upcoming, date: dateAfterWorkingDays(cal, raisedOn, upcoming.afterDays, quiet) } : null;
   let ownerReminderDue: Assessment['ownerReminderDue'] = null;
   if (p.remindOwner) {
     const key = b.next_follow_up ?? null;
@@ -154,6 +156,9 @@ export function assessBlocker(cal: CalendarData, p: EscalationPolicy, b: { raise
 const OPEN_BLOCKER_SQL = `select b.*, t.title task_title, t.number task_number, t.owner_id, t.status task_status, o.name owner_name, o.is_founder owner_is_founder,
     w.name waiting_on_name, w.status waiting_on_status, w.roles waiting_on_roles
   from blockers b join tasks t on t.id = b.task_id join users o on o.id = t.owner_id left join users w on w.id = b.waiting_on_user_id`;
+
+/** The blocker waits on an active staff user who can be told in the app (not a client, not deactivated). */
+const waitsOnInternal = (b: any) => !!b.waiting_on_user_id && b.waiting_on_status === 'active' && !(b.waiting_on_roles ?? []).includes('customer');
 
 async function calendarsFor(db: Db, rows: any[], today?: string) {
   const cals = new Map<string, CalendarData>();
@@ -213,7 +218,7 @@ export async function runEscalation(db: Db, tenantId: string, opts: { today?: st
   const out = { evaluated: 0, notified: 0, skipped: 0, quiet: 0 };
   if (!p.enabled) return out;
   const rows = await many(db, `${OPEN_BLOCKER_SQL} where b.resolved_at is null and t.status not in ('done','cancelled') order by b.raised_at`);
-  for (const { row: b, a } of await assessRows(db, rows, p, opts)) {
+  for (const { row: b, a, cal } of await assessRows(db, rows, p, opts)) {
     out.evaluated++;
     if (!a.actsToday) { if (a.todayStatus === 'leave') out.quiet++; continue; }
     const link = `/tasks/${b.task_id}`;
@@ -222,7 +227,9 @@ export async function runEscalation(db: Db, tenantId: string, opts: { today?: st
     const sentNow = new Set<string>();
     if (a.ownerReminderDue) {
       const key = a.ownerReminderDue.followUpDate;
-      const already = await one(db, `select 1 from notifications where user_id = $1 and kind = 'blocker_reminder' and link = $2 and created_at > now() - interval '20 hours'`, [b.owner_id, link]);
+      // "Today" is the owner's local calendar day (a rolling window would swallow the next day's follow-up reminder).
+      const dayStart = localDayBounds(cal.timezone, localToday(cal.timezone)).start;
+      const already = await one(db, `select 1 from notifications where user_id = $1 and kind = 'blocker_reminder' and link = $2 and created_at >= $3`, [b.owner_id, link, dayStart]);
       const inserted = await record(db, tenantId, b.id, 'owner', key, a.ageWorkingDays, already ? 'skipped' : 'notified', already ? 'Owner was already reminded today' : '', [b.owner_id]);
       if (inserted && !already) {
         await notify(db, tenantId, b.owner_id, 'blocker_reminder', `Follow up on blocker: ${b.task_title}`,
@@ -233,8 +240,8 @@ export async function runEscalation(db: Db, tenantId: string, opts: { today?: st
     for (const step of a.due) {
       let recipients: string[] = []; let note = '';
       if (step.level === 'waiting_on') {
-        const internal = b.waiting_on_user_id && b.waiting_on_status === 'active' && !(b.waiting_on_roles ?? []).includes('customer');
-        if (!internal) note = b.waiting_on_text ? `Waiting on someone outside the team (${b.waiting_on_text}); no one to notify in the app` : 'No internal person is named as waited on';
+        if (!waitsOnInternal(b)) note = b.waiting_on_user_id ? `${b.waiting_on_name ?? 'The person waited on'} is a client or no longer active; no one to notify in the app`
+          : b.waiting_on_text ? `Waiting on someone outside the team (${b.waiting_on_text}); no one to notify in the app` : 'No internal person is named as waited on';
         else if (b.waiting_on_user_id === b.owner_id) note = 'The owner is also the person waited on';
         else recipients = [b.waiting_on_user_id];
       } else if (step.level === 'manager') {
@@ -242,7 +249,8 @@ export async function runEscalation(db: Db, tenantId: string, opts: { today?: st
         if (!recipients.length) note = 'The owner is not in a team with a manager';
       } else {
         recipients = await adminsFor(db, { id: b.owner_id, is_founder: b.owner_is_founder }, t?.settings);
-        if (!recipients.length) note = 'No main admin other than the owner';
+        if (!recipients.length) note = b.owner_is_founder && t?.settings?.founders_visible_to_routine_admin === false
+          ? "Founders' records are not visible to main admins, and no other founder is a main admin" : 'No main admin other than the owner';
       }
       const outcome = recipients.length ? 'notified' : 'skipped';
       if (!(await record(db, tenantId, b.id, step.level, null, a.ageWorkingDays, outcome, note, recipients))) continue;
@@ -284,7 +292,7 @@ export async function nudgeBlocker(db: Db, a: Actor, blockerId: string, note: st
 }
 
 function nudgeUnavailable(bl: any, a: Actor): string | null {
-  if (!bl.waiting_on_user_id || bl.waiting_on_status !== 'active' || (bl.waiting_on_roles ?? []).includes('customer'))
+  if (!waitsOnInternal(bl))
     return 'This blocker is not waiting on a person in the app. Contact them directly, or set who it is waiting on.';
   if (bl.waiting_on_user_id === a.id) return 'This blocker is waiting on you.';
   return null;
@@ -330,16 +338,17 @@ export async function blockerAging(db: Db, a: Actor) {
   const company = has(a, 'routine_admin') || has(a, 'system_admin');
   if (!isStaff(a) || (!company && !a.managedUserIds.length)) throw forbidden('The blocker-aging view is for team managers and admins');
   const hideFounders = a.tenantSettings.founders_visible_to_routine_admin === false && !a.isFounder;
+  // Founder hiding narrows the company scope only; a manager always sees their own team (as in canViewPersonRecords).
   const rows = await many(db, `${OPEN_BLOCKER_SQL} where b.resolved_at is null and t.status not in ('done','cancelled')
-    and ($1::boolean or t.owner_id = any($2::uuid[])) and ($3::boolean = false or o.is_founder = false or t.owner_id = $4)
-    order by b.raised_at`, [company, [a.id, ...a.managedUserIds], hideFounders, a.id]);
+    and ($1::boolean or t.owner_id = any($2::uuid[])) and ($3::boolean = false or o.is_founder = false or t.owner_id = any($2::uuid[]))
+    order by b.raised_at`, [company, [a.id, ...a.managedUserIds], hideFounders]);
   const p = await loadPolicy(db, a.tenantId);
   const nudges = rows.length ? await many(db, `select blocker_id, count(*)::int n, max(created_at) last_at from blocker_nudges where blocker_id = any($1::uuid[]) group by blocker_id`,
     [rows.map((r) => r.id)]) : [];
   const nmap = new Map(nudges.map((n) => [n.blocker_id, n]));
   const items = (await assessRows(db, rows, p)).map(({ row: r, a: s }) => ({
     blockerId: r.id, taskId: r.task_id, taskNumber: r.task_number, taskTitle: r.task_title, ownerId: r.owner_id, ownerName: r.owner_name,
-    cause: r.cause, reason: r.reason, waitingOn: r.waiting_on_name || r.waiting_on_text || null, waitingOnInternal: !!r.waiting_on_user_id,
+    cause: r.cause, reason: r.reason, waitingOn: r.waiting_on_name || r.waiting_on_text || null, waitingOnInternal: waitsOnInternal(r),
     raisedAt: r.raised_at, raisedOn: s.raisedOn, ageWorkingDays: s.ageWorkingDays, level: s.currentLevel, nextFollowUp: r.next_follow_up,
     nextEscalation: p.enabled ? s.next : null, nudges: nmap.get(r.id)?.n ?? 0, lastNudgeAt: nmap.get(r.id)?.last_at ?? null,
   }));
