@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { Command } from 'cmdk';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,6 +9,8 @@ import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
 import { useMe, useRoles } from '../lib/session';
 import { QuickCapture } from './QuickCapture';
+import { PwaStatus } from './ext/PwaStatus';
+import { clearOfflineData, confirmSignOut, usePwa } from '../pwa';
 import { Avatar, IconButton, Kbd, StatusDot, cx } from './ui';
 
 type NavItem = { to: string; label: string; icon: ReactNode; show: boolean };
@@ -65,7 +67,7 @@ export function Shell() {
         <BrandMark />
         <div className="min-w-0"><div className="truncate text-[13px] font-semibold">{me.tenant.name}</div><div className="text-[11px] capitalize text-ink-3">{me.tenant.plan} plan</div></div>
       </div>
-      {!r.customer && <button onClick={() => setCapture(true)} className="mx-1 flex h-9 items-center gap-2 rounded-lg bg-accent px-3 text-sm font-medium text-on-accent shadow-sm hover:brightness-110">
+      {!r.customer && <button onClick={() => { setMobileNav(false); setCapture(true); }} className="mx-1 flex h-9 items-center gap-2 rounded-lg bg-accent px-3 text-sm font-medium text-on-accent shadow-sm hover:brightness-110">
         <Plus className="size-4" aria-hidden />Quick capture<span className="ml-auto"><Kbd>Q</Kbd></span></button>}
       {items.map((g) => {
         const vis = g.items.filter((i) => i.show);
@@ -85,7 +87,7 @@ export function Shell() {
           <Avatar name={me.user.name} size={26} /><div className="min-w-0"><div className="truncate text-[13px] font-medium">{me.user.name}</div><div className="truncate text-[11px] text-ink-3">{me.user.title || me.user.email}</div></div>
           <Settings className="ml-auto size-4 text-ink-3" aria-hidden />
         </NavLink>
-        <button onClick={async () => { await api.post('/api/auth/logout'); qc.clear(); nav('/login'); }} className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-2 hover:bg-surface-2">
+        <button onClick={async () => { if (!confirmSignOut()) return; try { await api.post('/api/auth/logout'); } catch { window.alert('Signing out needs a connection. Nothing was deleted; try again when you are back online.'); return; } await clearOfflineData(); qc.clear(); nav('/login'); }} className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-[13px] text-ink-2 hover:bg-surface-2">
           <LogOut className="size-4" aria-hidden />Sign out</button>
       </div>
     </nav>
@@ -93,7 +95,7 @@ export function Shell() {
   return (
     <div className="flex h-full">
       <aside className="hidden w-60 shrink-0 border-r border-line bg-surface lg:sticky lg:top-0 lg:block lg:h-screen">{sidebar}</aside>
-      {mobileNav && <div className="fixed inset-0 z-40 bg-black/30 lg:hidden" onClick={() => setMobileNav(false)}><aside className="h-full w-72 bg-surface shadow-2xl" onClick={(e) => e.stopPropagation()}>{sidebar}</aside></div>}
+      {mobileNav && <MobileDrawer onClose={() => setMobileNav(false)}>{sidebar}</MobileDrawer>}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-line bg-surface/90 px-3 backdrop-blur sm:px-5">
           <IconButton label="Open navigation" className="lg:hidden" onClick={() => setMobileNav(true)}><Menu className="size-5" /></IconButton>
@@ -110,11 +112,61 @@ export function Shell() {
             </div>
           </div>
         </header>
-        <main id="main" className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 pb-24 sm:px-6 lg:pb-8"><Outlet /></main>
+        <PwaStatus />
+        <main id="main" className={cx('mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 sm:px-6 lg:pb-8', r.customer ? 'pb-8' : 'pb-[calc(6rem+env(safe-area-inset-bottom))]')}><Outlet /></main>
       </div>
-      {!r.customer && <button aria-label="Quick capture" onClick={() => setCapture(true)} className="fixed bottom-5 right-5 z-30 flex size-14 items-center justify-center rounded-full bg-accent text-on-accent shadow-xl lg:hidden"><Plus className="size-6" /></button>}
+      {!r.customer && <BottomNav onCapture={() => setCapture(true)} onMore={() => setMobileNav(true)} moreOpen={mobileNav} />}
       <QuickCapture open={capture} onClose={() => setCapture(false)} defaults={{ addToMyDay: loc.pathname === '/' }} />
       <CommandPalette open={palette} onClose={() => setPalette(false)} onCapture={() => { setPalette(false); setCapture(true); }} />
+    </div>
+  );
+}
+
+/** Phone/tablet navigation (< 1024px): the four daily destinations plus capture, above the home indicator. */
+function BottomNav({ onCapture, onMore, moreOpen }: { onCapture: () => void; onMore: () => void; moreOpen: boolean }) {
+  const waiting = usePwa().items.length;
+  const tab = 'flex h-full flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-medium focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent';
+  const link = (to: string, label: string, icon: ReactNode) => (
+    <li><NavLink to={to} end={to === '/'} className={({ isActive }) => cx(tab, isActive ? 'text-accent-ink' : 'text-ink-3 hover:text-ink')}>
+      {({ isActive }) => <><span className={cx('flex h-7 w-12 items-center justify-center rounded-full', isActive && 'bg-accent-soft')}>{icon}</span>{label}</>}</NavLink></li>
+  );
+  return (
+    <nav aria-label="Mobile" className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
+      <ul className="mx-auto grid h-16 max-w-lg grid-cols-5 px-1 py-1">
+        {link('/', 'My Day', <CalendarCheck2 className="size-5" aria-hidden />)}
+        {link('/tasks', 'Tasks', <ListChecks className="size-5" aria-hidden />)}
+        <li><button type="button" aria-label="Quick capture" onClick={onCapture} className={cx(tab, 'w-full text-ink-2')}>
+          <span className="relative flex size-9 items-center justify-center rounded-full bg-accent text-on-accent shadow-md"><Plus className="size-5" aria-hidden />
+            {waiting > 0 && <span aria-hidden className="absolute -right-1.5 -top-1 min-w-4 rounded-full bg-surface px-1 text-center text-[10px] font-semibold leading-4 text-accent-ink ring-1 ring-accent">{waiting}</span>}</span>
+          Capture</button></li>
+        {link('/recap', 'Recap', <ClipboardList className="size-5" aria-hidden />)}
+        <li><button type="button" onClick={onMore} aria-haspopup="dialog" aria-expanded={moreOpen} className={cx(tab, 'w-full text-ink-3 hover:text-ink')}>
+          <span className="flex h-7 w-12 items-center justify-center"><Menu className="size-5" aria-hidden /></span>More</button></li>
+      </ul>
+    </nav>
+  );
+}
+
+/** The full navigation as a modal panel on phones and tablets (from More or the menu button): focus moves in, stays in, Escape closes, focus returns. */
+function MobileDrawer({ onClose, children }: { onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null;
+    (ref.current?.querySelector<HTMLElement>('a[aria-current="page"]') ?? ref.current?.querySelector<HTMLElement>('a, button'))?.focus();
+    const h = (e: KeyboardEvent) => {
+      if (document.querySelectorAll('[aria-modal="true"]').length > 1) return; // a dialog opened on top (e.g. quick capture) handles its own keys
+      if (e.key === 'Escape') { onClose(); return; }
+      const f = ref.current ? [...ref.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')] : [];
+      if (e.key !== 'Tab' || !f.length) return;
+      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    };
+    window.addEventListener('keydown', h);
+    return () => { window.removeEventListener('keydown', h); if (prev?.isConnected) prev.focus(); };
+  }, []);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/30 lg:hidden" onClick={onClose}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-label="Navigation" className="h-full w-72 max-w-[85vw] bg-surface pb-[env(safe-area-inset-bottom)] shadow-2xl" onClick={(e) => e.stopPropagation()}>{children}</div>
     </div>
   );
 }

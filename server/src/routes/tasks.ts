@@ -10,6 +10,7 @@ import { CATEGORIES, PRIORITIES, STATUSES, createTask, parseQuickCapture, reassi
 import { setPlan } from '../services/myday.js';
 import { localToday } from '../services/calendar.js';
 import { notify } from '../services/notify.js';
+import { findClientRequest, stampClientRequest } from '../services/ext/pwa.js';
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -22,6 +23,7 @@ const createSchema = z.object({
   reviewerId: uuid.nullable().optional(), customerVisible: z.boolean().optional(), collaboratorIds: z.array(uuid).max(20).optional(),
   checklist: z.array(z.string().max(300)).max(50).optional(), addToMyDay: z.boolean().optional(), sourceType: z.enum(['manual', 'quick_capture', 'ai_draft']).optional(),
   captureMs: z.number().int().min(0).max(600000).optional(),
+  clientRequestId: z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/).optional(),
 });
 
 export async function taskRoutes(app: FastifyInstance) {
@@ -85,7 +87,10 @@ export async function taskRoutes(app: FastifyInstance) {
 
   app.post('/api/tasks', async (req) => tx(req, async (db, a) => {
     const b = createSchema.parse(req.body);
+    // Idempotent per (tenant, creator, clientRequestId): a retried capture returns the task it already created.
+    if (b.clientRequestId) { const prior = await findClientRequest(db, a, b.clientRequestId); if (prior) return { ...prior, replayed: true }; }
     const r = await createTask(db, a, a.tenantId, { ...b, sourceType: b.sourceType ?? 'manual' }, { correlationId: req.id });
+    if (b.clientRequestId) await stampClientRequest(db, r.task.id, b.clientRequestId);
     if (b.addToMyDay) {
       const today = localToday(a.timezone);
       const plan = await one(db, `select dp.id, (select array_agg(task_id order by position) from daily_plan_items where plan_id = dp.id and removed_at is null) ids

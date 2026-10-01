@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Offline · Task Tracking & Productivity</title>
+  <link rel="icon" href="/icons/icon-192.png" />
+  <style>
+    /* Same design tokens as web/src/index.css (this page must work without the app bundle). */
+    :root { color-scheme: light; --bg: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #6f6d68; --line: #e1e0d9;
+      --accent: #256abf; --on-accent: #ffffff; --accent-soft: #e6f0fc; --accent-ink: #1c5cab; }
+    @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #a3a29a;
+      --line: #2c2c2a; --accent-soft: #16263b; --accent-ink: #86b6ef; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--ink);
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 28px 24px; text-align: center; }
+    img { width: 56px; height: 56px; border-radius: 14px; }
+    h1 { font-size: 20px; margin: 16px 0 6px; }
+    p { margin: 0 0 12px; color: var(--ink-2); }
+    #waiting { display: none; background: var(--accent-soft); color: var(--accent-ink); border-radius: 10px; padding: 8px 12px; font-weight: 600; font-size: 14px; }
+    button { margin-top: 8px; height: 40px; padding: 0 18px; border: 0; border-radius: 10px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    small { display: block; margin-top: 14px; color: var(--ink-3); font-size: 12px; }
+    form { margin: 4px 0 12px; text-align: left; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    input { width: 100%; height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); font: inherit; }
+    input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    form button { width: 100%; }
+    .secondary { background: transparent; color: var(--accent-ink); }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="/icons/icon-192.png" alt="" />
+    <h1>You're offline</h1>
+    <p>This page needs a connection. Nothing is lost: quick captures saved on this device sync automatically once you're back online and the app is open.</p>
+    <form id="capture" hidden>
+      <label for="qc">Capture a task to create when you're back online</label>
+      <input id="qc" maxlength="500" autocomplete="off" required placeholder="Call courier about pickup tomorrow 15m" />
+      <button type="submit">Save on this device</button>
+    </form>
+    <p id="waiting" role="status" aria-live="polite"></p>
+    <button type="button" id="retry" class="secondary">Try again</button>
+    <small>Only the text of your captures is kept on this device until it syncs. Signing out deletes it.</small>
+  </main>
+  <script>
+    document.getElementById('retry').addEventListener('click', () => location.reload());
+    addEventListener('online', () => location.reload());
+    // Captures queue in the same on-device outbox the app uses, for the person last signed in here (cleared on sign-out).
+    // Shortcuts like "today" are resolved by the server against the moment of capture when the app syncs.
+    let user = null;
+    try { user = localStorage.getItem('tt-outbox-user'); } catch (e) { /* storage blocked */ }
+    const newId = () => { try { return crypto.randomUUID(); } catch (e) { return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12); } };
+    try {
+      const r = indexedDB.open('tt-offline', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('captures', { keyPath: 'clientRequestId' });
+      r.onsuccess = () => {
+        const db = r.result;
+        const el = document.getElementById('waiting');
+        const show = (note) => {
+          const g = db.transaction('captures', 'readonly').objectStore('captures').getAll();
+          g.onsuccess = () => {
+            const n = g.result.filter((i) => i.userId === user).length;
+            el.textContent = (note ? note + ' ' : '') + (n ? (n === 1 ? '1 capture waiting to sync' : n + ' captures waiting to sync') : '');
+            el.style.display = el.textContent ? 'block' : 'none';
+          };
+        };
+        show('');
+        if (!user) return;
+        const form = document.getElementById('capture'); const input = document.getElementById('qc');
+        form.hidden = false;
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const text = input.value.trim(); if (!text) { input.focus(); return; }
+          const t = db.transaction('captures', 'readwrite');
+          t.objectStore('captures').put({ clientRequestId: newId(), userId: user, text, projectId: null, addToMyDay: false, capturedAt: new Date().toISOString(), status: 'pending' });
+          t.oncomplete = () => { input.value = ''; input.focus(); show('Saved on this device.'); };
+          t.onerror = () => show('This browser could not store the capture.');
+        });
+      };
+    } catch (e) { /* storage unavailable */ }
+  </script>
+</body>
+</html>
