@@ -10,7 +10,7 @@ const applied = await migrate();
 if (applied.length) log.info({ applied }, 'migrations applied');
 registerJobs();
 const app = await buildApp();
-await app.listen({ port: config.port, host: '127.0.0.1' });
+await app.listen({ port: config.port, host: config.host });
 log.info({ port: config.port }, 'API listening');
 if (process.env.WORKER !== '0') {
   startWorker();

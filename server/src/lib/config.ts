@@ -22,6 +22,9 @@ export const config = {
   encryptionKey: Buffer.from(req('APP_ENCRYPTION_KEY'), 'hex'),
   storageDir: resolve(process.cwd(), process.env.STORAGE_DIR || '.data/storage'),
   port: Number(process.env.PORT || 4300),
+  host: process.env.HOST || '127.0.0.1',
+  // Behind a reverse proxy: hop count (e.g. 1) or comma-separated proxy IPs/CIDRs. Unset trusts no proxy.
+  trustProxy: /^\d+$/.test(process.env.TRUST_PROXY ?? '') ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY || false,
   publicUrl: process.env.PUBLIC_URL || 'http://localhost:5173',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 168),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',

@@ -39,7 +39,7 @@ export function tx<T>(req: FastifyRequest, fn: (db: Db, a: Actor) => Promise<T>)
 }
 
 export async function buildApp() {
-  const app = Fastify({ logger: false, bodyLimit: 6 * 1024 * 1024, trustProxy: false, genReqId: () => crypto.randomUUID() });
+  const app = Fastify({ logger: false, bodyLimit: 6 * 1024 * 1024, trustProxy: config.trustProxy, genReqId: () => crypto.randomUUID() });
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
   await app.register(rateLimit, { global: false });
