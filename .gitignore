@@ -7,3 +7,8 @@ playwright-report/
 *.log
 .DS_Store
 .worktrees/
+.env.*
+!.env.example
+!.env.production.example
+.deploy/
+backups/

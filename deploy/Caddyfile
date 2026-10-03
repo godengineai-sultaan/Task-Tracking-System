@@ -1,0 +1,44 @@
+# Reverse proxy for the Task Tracking stack. Values come from the compose env (see .env.production.example):
+#   SITE_ADDRESS           e.g. app.example.com (public name) or localhost (drills)
+#   CADDY_TLS              an e-mail address  -> automatic Let's Encrypt/ZeroSSL certificate (DNS-only / grey-cloud record)
+#                          /certs/origin.pem /certs/origin.key -> Cloudflare Origin CA certificate (orange-cloud, SSL mode Full (strict))
+#                          internal           -> Caddy's local CA (drills on a laptop only)
+#   CADDY_TRUSTED_PROXIES  proxies whose client-IP headers are believed: Cloudflare's published ranges when proxied
+#                          (https://www.cloudflare.com/ips/), otherwise leave the default (nothing upstream is trusted)
+#   HSTS                   Strict-Transport-Security value (max-age=0 for drills)
+{
+	servers {
+		trusted_proxies static {$CADDY_TRUSTED_PROXIES:127.0.0.1/32}
+		client_ip_headers CF-Connecting-IP X-Forwarded-For
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+{$SITE_ADDRESS} {
+	tls {$CADDY_TLS:internal}
+	encode zstd gzip
+	request_body {
+		# The API caps JSON at 6 MB and uploads at 15 MB; reject anything larger at the edge.
+		max_size 16MB
+	}
+	header {
+		Strict-Transport-Security "{$HSTS:max-age=31536000}"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	reverse_proxy app:4300 {
+		# The API trusts X-Forwarded-For only from private addresses (TRUST_PROXY=uniquelocal): send the client IP Caddy resolved.
+		header_up X-Forwarded-For {client_ip}
+		# Hold requests up to 20 s while the API container is being replaced, instead of failing them.
+		lb_try_duration 20s
+		lb_try_interval 250ms
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 60s
+		}
+	}
+	log
+}

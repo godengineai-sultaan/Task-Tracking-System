@@ -1,0 +1,77 @@
+# CI: install -> typecheck -> unit/integration tests (vitest on PostgreSQL 18) -> web build -> production image build -> e2e.
+# Deploys (deploy.yml) call this workflow first, so a commit that fails here is never deployed.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      # Tests drive a project-local cluster through scripts/db.sh (superuser over the /tmp socket), exactly as on a
+      # developer machine, so PostgreSQL 18 is installed on the runner rather than run as a service container.
+      - name: Install PostgreSQL 18
+        run: |
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      - run: npm ci --no-audit --no-fund
+      - name: Throwaway .env and project database
+        run: |
+          cp .env.example .env
+          sed -i -e "s/change-me-owner/$(openssl rand -hex 16)/g" -e "s/change-me-app/$(openssl rand -hex 16)/g" \
+                 -e "s/^APP_ENCRYPTION_KEY=.*/APP_ENCRYPTION_KEY=$(openssl rand -hex 32)/" .env
+          bash scripts/db.sh init
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run build
+      - name: Production image builds
+        run: docker build --build-arg GIT_SHA="${GITHUB_SHA::12}" -t "taskapp:${GITHUB_SHA::12}" .
+
+  e2e:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install PostgreSQL 18
+        run: |
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - name: Throwaway .env and project database
+        run: |
+          cp .env.example .env
+          sed -i -e "s/change-me-owner/$(openssl rand -hex 16)/g" -e "s/change-me-app/$(openssl rand -hex 16)/g" \
+                 -e "s/^APP_ENCRYPTION_KEY=.*/APP_ENCRYPTION_KEY=$(openssl rand -hex 32)/" .env
+          bash scripts/db.sh init
+      - name: Playwright
+        run: set -a && . ./.env && set +a && npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7

@@ -4,7 +4,7 @@ import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import fstatic from '@fastify/static';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { ZodError } from 'zod';
 import { config } from './lib/config.js';
 import { AppError, unauthorized } from './lib/errors.js';
@@ -26,7 +26,7 @@ declare module 'fastify' {
 }
 
 export const SESSION_COOKIE = 'tt_sid';
-const PUBLIC = [/^\/api\/auth\/(login|mfa|logout|signup)$/, /^\/api\/join\//, /^\/api\/inbound\//, /^\/api\/health$/, /^\/api\/tenants\/[^/]+\/public$/];
+const PUBLIC = [/^\/api\/auth\/(login|mfa|logout|signup)$/, /^\/api\/join\//, /^\/api\/inbound\//, /^\/api\/health(\/(live|ready))?$/, /^\/api\/tenants\/[^/]+\/public$/];
 
 export function actorOf(req: FastifyRequest): Actor {
   if (!req.actor) throw unauthorized();
@@ -39,7 +39,8 @@ export function tx<T>(req: FastifyRequest, fn: (db: Db, a: Actor) => Promise<T>)
 }
 
 export async function buildApp() {
-  const app = Fastify({ logger: false, bodyLimit: 6 * 1024 * 1024, trustProxy: false, genReqId: () => crypto.randomUUID() });
+  // trustProxy (TRUST_PROXY) is a boolean, hop count or CIDR list; the cast only selects Fastify's HTTP/1 typing overload.
+  const app = Fastify({ logger: false, bodyLimit: 6 * 1024 * 1024, trustProxy: config.trustProxy as boolean, genReqId: () => crypto.randomUUID() });
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
   await app.register(rateLimit, { global: false });
@@ -97,6 +98,11 @@ export async function buildApp() {
       from jobs where status in ('queued','dead')`));
     return { ok: true, db: !!db, queue: q };
   });
+  // Container probes. live: the process serves HTTP. ready: it can also reach the database. Neither exposes configuration.
+  app.get('/api/health/live', async () => ({ ok: true }));
+  app.get('/api/health/ready', async (_req, reply) => {
+    try { await withSystem((db) => db.query('select 1')); return { ok: true }; } catch { return reply.status(503).send({ ok: false, db: false }); }
+  });
 
   await app.register(authRoutes);
   await app.register(taskRoutes);
@@ -109,7 +115,10 @@ export async function buildApp() {
 
   const dist = resolve(process.cwd(), 'dist');
   if (existsSync(dist)) {
-    await app.register(fstatic, { root: dist, wildcard: false });
+    // Vite content-hashes everything under /assets: cache for a year. index.html, sw.js, manifest and icons must revalidate.
+    await app.register(fstatic, { root: dist, wildcard: false, setHeaders: (reply, path) => {
+      reply.header('cache-control', path.includes(`${sep}assets${sep}`) ? 'public, max-age=31536000, immutable' : 'no-cache');
+    } });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.status(404).send({ error: 'not_found', message: 'Not found' });
       return reply.sendFile('index.html');

@@ -1,0 +1,3 @@
+# Place a Cloudflare Origin CA certificate here as origin.pem + origin.key (never committed).
+*
+!.gitignore

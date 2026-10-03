@@ -1,0 +1,23 @@
+# Keep the build context small and free of secrets, local data and dev artefacts.
+**/node_modules
+.git
+.worktrees
+.data
+dist
+backups
+.deploy
+.env
+.env.*
+**/*.pem
+**/*.key
+test-results
+playwright-report
+e2e
+tests
+docs
+*.md
+.github
+.claude
+scripts
+deploy
+!deploy/healthcheck.mjs

@@ -65,13 +65,18 @@ export async function runOneJob(): Promise<boolean> {
 }
 
 let timer: NodeJS.Timeout | null = null;
+let busy = false;
 export function startWorker(intervalMs = 1000) {
-  let busy = false;
   timer = setInterval(async () => {
-    if (busy) return; busy = true;
-    try { while (await runOneJob()) { /* drain */ } } catch (e: any) { log.error({ err: e?.message }, 'worker loop error'); }
+    if (busy || !timer) return; busy = true;
+    try { while (timer && await runOneJob()) { /* drain */ } } catch (e: any) { log.error({ err: e?.message }, 'worker loop error'); }
     finally { busy = false; }
   }, intervalMs);
 }
-export function stopWorker() { if (timer) clearInterval(timer); timer = null; }
+/** Stop claiming jobs and wait (bounded) for the job in flight, so a deploy restart does not strand it for the 10-minute lock timeout. */
+export async function stopWorker(maxWaitMs = 20000) {
+  if (timer) clearInterval(timer);
+  timer = null;
+  for (const until = Date.now() + maxWaitMs; busy && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
+}
 export async function drainJobs(max = 100) { let n = 0; while (n < max && (await runOneJob())) n++; return n; }

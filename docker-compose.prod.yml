@@ -1,0 +1,143 @@
+# Production stack: Caddy (only public service) -> API -> Postgres, plus the job worker/scheduler.
+# Run through deploy/deploy.sh, or directly:
+#   docker compose -p taskapp -f docker-compose.prod.yml --env-file .env.production up -d
+# Secrets live only in the --env-file (never committed); each service receives just the variables it needs.
+name: taskapp
+
+x-app-env: &app-env
+  NODE_ENV: production
+  APP_ENV: ${APP_ENV:-production}
+  HOST: 0.0.0.0
+  PORT: "4300"
+  STORAGE_DIR: /data/storage
+  DATABASE_URL: postgres://taskapp:${PG_APP_PASSWORD:?set PG_APP_PASSWORD}@db:5432/taskapp
+  MIGRATION_DATABASE_URL: postgres://taskapp_owner:${PG_OWNER_PASSWORD:?set PG_OWNER_PASSWORD}@db:5432/taskapp
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY}
+  PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+  LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+  ALLOW_SIGNUP: ${ALLOW_SIGNUP:-0}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
+
+x-app: &app
+  image: ${IMAGE_NAME:-taskapp}:${IMAGE_TAG:-latest}
+  build:
+    context: .
+    args:
+      GIT_SHA: ${IMAGE_TAG:-unknown}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+    - /app/.data:size=16m,uid=1000,gid=1000
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  volumes:
+    - storage:/data/storage
+  depends_on:
+    db:
+      condition: service_healthy
+  logging: &logging
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  caddy:
+    image: caddy:2.11.6-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS}
+      CADDY_TLS: ${CADDY_TLS:-internal}
+      CADDY_TRUSTED_PROXIES: ${CADDY_TRUSTED_PROXIES:-127.0.0.1/32}
+      HSTS: ${HSTS:-max-age=31536000}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CADDY_CERTS_DIR:-./deploy/certs}:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on: [app]
+    mem_limit: 128m
+    logging: *logging
+
+  app:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: api
+      # Only Caddy (on the private Docker network) can reach the API; trust X-Forwarded-For from private addresses only.
+      TRUST_PROXY: uniquelocal
+      PG_POOL_MAX: ${API_PG_POOL_MAX:-20}
+      NODE_OPTIONS: --max-old-space-size=${API_HEAP_MB:-384}
+    expose: ["4300"]
+    networks: [edge, internal]
+    stop_grace_period: 20s
+    mem_limit: ${API_MEM_LIMIT:-768m}
+    cpus: ${API_CPUS:-2}
+
+  worker:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: worker
+      PG_POOL_MAX: ${WORKER_PG_POOL_MAX:-6}
+      NODE_OPTIONS: --max-old-space-size=${WORKER_HEAP_MB:-384}
+    # internal: database; egress: outbound HTTPS for optional AI drafting. No published or exposed ports.
+    networks: [internal, egress]
+    stop_grace_period: 30s
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
+    cpus: ${WORKER_CPUS:-1}
+
+  db:
+    image: postgres:18-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PG_OWNER_PASSWORD: ${PG_OWNER_PASSWORD}
+      PG_APP_PASSWORD: ${PG_APP_PASSWORD}
+    # Sized for a small (4-8 GB) server; see docs/deployment-audit/07_DOCKER_PRODUCTION_PLAN.md before changing.
+    command: >-
+      postgres
+      -c shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}
+      -c work_mem=${PG_WORK_MEM:-8MB}
+      -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}
+      -c max_connections=${PG_MAX_CONNECTIONS:-60}
+      -c random_page_cost=1.1
+      -c checkpoint_completion_target=0.9
+      -c wal_compression=on
+      -c idle_in_transaction_session_timeout=60s
+      -c log_min_duration_statement=500ms
+      -c log_lock_waits=on
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./deploy/postgres/initdb.sh:/docker-entrypoint-initdb.d/10-taskapp.sh:ro
+    networks: [internal]
+    shm_size: 256m
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d taskapp"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: ${DB_MEM_LIMIT:-1536m}
+    logging: *logging
+
+networks:
+  edge: {}
+  egress: {}
+  internal:
+    internal: true
+
+volumes:
+  pgdata: {}
+  storage: {}
+  caddy_data: {}
+  caddy_config: {}

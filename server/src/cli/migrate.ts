@@ -8,6 +8,8 @@ export async function migrate(ownerUrl = process.env.MIGRATION_DATABASE_URL!) {
   const client = new pg.Client({ connectionString: ownerUrl });
   await client.connect();
   try {
+    // Serialize concurrent migrators (api and worker containers starting together, or a one-off deploy step).
+    await client.query('select pg_advisory_lock(7415002)');
     await client.query('create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())');
     const done = new Set((await client.query('select name from schema_migrations')).rows.map((r) => r.name));
     const dir = resolve(import.meta.dirname, '../../migrations');

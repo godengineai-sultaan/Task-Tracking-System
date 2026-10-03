@@ -1,0 +1,51 @@
+# Manual production deploy of the commit this workflow is run on (choose the branch in "Run workflow").
+# Runs the full CI first; then SSHes to the server as the deploy user and runs deploy/deploy.sh, which builds the
+# image, backs up, migrates, swaps api + worker, health-checks, smoke-tests and rolls back automatically on failure.
+#
+# Repository (or "production" environment) secrets - names only, values never committed:
+#   DEPLOY_HOST          server hostname or IP
+#   DEPLOY_PORT          SSH port (optional, default 22)
+#   DEPLOY_USER          unprivileged deploy user (member of the docker group)
+#   DEPLOY_SSH_KEY       private key for DEPLOY_USER (dedicated to CI, no passphrase)
+#   DEPLOY_KNOWN_HOSTS   output of: ssh-keyscan -p <port> <host>  (pins the server's host key)
+#   DEPLOY_PATH          checkout directory on the server, e.g. /srv/taskapp/app
+name: Deploy
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Deploy ${{ github.sha }}
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          DIR: ${{ secrets.DEPLOY_PATH }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${PORT:-22}" -o StrictHostKeyChecking=yes -o BatchMode=yes "$USER_NAME@$HOST" \
+            "set -e; cd '$DIR'; git fetch --quiet origin; git checkout --quiet --detach '$SHA'; deploy/deploy.sh '${SHA::12}'"
+      - name: Remove key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
