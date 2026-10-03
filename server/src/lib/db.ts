@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from './config.js';
+import { log } from './log.js';
 
 // DATE columns stay as 'YYYY-MM-DD' strings; never shift them through JS Date timezones.
 pg.types.setTypeParser(1082, (v) => v);
@@ -18,6 +19,9 @@ export function pools(urls?: { app: string; owner: string }) {
   }
   appPool ??= new pg.Pool({ connectionString: config.databaseUrl, max: Number(process.env.PG_POOL_MAX || 20) });
   ownerPool ??= new pg.Pool({ connectionString: config.migrationDatabaseUrl, max: 4 });
+  // A database restart terminates idle pooled connections; without a listener that 'error' event crashes the process.
+  // The pool discards the dead client and opens a new one on the next query.
+  for (const p of [appPool, ownerPool]) if (!p.listenerCount('error')) p.on('error', (e) => log.warn({ err: e.message }, 'idle database connection lost'));
   return { app: appPool, owner: ownerPool };
 }
 

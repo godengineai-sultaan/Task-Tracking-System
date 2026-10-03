@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { getApp } from './helpers.js';
 import { productionConfigProblems } from '../server/src/lib/config.js';
 import { isSchedulerLeader, releaseLeader } from '../server/src/lib/leader.js';
+import { pools } from '../server/src/lib/db.js';
 
 const good = {
   APP_ENCRYPTION_KEY: '3f'.repeat(32),
@@ -52,5 +53,20 @@ describe('scheduler leader election', () => {
       expect(await tryLock()).toBe(true); // the next replica can
       expect(await isSchedulerLeader()).toBe(false);
     } finally { await other.end(); await releaseLeader(); }
+  });
+});
+
+describe('database restarts', () => {
+  it('an idle pooled connection terminated by the server does not crash the process', async () => {
+    const { app } = pools();
+    const c = await app.connect();
+    const pid = (await c.query('select pg_backend_pid() pid')).rows[0].pid;
+    c.release();
+    const other = new pg.Client({ connectionString: process.env.DATABASE_URL });
+    await other.connect();
+    await other.query('select pg_terminate_backend($1)', [pid]); // what a Postgres restart does to every idle connection
+    await other.end();
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await app.query('select 1 as ok')).rows[0].ok).toBe(1);
   });
 });
