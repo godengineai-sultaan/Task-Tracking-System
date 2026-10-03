@@ -63,7 +63,8 @@ services:
       - caddy_config:/config
     networks: [edge]
     depends_on: [app]
-    mem_limit: 128m
+    # Measured 76 MiB at 600 req/s through TLS (docs/deployment-audit/07_DOCKER_PRODUCTION_PLAN.md).
+    mem_limit: 256m
     logging: *logging
 
   app:
@@ -122,7 +123,7 @@ services:
     shm_size: 256m
     stop_grace_period: 60s
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d taskapp"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U taskapp -d taskapp"]
       interval: 10s
       timeout: 5s
       retries: 10
