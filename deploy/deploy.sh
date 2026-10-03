@@ -10,8 +10,6 @@ log() { echo "[deploy $(date -u +%FT%TZ)] $*"; }
 NEW=${1:-$(git rev-parse --short=12 HEAD)}
 PREV=$(cat .deploy/current 2>/dev/null || true)
 SMOKE_URL=${SMOKE_URL:-$(envval PUBLIC_URL)}
-# Optional sign-in check account for the smoke test (dedicated, low privilege; kept in the env file, never printed).
-for v in SMOKE_ORG SMOKE_EMAIL SMOKE_PASSWORD; do [ -n "${!v:-}" ] || export "$v=$(envval "$v")"; done
 
 if [ -n "$IMAGE_REGISTRY" ]; then
   log "pulling $IMAGE_NAME:$NEW"; IMAGE_TAG=$NEW compose pull app worker

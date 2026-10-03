@@ -1,10 +1,16 @@
 #!/bin/bash
 # Post-deploy smoke test through the public entry point (Caddy / Cloudflare).
 # Usage: deploy/smoke-test.sh https://app.example.com
-# Optional sign-in check with a dedicated low-privilege account: SMOKE_ORG, SMOKE_EMAIL, SMOKE_PASSWORD (env only).
+# Optional sign-in check with a dedicated low-privilege account: SMOKE_ORG, SMOKE_EMAIL, SMOKE_PASSWORD
+# (environment, or the env file: $ENV_FILE / .env.production).
 # SMOKE_INSECURE=1 accepts a self-signed certificate (local drills only). Exit status 1 if any check fails.
 set -euo pipefail
 BASE=${1:?usage: smoke-test.sh <base-url>}; BASE=${BASE%/}
+# Sign-in account: from the environment, else from the production env file (values are never printed).
+ENVF=${ENV_FILE:-$(dirname "$0")/../.env.production}
+if [ -z "${SMOKE_EMAIL:-}" ] && [ -f "$ENVF" ]; then
+  for v in SMOKE_ORG SMOKE_EMAIL SMOKE_PASSWORD; do export "$v=$(sed -n "s/^$v=//p" "$ENVF" | tail -1)"; done
+fi
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 CURL=(curl -sS --max-time 20 -o "$TMP/body" -D "$TMP/head" -w '%{http_code}')
 [ "${SMOKE_INSECURE:-0}" = 1 ] && CURL+=(-k)
