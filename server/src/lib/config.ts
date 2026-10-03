@@ -24,7 +24,10 @@ export const config = {
   port: Number(process.env.PORT || 4300),
   host: process.env.HOST || '127.0.0.1',
   // Behind a reverse proxy: hop count (e.g. 1) or comma-separated proxy IPs/CIDRs. Unset trusts no proxy.
-  trustProxy: /^\d+$/.test(process.env.TRUST_PROXY ?? '') ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY || false,
+  // A hop count must be a function: Fastify 5 silently ignores a numeric trustProxy.
+  trustProxy: /^\d+$/.test(process.env.TRUST_PROXY ?? '')
+    ? (_addr: string, hop: number) => hop < Number(process.env.TRUST_PROXY)
+    : process.env.TRUST_PROXY || false,
   publicUrl: process.env.PUBLIC_URL || 'http://localhost:5173',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 168),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
